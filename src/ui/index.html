@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>quick-studio</title>
+    <!--
+      NOTE: the Core serves its own copy of this shell at runtime with the
+      per-boot token injected as `window.__QS_TOKEN__` (see src/core/server.ts).
+      This file documents the intended markup and is the bundler-friendly source.
+    -->
+    <script>window.__QS_TOKEN__ = window.__QS_TOKEN__ || "";</script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -1,2 +1,16 @@
 .bmad-loop/runs/
 .bmad-loop/cache/
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
