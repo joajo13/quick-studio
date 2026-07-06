@@ -245,6 +245,19 @@ export type ShutdownResult = {
 };
 
 /**
+ * Boot-time port-exposure state, handed to the UI via the `window.__QS_EXPOSURE__`
+ * global (NOT an RPC — it is known at boot and static for the session). When
+ * `exposed` is true the server bound a non-loopback address, so the UI renders
+ * the Port-Exposure Warning banner. `host`/`port` name the bound authority so
+ * the banner's revert copy can be composed in the UI.
+ */
+export type ExposureInfo = {
+  readonly exposed: boolean;
+  readonly host: string;
+  readonly port: number;
+};
+
+/**
  * A discriminated RPC reply: either a typed OK result or the error envelope.
  * `T` is the method's typed result payload.
  */

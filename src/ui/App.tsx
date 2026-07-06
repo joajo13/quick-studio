@@ -10,6 +10,7 @@
 
 import { useEffect, useReducer, useState } from "react";
 import type {
+  ExposureInfo,
   HealthResult,
   RpcErrorEnvelope,
   RpcReply,
@@ -28,6 +29,7 @@ import {
 declare global {
   interface Window {
     __QS_TOKEN__?: string;
+    __QS_EXPOSURE__?: ExposureInfo;
   }
 }
 
@@ -178,6 +180,10 @@ export function App(): React.JSX.Element {
     void callShutdown().then((s) => setStatus(s));
   };
 
+  // Exposure state is injected at boot (static for the session), so read it once
+  // straight from the global rather than round-tripping an RPC.
+  const exposure = window.__QS_EXPOSURE__;
+
   return (
     <div className="h-full">
       <Workspace
@@ -188,6 +194,7 @@ export function App(): React.JSX.Element {
         onStop={onStop}
         stopping={stopping}
         connectionIndicator={<ConnectionIndicator status={status} />}
+        exposure={exposure}
       />
     </div>
   );

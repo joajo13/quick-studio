@@ -9,6 +9,8 @@
  * the process — never logged, never persisted.
  */
 
+import { isWildcardHost } from "./binding.ts";
+
 /** Number of random bytes in the session token (256 bits). */
 const TOKEN_BYTES = 32;
 
@@ -67,7 +69,20 @@ export function validateToken(
  *  - `Host` is exactly `<boundHost>:<boundPort>`.
  *
  * `localhost` and `127.0.0.1` are treated as DISTINCT origins — an exact string
- * match is required. The bound host in this story is always `127.0.0.1`.
+ * match is required for a concrete bind host, which fully pins the authority and
+ * so blocks DNS-rebinding (a rebinding page's `Host` never matches the bound IP).
+ *
+ * Wildcard exception (`0.0.0.0` / `::`): when the server binds a wildcard the
+ * concrete reachable authority is unknowable (browsers reach it as `localhost`
+ * or a LAN IP, never as `0.0.0.0`), so pinning to `${boundHost}:${boundPort}`
+ * would 403 every RPC. The pinned *hostname* is therefore relaxed to a port-match
+ * plus an Origin==Host same-origin check. IMPORTANT: this degraded gate blocks
+ * plain cross-origin requests (`Origin` differs from `Host`) but does NOT stop a
+ * DNS-rebinding attack, where the attacker controls both headers so `Origin ==
+ * Host == attacker-authority` and this check passes. In wildcard/exposed mode the
+ * SESSION TOKEN is the sole real boundary (per AD-12: loopback is not the auth
+ * boundary, the token is) — the user explicitly opted into exposure with a loud
+ * warning. Do not treat this predicate as rebinding protection for wildcard binds.
  */
 export function validateOrigin(
   originHeader: string | null | undefined,
@@ -75,6 +90,20 @@ export function validateOrigin(
   boundHost: string,
   boundPort: number,
 ): boolean {
+  // Wildcard bind: relax the hostname to a port-match + Origin==Host same-origin
+  // check. Port is the segment after the LAST colon so bracketed IPv6 authorities
+  // (`[::1]:<port>`) parse correctly rather than splitting on the address colons.
+  if (isWildcardHost(boundHost)) {
+    if (typeof hostHeader !== "string") return false;
+    const lastColon = hostHeader.lastIndexOf(":");
+    const portStr = lastColon === -1 ? "" : hostHeader.slice(lastColon + 1);
+    if (portStr !== String(boundPort)) return false;
+    if (originHeader === null || originHeader === undefined || originHeader === "") {
+      return true;
+    }
+    return originHeader === `http://${hostHeader}`;
+  }
+
   const expectedAuthority = `${boundHost}:${boundPort}`;
 
   // Host must exactly match the bound authority.

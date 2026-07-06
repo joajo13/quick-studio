@@ -2,9 +2,11 @@
 /**
  * quick-studio — CLI entry (walking skeleton).
  *
- * Boots the Trusted Core and logs the bound loopback URL to stderr. CLI mode
- * parsing (Ephemeral vs Persistent) and browser-open land in story 1.2 — not
- * here. Logging is terse and to stderr only; the token is NEVER logged.
+ * Boots the Trusted Core and logs the bound URL to stderr. The bind host comes
+ * from `QS_HOST` (default loopback `127.0.0.1`); a non-loopback bind emits a
+ * loud Port-Exposure Warning here in `bin/` (FR-22). CLI mode parsing (Ephemeral
+ * vs Persistent) and browser-open land in story 1.2 — not here. Logging is terse
+ * and to stderr only; the token is NEVER logged.
  *
  * Clean shutdown (story 1.5): SIGINT/SIGTERM and the UI's `shutdown` RPC all
  * converge on one idempotent `ShutdownController` built over `core.stop` +
@@ -12,6 +14,7 @@
  * promptly, and without stalling OS shutdown.
  */
 
+import { resolveBindHost } from "../src/core/binding.ts";
 import { createShutdownController, type ShutdownController } from "../src/core/lifecycle.ts";
 import { startCore } from "../src/core/server.ts";
 
@@ -42,6 +45,7 @@ try {
   let controller: ShutdownController = { initiate: async () => {} };
   const core = await startCore(resolvePort(), {
     onShutdownRequested: () => controller.initiate(),
+    host: resolveBindHost(process.env.QS_HOST),
   });
   controller = createShutdownController({ stop: core.stop, exit: () => process.exit(0) });
 
@@ -53,6 +57,28 @@ try {
 
   // stderr only, terse. Never log the session token.
   process.stderr.write(`quick-studio Core listening on ${core.url}\n`);
+
+  // Port-Exposure Warning (FR-22): a non-loopback bind is reachable off-machine,
+  // so anyone on the network can reach the UI and, through it, the connected
+  // database. The user opted in explicitly — we warn loudly, we do not veto.
+  if (core.exposed) {
+    process.stderr.write(
+      "\n" +
+        "  ╔══════════════════════════════════════════════════════════════════╗\n" +
+        "  ║  ⚠  PORT-EXPOSURE WARNING — quick-studio is NOT localhost-only     ║\n" +
+        "  ╚══════════════════════════════════════════════════════════════════╝\n" +
+        `  Bound to ${core.host}:${core.port} — reachable from OTHER machines on\n` +
+        "  the network. Anyone who can reach this address can open the UI and,\n" +
+        "  through it, access the connected database. Only the session token\n" +
+        "  stands between them and your data.\n" +
+        "\n" +
+        "  To revert to localhost-only:\n" +
+        "    1. Stop quick-studio.\n" +
+        "    2. Unset QS_HOST (or set QS_HOST=127.0.0.1).\n" +
+        "    3. Start quick-studio again.\n" +
+        "\n",
+    );
+  }
 } catch (err) {
   const msg = err instanceof Error ? err.message : String(err);
   process.stderr.write(`quick-studio: failed to start Core: ${msg}\n`);

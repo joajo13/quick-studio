@@ -9,6 +9,7 @@
  */
 
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
+import type { ExposureInfo } from "../../shared/contract.ts";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
 import { TAB_KINDS, type TabKind, type WorkspaceState } from "./workspace-state.ts";
@@ -42,6 +43,31 @@ function LauncherRail({ onOpen }: { onOpen: (kind: TabKind) => void }): React.JS
   );
 }
 
+/**
+ * Prominent, unmistakable full-width Port-Exposure Warning (FR-22, UX-DR5).
+ * Rendered directly under the header only when the Core bound a non-loopback
+ * address. States the risk and the exact steps to revert to localhost-only.
+ */
+function ExposureBanner({ exposure }: { exposure: ExposureInfo }): React.JSX.Element {
+  return (
+    <div
+      role="alert"
+      data-testid="exposure-banner"
+      className="shrink-0 border-b border-red-700 bg-red-600 px-4 py-3 text-sm text-white"
+    >
+      <div className="font-semibold">
+        ⚠ Port exposure: quick-studio is reachable off-machine at {exposure.host}:{exposure.port}
+      </div>
+      <p className="mt-1 text-red-50">
+        Anyone on the network can reach this UI and, through it, the connected database — the
+        session token is the only thing protecting your data. To revert to localhost-only: stop
+        quick-studio, unset <code className="rounded bg-red-700 px-1">QS_HOST</code> (or set{" "}
+        <code className="rounded bg-red-700 px-1">QS_HOST=127.0.0.1</code>), then start it again.
+      </p>
+    </div>
+  );
+}
+
 export function Workspace({
   state,
   onOpen,
@@ -50,6 +76,7 @@ export function Workspace({
   onStop,
   stopping,
   connectionIndicator,
+  exposure,
 }: {
   state: WorkspaceState;
   onOpen: (kind: TabKind) => void;
@@ -58,6 +85,7 @@ export function Workspace({
   onStop: () => void;
   stopping: boolean;
   connectionIndicator: React.ReactNode;
+  exposure?: ExposureInfo;
 }): React.JSX.Element {
   const activeTab =
     state.tabs.find((t) => t.id === state.activeTabId) ?? null;
@@ -81,6 +109,8 @@ export function Workspace({
           </button>
         </div>
       </header>
+
+      {exposure?.exposed ? <ExposureBanner exposure={exposure} /> : null}
 
       <PanelGroup direction="horizontal" className="flex-1">
         <Panel defaultSize={20} minSize={12} maxSize={40} className="bg-card">

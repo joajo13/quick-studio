@@ -64,4 +64,71 @@ describe("validateOrigin", () => {
     expect(validateOrigin(null, "evil.example.com", host, port)).toBe(false);
     expect(validateOrigin(null, null, host, port)).toBe(false);
   });
+
+  test("non-wildcard behavior is unchanged (regression)", () => {
+    // A concrete non-loopback bind still requires an exact authority match —
+    // the wildcard relaxation must NOT leak into the concrete-IP path.
+    const lan = "192.168.1.10";
+    const lanAuthority = `${lan}:${port}`;
+    expect(validateOrigin(null, lanAuthority, lan, port)).toBe(true);
+    expect(validateOrigin(`http://${lanAuthority}`, lanAuthority, lan, port)).toBe(true);
+    // Any other Host (even correct port) is rejected against a concrete bind.
+    expect(validateOrigin(null, `localhost:${port}`, lan, port)).toBe(false);
+    expect(validateOrigin(null, `127.0.0.1:${port}`, lan, port)).toBe(false);
+  });
+});
+
+describe("validateOrigin — wildcard bind (0.0.0.0 / ::)", () => {
+  const port = 4321;
+
+  for (const boundHost of ["0.0.0.0", "::"]) {
+    test(`${boundHost}: accepts localhost:<port> Host with matching/absent Origin`, () => {
+      const authority = `localhost:${port}`;
+      expect(validateOrigin(null, authority, boundHost, port)).toBe(true);
+      expect(validateOrigin("", authority, boundHost, port)).toBe(true);
+      expect(validateOrigin(`http://${authority}`, authority, boundHost, port)).toBe(true);
+    });
+
+    test(`${boundHost}: accepts a LAN-IP Host with matching/absent Origin`, () => {
+      const authority = `192.168.1.10:${port}`;
+      expect(validateOrigin(null, authority, boundHost, port)).toBe(true);
+      expect(validateOrigin(`http://${authority}`, authority, boundHost, port)).toBe(true);
+    });
+
+    test(`${boundHost}: accepts a bracketed IPv6 Host (port parsed after the last colon)`, () => {
+      const authority = `[::1]:${port}`;
+      expect(validateOrigin(null, authority, boundHost, port)).toBe(true);
+      expect(validateOrigin(`http://${authority}`, authority, boundHost, port)).toBe(true);
+    });
+
+    test(`${boundHost}: rejects a plain cross-origin request (Origin differs from Host)`, () => {
+      // The degraded wildcard gate still blocks classic cross-origin: a page at
+      // evil.com doing fetch() to the LAN IP sends Origin=evil.com, Host=lan-ip.
+      const authority = `192.168.1.10:${port}`;
+      expect(validateOrigin("http://evil.example.com", authority, boundHost, port)).toBe(false);
+      expect(
+        validateOrigin(`http://localhost:${port}`, `192.168.1.10:${port}`, boundHost, port),
+      ).toBe(false);
+    });
+
+    test(`${boundHost}: a same-value DNS-rebind passes THIS gate — the token is the boundary`, () => {
+      // Honest documentation of the degraded gate: in a real DNS-rebind the
+      // attacker controls both headers, so Origin === Host === attacker-authority
+      // and Origin==Host is satisfied. This predicate does NOT stop it; the
+      // session token (validateToken, checked separately) is what blocks the RPC.
+      const rebind = `evil.example.com:${port}`;
+      expect(validateOrigin(`http://${rebind}`, rebind, boundHost, port)).toBe(true);
+    });
+
+    test(`${boundHost}: rejects a wrong-port Host`, () => {
+      expect(validateOrigin(null, `192.168.1.10:${port + 1}`, boundHost, port)).toBe(false);
+      // No port in Host → no port to match → rejected.
+      expect(validateOrigin(null, "192.168.1.10", boundHost, port)).toBe(false);
+    });
+
+    test(`${boundHost}: rejects an absent Host header`, () => {
+      expect(validateOrigin(null, null, boundHost, port)).toBe(false);
+      expect(validateOrigin(null, undefined, boundHost, port)).toBe(false);
+    });
+  }
 });

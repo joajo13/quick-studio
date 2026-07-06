@@ -12,8 +12,8 @@
  * `beforeAll` timeout and sequential assertions on a single Core.
  */
 
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { startCore, type Core } from "./server.ts";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { renderIndexHtml, startCore, type Core } from "./server.ts";
 
 let core: Core;
 let shutdownCalls = 0;
@@ -63,4 +63,38 @@ test("authenticated shutdown acks {stopping:true} and defers onShutdownRequested
   // …it fires on the next macrotask, after the reply has flushed.
   await new Promise((r) => setTimeout(r, 5));
   expect(shutdownCalls).toBe(1);
+});
+
+test("default boot is not exposed and injects exposed:false into the served HTML", async () => {
+  expect(core.exposed).toBe(false);
+  const html = await (await fetch(`${core.url}/`)).text();
+  expect(html).toContain("window.__QS_EXPOSURE__");
+  expect(html).toContain('"exposed":false');
+});
+
+// The exposed-path injection is unit-tested via the exported `renderIndexHtml`
+// rather than a second `startCore({ host: "0.0.0.0" })` boot — booting a real
+// wildcard listener would open a token-bearing endpoint to the whole LAN for the
+// duration of the run, an unacceptable smell in a security-first story. The
+// `startCore` → `core.exposed` plumbing is proven by the default boot above; the
+// `isExposed` classification is covered in `binding.test.ts`.
+describe("renderIndexHtml exposure injection", () => {
+  test("carries exposed:true and the bound host into the served HTML", () => {
+    const html = renderIndexHtml("abc123", { exposed: true, host: "0.0.0.0", port: 4321 });
+    expect(html).toContain("window.__QS_EXPOSURE__");
+    expect(html).toContain('"exposed":true');
+    expect(html).toContain('"host":"0.0.0.0"');
+    expect(html).toContain('"port":4321');
+  });
+
+  test("script-escapes an untrusted host so it cannot break out of <script>", () => {
+    const html = renderIndexHtml("abc123", {
+      exposed: true,
+      host: "</script><script>alert(1)</script>",
+      port: 80,
+    });
+    // The literal `</script>` sequence must never appear unescaped in the shell.
+    expect(html).not.toContain("<script>alert(1)");
+    expect(html).toContain("\\u003c");
+  });
 });

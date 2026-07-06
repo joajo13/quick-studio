@@ -1,9 +1,11 @@
 /**
  * quick-studio Core — HTTP server (Ring 1).
  *
- * Binds `127.0.0.1` ONLY (never 0.0.0.0 / a public interface). Serves the
- * React UI with the per-boot session token injected into the HTML, and exposes
- * a single gated `POST /rpc` endpoint.
+ * Binds loopback `127.0.0.1` by default; a `host` override (from `QS_HOST`) may
+ * widen the bind to a concrete IP or a wildcard, which flips `Core.exposed` and
+ * fires the Port-Exposure Warning on both surfaces. Serves the React UI with the
+ * per-boot session token injected into the HTML, and exposes a single gated
+ * `POST /rpc` endpoint.
  *
  * `/rpc` is rejected (HTTP 403 + error envelope) when the `X-QS-Token` header is
  * missing/wrong OR the Origin/Host is foreign. Only then is the request handed
@@ -11,12 +13,11 @@
  */
 
 import tailwind from "bun-plugin-tailwind";
+import type { ExposureInfo } from "../shared/contract.ts";
 import { errorReply } from "../shared/contract.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
+import { isExposed, resolveBindHost } from "./binding.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
-
-/** Loopback bind address — never widened in this story. */
-const BIND_HOST = "127.0.0.1";
 
 const TOKEN_HEADER = "x-qs-token";
 
@@ -26,6 +27,12 @@ export type Core = {
   readonly port: number;
   /** Per-boot session token (in-memory only; never log or persist). */
   readonly token: string;
+  /**
+   * True when the bind host is non-loopback (reachable off-machine). `bin/`
+   * emits the loud stderr Port-Exposure Warning when this is set; the UI shows
+   * the in-page banner via the injected `window.__QS_EXPOSURE__` global.
+   */
+  readonly exposed: boolean;
   /** Stop the server and release the port. May be awaited (async teardown). */
   stop(): void | Promise<void>;
 };
@@ -56,6 +63,12 @@ export type StartCoreOptions = {
    * also exits the process.
    */
   onShutdownRequested?: () => void;
+  /**
+   * Bind host. Defaults to loopback `127.0.0.1`. A non-loopback value (concrete
+   * IP or a wildcard `0.0.0.0` / `::`) makes the Core reachable off-machine and
+   * flips `Core.exposed` on. `bin/` resolves this from `QS_HOST`.
+   */
+  host?: string;
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -104,11 +117,30 @@ async function buildUiBundle(): Promise<UiBundle> {
 }
 
 /**
- * Render the served HTML shell with the per-boot token injected. The UI reads
- * `window.__QS_TOKEN__` and sends it on every `/rpc` call. HTML-escaping the
- * token is belt-and-suspenders — it is hex, but never trust-inject blindly.
+ * Serialize a value for safe embedding inside an inline `<script>`: JSON, then
+ * escape `<` (blocks `</script>` breakout) and the U+2028/U+2029 line separators
+ * (valid JS string terminators that some parsers honour inside inline scripts).
+ * Unlike the token — which `renderIndexHtml` filters to hex before injecting —
+ * the exposure `host` is the arbitrary `QS_HOST` value, so this escaping is what
+ * actually keeps that untrusted field from breaking out of the script element.
  */
-function renderIndexHtml(token: string): string {
+function scriptJson(value: unknown): string {
+  // Escape `<` (blocks `</script>`) and the U+2028/U+2029 line separators
+  // (valid JS string terminators inside inline scripts) via \u escapes.
+  return JSON.stringify(value).replace(/[\u003c\u2028\u2029]/g, (c) =>
+    "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+  );
+}
+
+/**
+ * Render the served HTML shell with the per-boot token injected. The UI reads
+ * `window.__QS_TOKEN__` and sends it on every `/rpc` call, and reads
+ * `window.__QS_EXPOSURE__` (known at boot, static) to render the Port-Exposure
+ * Warning banner. The token is hex-filtered belt-and-suspenders; the exposure
+ * payload (arbitrary `host`) leans on `scriptJson`'s `<script>`-safe escaping.
+ * Exported for unit-testing the injection without booting a real server.
+ */
+export function renderIndexHtml(token: string, exposure: ExposureInfo): string {
   const safeToken = token.replace(/[^0-9a-fA-F]/g, "");
   return `<!doctype html>
 <html lang="en">
@@ -117,7 +149,8 @@ function renderIndexHtml(token: string): string {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>quick-studio</title>
     <link rel="stylesheet" href="/app.css" />
-    <script>window.__QS_TOKEN__ = ${JSON.stringify(safeToken)};</script>
+    <script>window.__QS_TOKEN__ = ${scriptJson(safeToken)};</script>
+    <script>window.__QS_EXPOSURE__ = ${scriptJson(exposure)};</script>
   </head>
   <body>
     <div id="root"></div>
@@ -128,16 +161,23 @@ function renderIndexHtml(token: string): string {
 }
 
 /**
- * Boot the Core: mint a token, bundle the UI, and start `Bun.serve` on
- * `127.0.0.1`. Pass `port: 0` for an ephemeral port. Resolves once listening.
+ * Boot the Core: mint a token, bundle the UI, and start `Bun.serve` on the
+ * resolved bind host (loopback `127.0.0.1` by default; a non-loopback host makes
+ * the instance reachable off-machine and sets `Core.exposed`). Pass `port: 0`
+ * for an ephemeral port. Resolves once listening.
  */
 export async function startCore(port = 0, options: StartCoreOptions = {}): Promise<Core> {
   const token = mintSessionToken();
+  // Single normalization path shared with `bin/` (trim + lower-case + loopback
+  // default), so classification, the bound hostname, and the `validateOrigin`
+  // authority all agree — a direct `startCore({ host })` caller cannot bind a
+  // padded/mixed-case host that would silently 403 every RPC.
+  const bindHost = resolveBindHost(options.host);
+  const exposed = isExposed(bindHost);
   const { js: appJs, css: appCss } = await buildUiBundle();
-  const indexHtmlTemplate = renderIndexHtml(token);
 
   const server = Bun.serve({
-    hostname: BIND_HOST, // 127.0.0.1 ONLY — never 0.0.0.0
+    hostname: bindHost,
     port,
     async fetch(req): Promise<Response> {
       const url = new URL(req.url);
@@ -186,7 +226,7 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         // cheap check and never learns whether a supplied token was valid.
         const origin = req.headers.get("origin");
         const host = req.headers.get("host");
-        if (!validateOrigin(origin, host, BIND_HOST, boundPort)) {
+        if (!validateOrigin(origin, host, bindHost, boundPort)) {
           return jsonResponse(
             errorReply("forbidden_origin", "Foreign Origin or Host header"),
             403,
@@ -237,12 +277,23 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     options.onShutdownRequested ?? (() => { void server.stop(true); });
 
   const boundPort = server.port ?? 0;
-  const url = `http://${BIND_HOST}:${boundPort}`;
+
+  // Rendered after `server` so the exposure payload can carry the real bound
+  // port. Bun only invokes `fetch` once this synchronous setup completes, so
+  // the closure's reference is always resolved by request time.
+  const indexHtmlTemplate = renderIndexHtml(token, {
+    exposed,
+    host: bindHost,
+    port: boundPort,
+  });
+
+  const url = `http://${bindHost}:${boundPort}`;
   return {
     url,
-    host: BIND_HOST,
+    host: bindHost,
     port: boundPort,
     token,
+    exposed,
     stop: () => server.stop(true),
   };
 }
