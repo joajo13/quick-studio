@@ -1,24 +1,41 @@
 /**
- * quick-studio Core — mode-aware encrypted credential store (UJ-2, FR-4/5/6, AR-7, AR-9).
+ * quick-studio Core — mode-aware encrypted credential store (UJ-2, FR-4/5/6, AR-7, AR-9, AD-5).
  *
  * This is the Epic 2 persistence substrate: it saves Connection records so a
  * developer enters a connection ONCE and has it back on the next launch, with the
- * credential encrypted at rest (AES-256-GCM) and the key held only in the OS
- * keychain (AR-7). It is the substrate Story 2.4 (manage Connections) and Epic 5
- * (Provider keys) build on.
+ * credential encrypted at rest (AES-256-GCM) and the key held either in the OS
+ * keychain (AR-7) or — on a keychain-less machine — derived from a passphrase via
+ * scrypt (FR-5, AD-5). It is the substrate Story 2.4 (manage Connections) and
+ * Epic 5 (Provider keys) build on.
  *
- * It composes the four Ring-1 pieces: {@link resolveAppDir}/`ensureAppDir` for the
- * OS-convention home (AR-9), {@link loadOrCreateStoreKey} for the master key
- * (AR-7), {@link encryptJson}/{@link decryptJson} for the at-rest cipher, and
+ * It composes the Ring-1 pieces: `ensureAppDir` for the OS-convention home (AR-9),
+ * {@link loadOrCreateStoreKey} for the keychain master key (AR-7),
+ * {@link derivePassphraseKey} for the passphrase fallback key (FR-5),
+ * {@link encryptJson}/{@link decryptJson} for the at-rest cipher, and
  * {@link resolveRunMode} for the Persistent/Ephemeral gate.
+ *
+ * Key mode is decided by an on-disk, NON-SECRET key descriptor
+ * (`credential-store.meta.json`), which is AUTHORITATIVE for an existing store:
+ *  - descriptor present (passphrase mode) → re-derive the key from the persisted
+ *    salt/params via the injected passphrase provider; the keychain is ignored.
+ *  - descriptor absent + `.enc` present → keychain mode (Story 2.2 back-compat).
+ *  - descriptor absent + no `.enc` (true first run) → try the keychain; if it is
+ *    unavailable, fall back to passphrase mode via the provider.
+ * Keychain availability decides the mode ONLY for a brand-new store.
  *
  * Guarantees:
  *  - Persistent mode: mutations flush an AES-256-GCM `credential-store.enc` under
- *    the app dir. The file holds only ciphertext — never the key, never plaintext.
+ *    the app dir. The file holds only ciphertext — never a key, never a passphrase,
+ *    never plaintext. A passphrase store additionally writes the non-secret
+ *    descriptor AND an eagerly-encrypted empty `.enc` at creation, so a later reopen
+ *    always has ciphertext to authenticate a passphrase against (a wrong passphrase
+ *    on a not-yet-saved store fails GCM → `corrupt`, never a silent accept).
  *  - Ephemeral mode: records live in memory only. NOTHING is written to disk — the
  *    keychain is not even touched.
  *  - `openCredentialStore` is total: keychain `unavailable`, a non-32-byte key
- *    (`key-invalid`), a tampered/wrong-key file (`corrupt`), and an unrecognized
+ *    (`key-invalid`), a passphrase decline (`passphrase-declined`) or empty
+ *    passphrase (`passphrase-invalid`), a keychain-mode file with the key now gone
+ *    (`key-unavailable`), a tampered/wrong-key file (`corrupt`), and an unrecognized
  *    on-disk `schemaVersion` (`schema-unknown`) are all TYPED results — never a
  *    throw, never a plaintext fallback, never a silent overwrite.
  */
@@ -35,10 +52,22 @@ import { join } from "node:path";
 import { ensureAppDir } from "./app-dir.ts";
 import {
   CRYPTO_SCHEMA_VERSION,
+  KEY_LENGTH_BYTES,
   decryptJson,
   encryptJson,
   type CryptoEnvelope,
 } from "./crypto.ts";
+import {
+  DEFAULT_SCRYPT_PARAMS,
+  SALT_LENGTH_BYTES,
+  derivePassphraseKey,
+  generateSalt,
+  type ScryptParams,
+} from "./passphrase-key.ts";
+import {
+  envPassphraseProvider,
+  type PassphraseProvider,
+} from "./passphrase-provider.ts";
 import { resolveRunMode, type RunMode } from "./run-mode.ts";
 import {
   loadOrCreateStoreKey,
@@ -48,8 +77,17 @@ import {
 /** Encrypted store filename under the app dir. */
 export const STORE_FILE_NAME = "credential-store.enc";
 
+/**
+ * Non-secret key descriptor sidecar filename. Present ⇒ passphrase mode; absent ⇒
+ * keychain mode (preserving Story 2.2's `.enc`-only layout and back-compat).
+ */
+export const STORE_META_FILE_NAME = "credential-store.meta.json";
+
 /** Schema version of the DECRYPTED payload (distinct from the envelope's). */
 export const STORE_SCHEMA_VERSION = 1;
+
+/** Schema version of the on-disk key descriptor. */
+export const STORE_META_SCHEMA_VERSION = 1;
 
 /**
  * A persisted Connection record. `url` carries the secret (credentials embedded in
@@ -92,20 +130,46 @@ export type OpenResult =
   | { readonly outcome: "unavailable"; readonly detail: string }
   | { readonly outcome: "key-invalid"; readonly detail: string }
   | { readonly outcome: "corrupt"; readonly detail: string }
-  | { readonly outcome: "schema-unknown"; readonly detail: string };
+  | { readonly outcome: "schema-unknown"; readonly detail: string }
+  /** Keychain unavailable and the developer declined the passphrase fallback. Nothing written. */
+  | { readonly outcome: "passphrase-declined"; readonly detail: string }
+  /** Passphrase was empty/whitespace-only — never a usable key. Nothing written. */
+  | { readonly outcome: "passphrase-invalid"; readonly detail: string }
+  /** Keychain-mode file present but the keychain key is gone (distinct from `corrupt`). */
+  | { readonly outcome: "key-unavailable"; readonly detail: string };
 
 /**
- * Injectable dependencies so the failure arms (`unavailable`/`key-invalid`/
- * `corrupt`/`schema-unknown`) are unit-testable without a live keychain or the
- * user's real app dir. Every field defaults to the real implementation.
+ * The non-secret on-disk key descriptor. It holds ONLY re-derivation material —
+ * a base64 salt and the scrypt cost params — never a passphrase or a derived key.
+ * Its mere presence signals passphrase mode.
+ */
+type KeyDescriptor = {
+  readonly schemaVersion: number;
+  readonly keyMode: "passphrase";
+  readonly kdf: {
+    readonly algo: "scrypt";
+    readonly salt: string;
+    readonly n: number;
+    readonly r: number;
+    readonly p: number;
+    readonly keylen: number;
+  };
+};
+
+/**
+ * Injectable dependencies so the failure arms are unit-testable without a live
+ * keychain or the user's real app dir. Every field defaults to the real
+ * implementation.
  */
 export type CredentialStoreDeps = {
   /** Persistent/Ephemeral gate. Defaults to `resolveRunMode(process.env)`. */
   readonly mode?: RunMode;
   /** App-data directory (persistent mode only). Defaults to `ensureAppDir()`. */
   readonly dir?: string;
-  /** Master-key provider. Defaults to `loadOrCreateStoreKey()`. */
+  /** Keychain master-key provider. Defaults to `loadOrCreateStoreKey()`. */
   readonly loadStoreKey?: () => StoreKeyResult;
+  /** Passphrase source for the keychain-less fallback. Defaults to `envPassphraseProvider(process.env)`. */
+  readonly passphraseProvider?: PassphraseProvider;
 };
 
 /**
@@ -152,6 +216,199 @@ function isStoredConnection(value: unknown): value is StoredConnection {
 }
 
 /**
+ * Type guard: a parsed value is a well-formed {@link KeyDescriptor} — a passphrase
+ * key descriptor with a base64 salt and numeric scrypt params. A file that parses
+ * as JSON but does NOT match this shape is descriptor `corrupt`, not "keychain
+ * mode" (an absent FILE means keychain mode; a malformed one means corruption).
+ */
+function isKeyDescriptor(value: unknown): value is KeyDescriptor {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value as Record<string, unknown>;
+  if (typeof v.schemaVersion !== "number") return false;
+  if (v.keyMode !== "passphrase") return false;
+  if (typeof v.kdf !== "object" || v.kdf === null) return false;
+  const kdf = v.kdf as Record<string, unknown>;
+  return (
+    kdf.algo === "scrypt" &&
+    typeof kdf.salt === "string" &&
+    typeof kdf.n === "number" &&
+    typeof kdf.r === "number" &&
+    typeof kdf.p === "number" &&
+    typeof kdf.keylen === "number"
+  );
+}
+
+/** Result of reading the descriptor sidecar. Mirrors the `.enc` read-path classification. */
+type DescriptorRead =
+  | { readonly kind: "present"; readonly descriptor: KeyDescriptor }
+  | { readonly kind: "absent" }
+  | { readonly kind: "corrupt"; readonly detail: string }
+  | { readonly kind: "schema-unknown"; readonly detail: string }
+  | { readonly kind: "unavailable"; readonly detail: string };
+
+/** A positive integer that is an exact power of two. */
+function isPowerOfTwo(n: number): boolean {
+  return Number.isInteger(n) && n > 0 && (n & (n - 1)) === 0;
+}
+
+/**
+ * Validate the non-secret KDF params of a descriptor BEFORE deriving. Rejects a
+ * degenerate salt (e.g. an empty/`""` base64 → 0-byte salt → weakened KDF), a
+ * wrong key length, or a hostile/out-of-range work factor (which could make the
+ * synchronous `scryptSync` hang or exhaust memory). Returns the name of the first
+ * invalid field, or `null` when every field is sane. Salt/params are non-secret, so
+ * naming the field never leaks a secret.
+ */
+function invalidKdfField(kdf: KeyDescriptor["kdf"]): string | null {
+  if (Buffer.from(kdf.salt, "base64").length !== SALT_LENGTH_BYTES) return "kdf salt";
+  if (kdf.keylen !== KEY_LENGTH_BYTES) return "kdf keylen";
+  // N must be a power of two in [2**14, 2**20] (scrypt requires a power of two).
+  if (!isPowerOfTwo(kdf.n) || kdf.n < 2 ** 14 || kdf.n > 2 ** 20) return "kdf n";
+  if (!Number.isInteger(kdf.r) || kdf.r < 1 || kdf.r > 32) return "kdf r";
+  if (!Number.isInteger(kdf.p) || kdf.p < 1 || kdf.p > 16) return "kdf p";
+  return null;
+}
+
+/**
+ * Read + classify the key descriptor sidecar. ENOENT → `absent` (keychain mode /
+ * first run). A non-ENOENT POSIX I/O error → `unavailable`. Malformed JSON or a
+ * bad shape → `corrupt`. Never throws.
+ */
+function readDescriptor(metaPath: string): DescriptorRead {
+  let raw: string;
+  try {
+    raw = readFileSync(metaPath, "utf8");
+  } catch (err) {
+    const code =
+      err !== null && typeof err === "object" && "code" in err
+        ? (err as { readonly code?: unknown }).code
+        : undefined;
+    if (code === "ENOENT") return { kind: "absent" };
+    // EACCES/EISDIR/EIO/… — non-destructive: the store may be intact.
+    return {
+      kind: "unavailable",
+      detail: err instanceof Error ? err.message : "descriptor unreadable",
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    return {
+      kind: "corrupt",
+      detail: err instanceof Error ? err.message : "descriptor is not valid JSON",
+    };
+  }
+  if (!isKeyDescriptor(parsed)) {
+    return { kind: "corrupt", detail: "descriptor has an unrecognized shape" };
+  }
+  // Version gate mirrors the payload path: an unrecognized descriptor schema is
+  // `schema-unknown`, never `corrupt` (it may be a newer, forward-compatible file).
+  if (parsed.schemaVersion !== STORE_META_SCHEMA_VERSION) {
+    return {
+      kind: "schema-unknown",
+      detail: `unrecognized descriptor schemaVersion ${String(parsed.schemaVersion)}`,
+    };
+  }
+  // Reject degenerate/hostile KDF params before they ever reach scryptSync.
+  const badField = invalidKdfField(parsed.kdf);
+  if (badField !== null) {
+    return { kind: "corrupt", detail: `${badField} invalid` };
+  }
+  return { kind: "present", descriptor: parsed };
+}
+
+/**
+ * Atomically write the non-secret descriptor with owner-only perms (0o600): write
+ * a sibling temp then `rename` over the target. Returns a typed result; never
+ * throws. The descriptor carries only salt + params — never a passphrase or key.
+ */
+function writeDescriptor(
+  metaPath: string,
+  descriptor: KeyDescriptor,
+): { readonly ok: true } | { readonly ok: false; readonly detail: string } {
+  const tmpPath = `${metaPath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmpPath, JSON.stringify(descriptor), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    renameSync(tmpPath, metaPath);
+    return { ok: true };
+  } catch (err) {
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      /* ignore cleanup failure */
+    }
+    return {
+      ok: false,
+      detail: err instanceof Error ? err.message : "descriptor write failed",
+    };
+  }
+}
+
+/**
+ * Encrypt a record set under `key` and atomically write the envelope to `filePath`
+ * with owner-only perms (0o600): write a sibling temp then `rename` over the target
+ * so an interrupted write can never truncate the live store. On any failure the
+ * temp is best-effort removed and a typed `write-failed` is returned; never throws.
+ * Shared by a normal flush ({@link buildStore}) and by passphrase-store creation.
+ */
+function writeStoreFile(
+  filePath: string,
+  key: Buffer,
+  connections: readonly StoredConnection[],
+): MutationResult {
+  const payload: StorePayload = {
+    schemaVersion: STORE_SCHEMA_VERSION,
+    connections: [...connections],
+  };
+  const enc = encryptJson(key, payload);
+  if (enc.outcome !== "encrypted") {
+    return { outcome: "write-failed", detail: enc.detail };
+  }
+  const tmpPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmpPath, JSON.stringify(enc.envelope), {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    // `rename` moves the 0o600 temp inode over the target, so the committed file
+    // keeps owner-only perms. A post-rename chmod is redundant AND unsafe.
+    renameSync(tmpPath, filePath);
+    return { outcome: "ok" };
+  } catch (err) {
+    // Best-effort cleanup so a failed write leaves no `.tmp` residue.
+    try {
+      rmSync(tmpPath, { force: true });
+    } catch {
+      /* ignore cleanup failure */
+    }
+    return {
+      outcome: "write-failed",
+      detail: err instanceof Error ? err.message : "store write failed",
+    };
+  }
+}
+
+/** Build a descriptor for a fresh passphrase store from its salt + scrypt params. */
+function buildDescriptor(salt: Buffer, params: ScryptParams): KeyDescriptor {
+  return {
+    schemaVersion: STORE_META_SCHEMA_VERSION,
+    keyMode: "passphrase",
+    kdf: {
+      algo: "scrypt",
+      salt: salt.toString("base64"),
+      n: params.N,
+      r: params.r,
+      p: params.p,
+      keylen: params.keylen,
+    },
+  };
+}
+
+/**
  * Open the credential store. Total — returns a typed {@link OpenResult}; never
  * throws for the expected failure conditions. In Ephemeral mode nothing is read
  * or written and the keychain is not touched.
@@ -163,16 +420,6 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
   if (mode === "ephemeral") {
     return { outcome: "opened", store: buildStore(mode, [], null, null) };
   }
-
-  // Persistent: obtain the master key from the keychain (AR-7).
-  const keyResult = (deps.loadStoreKey ?? loadOrCreateStoreKey)();
-  if (keyResult.outcome === "unavailable") {
-    return { outcome: "unavailable", detail: keyResult.detail };
-  }
-  if (keyResult.outcome === "key-invalid") {
-    return { outcome: "key-invalid", detail: keyResult.detail };
-  }
-  const key = keyResult.key;
 
   // Resolving/creating the app dir (mkdir) can throw on EACCES/EROFS/read-only
   // home, or when no absolute home can be resolved (see ensureAppDir). Keep the
@@ -187,8 +434,156 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
     };
   }
   const filePath = join(dir, STORE_FILE_NAME);
+  const metaPath = join(dir, STORE_META_FILE_NAME);
+  const passphraseProvider =
+    deps.passphraseProvider ?? envPassphraseProvider(process.env);
+  const loadStoreKey = deps.loadStoreKey ?? loadOrCreateStoreKey;
 
-  // First run: no file → empty store, ready to save.
+  // The descriptor is AUTHORITATIVE for an existing store's key mode.
+  const descriptorRead = readDescriptor(metaPath);
+  if (descriptorRead.kind === "corrupt") {
+    return { outcome: "corrupt", detail: descriptorRead.detail };
+  }
+  if (descriptorRead.kind === "schema-unknown") {
+    return { outcome: "schema-unknown", detail: descriptorRead.detail };
+  }
+  if (descriptorRead.kind === "unavailable") {
+    return { outcome: "unavailable", detail: descriptorRead.detail };
+  }
+
+  // --- Passphrase mode (descriptor present): re-derive the key, keychain ignored.
+  if (descriptorRead.kind === "present") {
+    const descriptor = descriptorRead.descriptor;
+    const response = passphraseProvider({
+      reason: "keychain-unavailable",
+      isFirstRun: false,
+    });
+    if (response.outcome === "declined") {
+      return {
+        outcome: "passphrase-declined",
+        detail: "passphrase required to unlock the store, but none was provided",
+      };
+    }
+    const salt = Buffer.from(descriptor.kdf.salt, "base64");
+    const params: ScryptParams = {
+      N: descriptor.kdf.n,
+      r: descriptor.kdf.r,
+      p: descriptor.kdf.p,
+      keylen: descriptor.kdf.keylen,
+    };
+    const derived = derivePassphraseKey(response.passphrase, salt, params);
+    if (derived.outcome === "passphrase-invalid") {
+      return { outcome: "passphrase-invalid", detail: derived.detail };
+    }
+    if (derived.outcome === "derive-failed") {
+      // Non-destructive: the ciphertext is intact, we just can't build the key
+      // right now (e.g. tampered params). Do not risk a `corrupt` overwrite.
+      return { outcome: "unavailable", detail: derived.detail };
+    }
+    return loadStoreFromFile(mode, derived.key, filePath);
+  }
+
+  // --- Descriptor absent + `.enc` present: keychain mode (Story 2.2 back-compat).
+  if (existsSync(filePath)) {
+    const keyResult = loadStoreKey();
+    // File present but the keychain had to CREATE a fresh key ⇒ the ORIGINAL key is
+    // gone (keychain reset / logout wipe / profile migration). A brand-new key can
+    // never decrypt this `.enc`, so — exactly like `unavailable` — this is the
+    // DISTINCT `key-unavailable` condition (file present, key gone), NOT `corrupt`.
+    // Decrypting with the fresh key would GCM-fail and be misreported as `corrupt`.
+    if (keyResult.outcome === "unavailable" || keyResult.outcome === "created") {
+      const detail =
+        keyResult.outcome === "unavailable"
+          ? keyResult.detail
+          : "keychain regenerated a fresh key; the original store key is gone";
+      return { outcome: "key-unavailable", detail };
+    }
+    if (keyResult.outcome === "key-invalid") {
+      return { outcome: "key-invalid", detail: keyResult.detail };
+    }
+    return loadStoreFromFile(mode, keyResult.key, filePath);
+  }
+
+  // --- True first run (no descriptor, no `.enc`): keychain decides the mode.
+  const keyResult = loadStoreKey();
+  if (keyResult.outcome === "key-invalid") {
+    return { outcome: "key-invalid", detail: keyResult.detail };
+  }
+  if (keyResult.outcome === "loaded" || keyResult.outcome === "created") {
+    // Keychain available → keychain mode. Writes NO descriptor (absent ⇒ keychain).
+    return {
+      outcome: "opened",
+      store: buildStore(mode, [], keyResult.key, filePath),
+    };
+  }
+
+  // Keychain unavailable on a brand-new store → passphrase fallback via provider.
+  const response = passphraseProvider({
+    reason: "keychain-unavailable",
+    isFirstRun: true,
+  });
+  if (response.outcome === "declined") {
+    // Write NOTHING — no descriptor, no `.enc`, no plaintext.
+    return {
+      outcome: "passphrase-declined",
+      detail: "keychain unavailable and no passphrase provided",
+    };
+  }
+  const salt = generateSalt();
+  const derived = derivePassphraseKey(
+    response.passphrase,
+    salt,
+    DEFAULT_SCRYPT_PARAMS,
+  );
+  if (derived.outcome === "passphrase-invalid") {
+    // Empty/whitespace passphrase → nothing written.
+    return { outcome: "passphrase-invalid", detail: derived.detail };
+  }
+  if (derived.outcome === "derive-failed") {
+    return { outcome: "unavailable", detail: derived.detail };
+  }
+  // Persist the non-secret descriptor ONCE, before handing back a writable store.
+  const written = writeDescriptor(metaPath, buildDescriptor(salt, DEFAULT_SCRYPT_PARAMS));
+  if (!written.ok) {
+    return { outcome: "unavailable", detail: written.detail };
+  }
+  // Eagerly encrypt+write the EMPTY connection set now (not lazily on first save).
+  // Reason: without ciphertext, a wrong passphrase on a later reopen of a not-yet-
+  // saved store is silently accepted (nothing to authenticate against) and a save
+  // then bakes in the wrong key, permanently locking out the correct one. Writing
+  // the `.enc` at creation means every reopen has ciphertext → a wrong passphrase
+  // fails GCM → `corrupt`, consistent with the intent-contract matrix. Descriptor is
+  // written FIRST so a crash can only ever leave the benign descriptor-without-`.enc`
+  // state, never a `.enc`-without-descriptor (which would misread as keychain mode).
+  const seeded = writeStoreFile(filePath, derived.key, []);
+  if (seeded.outcome !== "ok") {
+    // Roll back the descriptor so nothing half-committed remains on disk.
+    try {
+      rmSync(metaPath, { force: true });
+    } catch {
+      /* ignore cleanup failure */
+    }
+    return { outcome: "unavailable", detail: seeded.detail };
+  }
+  return {
+    outcome: "opened",
+    store: buildStore(mode, [], derived.key, filePath),
+  };
+}
+
+/**
+ * Load + decrypt an EXISTING store file under `key`. A missing file is a ready
+ * empty store (first save creates it). Total: classifies I/O errors, malformed
+ * envelopes, wrong keys, and unknown schema versions into typed {@link OpenResult}
+ * arms exactly as the keychain path did. Shared by the keychain and passphrase
+ * reopen branches.
+ */
+function loadStoreFromFile(
+  mode: RunMode,
+  key: Buffer,
+  filePath: string,
+): OpenResult {
+  // No file yet → empty store, ready to save.
   if (!existsSync(filePath)) {
     return { outcome: "opened", store: buildStore(mode, [], key, filePath) };
   }
@@ -244,6 +639,8 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
     return { outcome: "key-invalid", detail: decrypted.detail };
   }
   if (decrypted.outcome === "corrupt") {
+    // A wrong passphrase yields a wrong key → GCM auth-tag fail, INDISTINGUISHABLE
+    // from tamper by design. Both surface here as `corrupt`.
     return { outcome: "corrupt", detail: decrypted.detail };
   }
 
@@ -284,44 +681,12 @@ function buildStore(
 
   /**
    * Encrypt a PROSPECTIVE record set and write the envelope to disk atomically
-   * (persistent only): write a sibling temp file with mode 0o600, then `rename`
-   * over the target so an interrupted write can never truncate the live store.
-   * Ephemeral (key/filePath null) is a no-op `ok`.
+   * (persistent only) via {@link writeStoreFile}. Ephemeral (key/filePath null) is
+   * a no-op `ok`.
    */
   const flush = (next: Map<string, StoredConnection>): MutationResult => {
     if (key === null || filePath === null) return { outcome: "ok" };
-    const payload: StorePayload = {
-      schemaVersion: STORE_SCHEMA_VERSION,
-      connections: [...next.values()],
-    };
-    const enc = encryptJson(key, payload);
-    if (enc.outcome !== "encrypted") {
-      return { outcome: "write-failed", detail: enc.detail };
-    }
-    const tmpPath = `${filePath}.${randomUUID()}.tmp`;
-    try {
-      writeFileSync(tmpPath, JSON.stringify(enc.envelope), {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      // `rename` moves the 0o600 temp inode over the target, so the committed
-      // file keeps owner-only perms. A post-rename chmod is redundant AND unsafe:
-      // if it failed after the durable rename, flush would report `write-failed`
-      // while disk already held the new data — diverging memory from disk.
-      renameSync(tmpPath, filePath);
-      return { outcome: "ok" };
-    } catch (err) {
-      // Best-effort cleanup so a failed write leaves no `.tmp` residue.
-      try {
-        rmSync(tmpPath, { force: true });
-      } catch {
-        /* ignore cleanup failure */
-      }
-      return {
-        outcome: "write-failed",
-        detail: err instanceof Error ? err.message : "store write failed",
-      };
-    }
+    return writeStoreFile(filePath, key, [...next.values()]);
   };
 
   /**

@@ -20,6 +20,7 @@ import { KEY_LENGTH_BYTES, encryptJson, type CryptoEnvelope } from "./crypto.ts"
 import {
   openCredentialStore,
   STORE_FILE_NAME,
+  STORE_META_FILE_NAME,
   STORE_SCHEMA_VERSION,
 } from "./credential-store.ts";
 import {
@@ -30,6 +31,8 @@ import {
   type StoreKeyResult,
 } from "./store-key.ts";
 import { deleteSecret, type KeychainGetResult } from "./keychain.ts";
+import { derivePassphraseKey } from "./passphrase-key.ts";
+import type { PassphraseProvider } from "./passphrase-provider.ts";
 
 // Track temp dirs so every run self-cleans.
 const tempDirs: string[] = [];
@@ -40,14 +43,29 @@ function makeTempDir(): string {
   return dir;
 }
 
+// Snapshot QS_PASSPHRASE so no test leaks it into another (the default provider
+// reads it). Restored after every test.
+const ORIGINAL_QS_PASSPHRASE = process.env.QS_PASSPHRASE;
+
 afterEach(() => {
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   tempDirs.length = 0;
+  if (ORIGINAL_QS_PASSPHRASE === undefined) {
+    delete process.env.QS_PASSPHRASE;
+  } else {
+    process.env.QS_PASSPHRASE = ORIGINAL_QS_PASSPHRASE;
+  }
 });
 
 // A deterministic fixed key provider for the failure/behaviour arms.
 const FIXED_KEY = randomBytes(KEY_LENGTH_BYTES);
 const fixedKeyProvider = (): StoreKeyResult => ({ outcome: "loaded", key: FIXED_KEY });
+
+// Keychain-down provider: drives every passphrase-fallback branch.
+const keychainDown = (): StoreKeyResult => ({ outcome: "unavailable", detail: "no keychain" });
+// Provider factories for the passphrase seam.
+const providePassphrase = (passphrase: string): PassphraseProvider => () => ({ outcome: "provided", passphrase });
+const declineProvider: PassphraseProvider = () => ({ outcome: "declined" });
 
 const rec = (id: string, name: string, url: string) => ({ id, name, url });
 
@@ -210,15 +228,20 @@ describe("credential-store — ephemeral mode writes nothing", () => {
 });
 
 describe("credential-store — typed failure arms via injected deps", () => {
-  test("keychain unavailable on open → typed unavailable, no file written", () => {
+  test("keychain unavailable, first run, default provider (no QS_PASSPHRASE) → passphrase-declined, nothing written", () => {
     const dir = makeTempDir();
+    // The default env provider decides: with no QS_PASSPHRASE it declines, so the
+    // keychain-unavailable first-run path now yields passphrase-declined (Story 2.3),
+    // not the old bare `unavailable`.
+    delete process.env.QS_PASSPHRASE;
     const open = openCredentialStore({
       mode: "persistent",
       dir,
       loadStoreKey: (): StoreKeyResult => ({ outcome: "unavailable", detail: "no D-Bus" }),
     });
-    expect(open.outcome).toBe("unavailable");
+    expect(open.outcome).toBe("passphrase-declined");
     expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(false);
+    expect(existsSync(join(dir, STORE_META_FILE_NAME))).toBe(false);
   });
 
   test("key not decoding to 32 bytes → typed key-invalid, no file written", () => {
@@ -336,6 +359,339 @@ describe("credential-store — typed failure arms via injected deps", () => {
   });
 });
 
+describe("credential-store — passphrase fallback (keychain unavailable)", () => {
+  test("first run + passphrase provided → opens, writes non-secret descriptor, survives reopen with same passphrase", () => {
+    const dir = makeTempDir();
+    const conn = rec("c1", "prod", "postgres://admin:s3cr3t@db/prod");
+
+    const o1 = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("hunter2"),
+    });
+    expect(o1.outcome).toBe("opened");
+    if (o1.outcome !== "opened") return;
+    // Descriptor AND an empty encrypted `.enc` are both written at creation now
+    // (eager seed, P2), so a wrong passphrase on reopen always has ciphertext to
+    // authenticate against.
+    expect(existsSync(join(dir, STORE_META_FILE_NAME))).toBe(true);
+    expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(true);
+    expect(o1.store.saveConnection(conn).outcome).toBe("ok");
+    expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(true);
+
+    // Fresh instance, keychain STILL down, same passphrase → re-derives + decrypts.
+    const o2 = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("hunter2"),
+    });
+    expect(o2.outcome).toBe("opened");
+    if (o2.outcome !== "opened") return;
+    expect(o2.store.getConnection("c1")).toEqual(conn);
+    expect(o2.store.listConnections()).toHaveLength(1);
+  });
+
+  test("passphrase declined → passphrase-declined, nothing written", () => {
+    const dir = makeTempDir();
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: declineProvider,
+    });
+    expect(open.outcome).toBe("passphrase-declined");
+    expect(existsSync(join(dir, STORE_META_FILE_NAME))).toBe(false);
+    expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(false);
+  });
+
+  test("empty/whitespace passphrase → passphrase-invalid, nothing written", () => {
+    for (const blank of ["", "   ", "\t\n"]) {
+      const dir = makeTempDir();
+      const open = openCredentialStore({
+        mode: "persistent",
+        dir,
+        loadStoreKey: keychainDown,
+        passphraseProvider: providePassphrase(blank),
+      });
+      expect(open.outcome).toBe("passphrase-invalid");
+      expect(existsSync(join(dir, STORE_META_FILE_NAME))).toBe(false);
+      expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(false);
+    }
+  });
+
+  test("reopen passphrase store with the WRONG passphrase → corrupt (GCM auth-tag fail)", () => {
+    const dir = makeTempDir();
+    const o1 = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("right-passphrase"),
+    });
+    if (o1.outcome !== "opened") throw new Error("expected opened");
+    o1.store.saveConnection(rec("c1", "a", "postgres://x@h/a"));
+
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("WRONG-passphrase"),
+    });
+    expect(open.outcome).toBe("corrupt");
+  });
+
+  test("EMPTY passphrase store (never saved), reopen with WRONG passphrase → corrupt, not silently opened (P2)", () => {
+    const dir = makeTempDir();
+    // Create the store but do NOT save anything. The eager empty-`.enc` seed (P2)
+    // means there IS ciphertext to authenticate against.
+    const o1 = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("right-passphrase"),
+    });
+    if (o1.outcome !== "opened") throw new Error("expected opened");
+    expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(true);
+
+    // Wrong passphrase must FAIL (GCM) rather than be silently accepted + reseeded.
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("WRONG-passphrase"),
+    });
+    expect(open.outcome).toBe("corrupt");
+
+    // And the correct passphrase still opens the (empty) store — not locked out.
+    const ok = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("right-passphrase"),
+    });
+    expect(ok.outcome).toBe("opened");
+    if (ok.outcome !== "opened") return;
+    expect(ok.store.listConnections()).toHaveLength(0);
+  });
+
+  test("keychain-mode file, keychain now unavailable → key-unavailable (NOT routed to passphrase)", () => {
+    const dir = makeTempDir();
+    // Create a keychain-mode store (fixed key → NO descriptor written) and save.
+    const o1 = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    if (o1.outcome !== "opened") throw new Error("expected opened");
+    o1.store.saveConnection(rec("c1", "a", "postgres://x@h/a"));
+    expect(existsSync(join(dir, STORE_META_FILE_NAME))).toBe(false);
+
+    // Keychain now down; a passphrase can't decrypt a keychain-keyed file.
+    let passphraseConsulted = false;
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: () => {
+        passphraseConsulted = true;
+        return { outcome: "provided", passphrase: "irrelevant" };
+      },
+    });
+    expect(open.outcome).toBe("key-unavailable");
+    expect(passphraseConsulted).toBe(false);
+  });
+
+  test("keychain-mode file, keychain MINTED a fresh key (created) → key-unavailable, .enc not overwritten (P1)", () => {
+    const dir = makeTempDir();
+    // Existing keychain-mode store (fixed key → NO descriptor) with saved data.
+    const o1 = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    if (o1.outcome !== "opened") throw new Error("expected opened");
+    o1.store.saveConnection(rec("c1", "a", "postgres://x@h/a"));
+    expect(existsSync(join(dir, STORE_META_FILE_NAME))).toBe(false);
+    const encBefore = readFileSync(join(dir, STORE_FILE_NAME));
+
+    // Keychain had to CREATE a fresh key → the original key is gone. Decrypting
+    // with the new key would GCM-fail and misreport `corrupt`; instead it must be
+    // the distinct `key-unavailable` (file present, key gone).
+    const freshKey = randomBytes(KEY_LENGTH_BYTES);
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: (): StoreKeyResult => ({ outcome: "created", key: freshKey }),
+    });
+    expect(open.outcome).toBe("key-unavailable");
+    // The original ciphertext must be untouched — no destructive overwrite.
+    expect(readFileSync(join(dir, STORE_FILE_NAME)).equals(encBefore)).toBe(true);
+  });
+
+  test("descriptor is authoritative: passphrase store reopened while keychain is AVAILABLE still uses passphrase", () => {
+    const dir = makeTempDir();
+    const conn = rec("c1", "a", "postgres://x@h/a");
+    const o1 = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("the-passphrase"),
+    });
+    if (o1.outcome !== "opened") throw new Error("expected opened");
+    o1.store.saveConnection(conn);
+
+    // Keychain is now UP, but the descriptor pins passphrase mode → keychain ignored.
+    let keychainConsulted = false;
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: (): StoreKeyResult => {
+        keychainConsulted = true;
+        return { outcome: "loaded", key: FIXED_KEY };
+      },
+      passphraseProvider: providePassphrase("the-passphrase"),
+    });
+    expect(open.outcome).toBe("opened");
+    if (open.outcome !== "opened") return;
+    expect(keychainConsulted).toBe(false);
+    expect(open.store.getConnection("c1")).toEqual(conn);
+  });
+
+  test("raw files hold no plaintext, no passphrase, and no derived key", () => {
+    const dir = makeTempDir();
+    const passphrase = `pass-${crypto.randomUUID()}`;
+    const id = crypto.randomUUID();
+    const name = `conn-${crypto.randomUUID()}`;
+    const url = `mysql://root:${crypto.randomUUID()}@h/${crypto.randomUUID()}`;
+
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase(passphrase),
+    });
+    if (open.outcome !== "opened") throw new Error("expected opened");
+    open.store.saveConnection(rec(id, name, url));
+
+    const encText = readFileSync(join(dir, STORE_FILE_NAME), "utf8");
+    const metaText = readFileSync(join(dir, STORE_META_FILE_NAME), "utf8");
+
+    // Re-derive the key from the persisted descriptor to prove it is NOT at rest.
+    const meta = JSON.parse(metaText) as {
+      keyMode: string;
+      kdf: { salt: string; n: number; r: number; p: number; keylen: number };
+    };
+    expect(meta.keyMode).toBe("passphrase");
+    const derived = derivePassphraseKey(passphrase, Buffer.from(meta.kdf.salt, "base64"), {
+      N: meta.kdf.n,
+      r: meta.kdf.r,
+      p: meta.kdf.p,
+      keylen: meta.kdf.keylen,
+    });
+    if (derived.outcome !== "derived") throw new Error("expected derived");
+
+    for (const text of [encText, metaText]) {
+      for (const secret of [id, name, url, passphrase]) {
+        expect(text).not.toContain(secret);
+      }
+      expect(text).not.toContain(derived.key.toString("base64"));
+      expect(text).not.toContain(derived.key.toString("hex"));
+    }
+    expect(readFileSync(join(dir, STORE_FILE_NAME)).includes(derived.key)).toBe(false);
+    // The descriptor exposes only non-secret re-derivation material.
+    expect(Object.keys(meta).sort()).toEqual(["kdf", "keyMode", "schemaVersion"].sort());
+  });
+
+  test("descriptor 0o600 on POSIX", () => {
+    if (process.platform === "win32") return;
+    const dir = makeTempDir();
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("pw"),
+    });
+    if (open.outcome !== "opened") throw new Error("expected opened");
+    const mode = statSync(join(dir, STORE_META_FILE_NAME)).mode & 0o777;
+    expect(mode).toBe(0o600);
+  });
+
+  test("malformed descriptor content (bad JSON / wrong shape) → corrupt", () => {
+    for (const bad of ["not json at all", "{}", "null", '{"keyMode":"passphrase"}']) {
+      const dir = makeTempDir();
+      writeFileSync(join(dir, STORE_META_FILE_NAME), bad);
+      const open = openCredentialStore({
+        mode: "persistent",
+        dir,
+        loadStoreKey: keychainDown,
+        passphraseProvider: providePassphrase("pw"),
+      });
+      expect(open.outcome).toBe("corrupt");
+    }
+  });
+
+  // Helper: write a well-shaped descriptor with the given kdf overrides applied.
+  const writeDescriptorWith = (
+    dir: string,
+    over: Partial<{ schemaVersion: number; salt: string; n: number; r: number; p: number; keylen: number }> = {},
+  ): void => {
+    const descriptor = {
+      schemaVersion: over.schemaVersion ?? 1,
+      keyMode: "passphrase",
+      kdf: {
+        algo: "scrypt",
+        salt: over.salt ?? randomBytes(16).toString("base64"),
+        n: over.n ?? 2 ** 15,
+        r: over.r ?? 8,
+        p: over.p ?? 1,
+        keylen: over.keylen ?? KEY_LENGTH_BYTES,
+      },
+    };
+    writeFileSync(join(dir, STORE_META_FILE_NAME), JSON.stringify(descriptor));
+  };
+
+  test("descriptor with an unrecognized schemaVersion → schema-unknown (P3)", () => {
+    const dir = makeTempDir();
+    writeDescriptorWith(dir, { schemaVersion: 2 });
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("pw"),
+    });
+    expect(open.outcome).toBe("schema-unknown");
+  });
+
+  test("descriptor with degenerate/hostile KDF params → corrupt (P4)", () => {
+    // Each case is a well-shaped descriptor with ONE invalid KDF field.
+    const cases: Partial<{ salt: string; n: number; r: number; p: number; keylen: number }>[] = [
+      { salt: "" }, // empty salt → 0-byte salt → weakened KDF
+      { keylen: 16 }, // wrong AES key length
+      { n: 3000 }, // not a power of two
+      { n: 2 ** 30 }, // power of two but far out of range
+      { n: 2 ** 13 }, // power of two but below the floor
+      { r: 0 }, // r out of range
+      { p: 0 }, // p out of range
+    ];
+    for (const over of cases) {
+      const dir = makeTempDir();
+      writeDescriptorWith(dir, over);
+      const open = openCredentialStore({
+        mode: "persistent",
+        dir,
+        loadStoreKey: keychainDown,
+        passphraseProvider: providePassphrase("pw"),
+      });
+      expect(open.outcome).toBe("corrupt");
+    }
+  });
+
+  test("descriptor I/O read error (path is a directory) → unavailable, not corrupt", () => {
+    const dir = makeTempDir();
+    mkdirSync(join(dir, STORE_META_FILE_NAME)); // readFileSync → EISDIR
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: keychainDown,
+      passphraseProvider: providePassphrase("pw"),
+    });
+    expect(open.outcome).toBe("unavailable");
+  });
+});
+
 // --- Real-keychain happy path (self-cleaning) ---------------------------------
 // Uses a run-unique keychain account so cleanup never touches the user's real key.
 const TEST_KEY_ACCOUNT = `store-cred-test-${crypto.randomUUID()}`;
@@ -356,8 +712,11 @@ describe("credential-store — real Linux keychain happy path (or unavailable, b
     const dir = makeTempDir();
     const provider = (): StoreKeyResult => loadOrCreateStoreKey(realKeyDeps);
 
+    // No QS_PASSPHRASE: on a keychain-less box the first-run path declines the
+    // passphrase fallback rather than deriving one, so degrade to a green return.
+    delete process.env.QS_PASSPHRASE;
     const o1 = openCredentialStore({ mode: "persistent", dir, loadStoreKey: provider });
-    if (o1.outcome === "unavailable") {
+    if (o1.outcome === "unavailable" || o1.outcome === "passphrase-declined") {
       // Keychain-less box (WSL / headless CI). Expected, first-class outcome.
       expect(o1.detail.length).toBeGreaterThan(0);
       expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(false);
