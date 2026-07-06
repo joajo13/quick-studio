@@ -1,0 +1,94 @@
+name: Keyring Spike
+
+# Story 2.1 — prove @napi-rs/keyring under Bun per-platform (AR-20). Each matrix
+# leg runs the SAME committed smoke (src/core/keychain.test.ts) under Bun, and a
+# compiled-binary native-load check that mirrors the real `bun build --compile`
+# distribution path. The smoke is green whether the platform round-trips OR
+# reports keychain-unavailable, so a keychain-less leg is a recorded outcome, not
+# a red build.
+
+on:
+  push:
+    paths:
+      - "src/core/keychain.ts"
+      - "src/core/keychain.test.ts"
+      - "scripts/keyring-native-check.ts"
+      - ".github/workflows/keyring-spike.yml"
+      - "package.json"
+      - "bun.lock"
+  workflow_dispatch:
+
+jobs:
+  spike:
+    name: keyring smoke (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Cheap insurance: this job spawns a keyring daemon and runs self-compiled
+    # binaries, either of which could hang; cap it so a stuck leg fails fast
+    # instead of running to the 6h default.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Pin so the AR-20 parity attestation is tied to a known Bun version,
+          # not whatever "latest" happens to be on the passing run.
+          bun-version: 1.2.0
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # --- Linux: provision Secret Service so the round-trip can be attempted ---
+      # A GitHub ubuntu runner is headless with no unlocked keyring, so without
+      # this the wrapper would (correctly) report keychain-unavailable. We start a
+      # private D-Bus session and an unlocked login keyring, then run the smoke
+      # inside it so the Linux leg exercises a REAL round-trip.
+      - name: Install Secret Service (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring dbus-x11 libsecret-1-0
+
+      - name: Keychain smoke + compiled-binary check (Linux)
+        if: runner.os == 'Linux'
+        # This leg provisions a real Secret Service below, so it MUST prove a real
+        # round-trip — REQUIRE_ROUNDTRIP makes the native-check fail (not silently
+        # pass on `unavailable`) if provisioning didn't actually yield a backend.
+        env:
+          KEYRING_REQUIRE_ROUNDTRIP: "1"
+        run: |
+          dbus-run-session -- bash -c '
+            set -euo pipefail
+            # Unlock a fresh login keyring with an empty password and expose it
+            # as org.freedesktop.secrets for the child processes.
+            echo "" | gnome-keyring-daemon --unlock --components=secrets,pkcs11,ssh
+            bun test src/core/keychain.test.ts
+            bun build --compile scripts/keyring-native-check.ts --outfile ./keyring-native-check
+            ./keyring-native-check
+          '
+
+      # --- Windows / others: Credential Manager is always present ---
+      - name: Keychain smoke (non-Linux)
+        if: runner.os != 'Linux'
+        run: bun test src/core/keychain.test.ts
+
+      - name: Compiled-binary native-load check (non-Linux)
+        if: runner.os != 'Linux'
+        # Windows ships Credential Manager, so a real round-trip is expected and
+        # required — a mere `unavailable` here is a failure, not a pass.
+        # Force bash: on windows-latest the default shell is PowerShell, where
+        # `bun build --compile` emits `keyring-native-check.exe` and `./name`
+        # would not resolve it; Git Bash appends `.exe`, so the compiled binary
+        # runs deterministically.
+        shell: bash
+        env:
+          KEYRING_REQUIRE_ROUNDTRIP: "1"
+        run: |
+          bun build --compile scripts/keyring-native-check.ts --outfile ./keyring-native-check
+          ./keyring-native-check

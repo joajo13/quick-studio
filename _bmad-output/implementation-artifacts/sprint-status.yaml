@@ -67,7 +67,7 @@ development_status:
 
   # Epic 2: Persistent Mode & Credential Store
   epic-2: backlog
-  2-1-keyring-spike: backlog                    # Story 2.1: Spike — validate @napi-rs/keyring under Bun on Windows and Linux
+  2-1-keyring-spike: done                    # Story 2.1: Spike — validate @napi-rs/keyring under Bun on Windows and Linux
   2-2-encrypted-credential-store: backlog       # Story 2.2: Encrypted Credential Store at rest, key in OS keychain
   2-3-passphrase-fallback: backlog              # Story 2.3: Keychain-unavailable passphrase fallback
   2-4-manage-connections: backlog               # Story 2.4: Manage Connections (add, edit, remove)
