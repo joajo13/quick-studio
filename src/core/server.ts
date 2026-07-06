@@ -13,7 +13,7 @@
 import tailwind from "bun-plugin-tailwind";
 import { errorReply } from "../shared/contract.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
-import { dispatch } from "./rpc.ts";
+import { dispatch, type RpcContext } from "./rpc.ts";
 
 /** Loopback bind address — never widened in this story. */
 const BIND_HOST = "127.0.0.1";
@@ -26,8 +26,8 @@ export type Core = {
   readonly port: number;
   /** Per-boot session token (in-memory only; never log or persist). */
   readonly token: string;
-  /** Stop the server and release the port. */
-  stop(): void;
+  /** Stop the server and release the port. May be awaited (async teardown). */
+  stop(): void | Promise<void>;
 };
 
 const jsonHeaders = {
@@ -45,6 +45,18 @@ const htmlHeaders = {
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
 } as const;
+
+/** Options controlling `startCore`'s behavior beyond the default binding. */
+export type StartCoreOptions = {
+  /**
+   * Invoked (async, on a post-flush macrotask) when the `shutdown` RPC fires.
+   * Defaults to `server.stop(true)` so `startCore` stays self-contained and
+   * import-safe for `bun test` — it never reaches `process.exit` on its own.
+   * `bin/` overrides this with the shared shutdown controller so the UI path
+   * also exits the process.
+   */
+  onShutdownRequested?: () => void;
+};
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
@@ -119,7 +131,7 @@ function renderIndexHtml(token: string): string {
  * Boot the Core: mint a token, bundle the UI, and start `Bun.serve` on
  * `127.0.0.1`. Pass `port: 0` for an ephemeral port. Resolves once listening.
  */
-export async function startCore(port = 0): Promise<Core> {
+export async function startCore(port = 0, options: StartCoreOptions = {}): Promise<Core> {
   const token = mintSessionToken();
   const { js: appJs, css: appCss } = await buildUiBundle();
   const indexHtmlTemplate = renderIndexHtml(token);
@@ -130,6 +142,12 @@ export async function startCore(port = 0): Promise<Core> {
     async fetch(req): Promise<Response> {
       const url = new URL(req.url);
       const boundPort = server.port ?? 0;
+      const rpcContext: RpcContext = {
+        // Ack-before-teardown: NEVER call `onShutdownRequested` synchronously
+        // here — it would close the socket carrying this very reply. Deferring
+        // to a macrotask lets Bun flush the `/rpc` Response first.
+        requestShutdown: () => setTimeout(onShutdownRequested, 0),
+      };
 
       // --- Static UI assets ---------------------------------------------
       if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
@@ -198,7 +216,7 @@ export async function startCore(port = 0): Promise<Core> {
           );
         }
 
-        const reply = dispatch(parsed as { method: string; params?: unknown });
+        const reply = dispatch(parsed as { method: string; params?: unknown }, rpcContext);
         if (reply.ok) {
           return jsonResponse(reply, 200);
         }
@@ -211,6 +229,12 @@ export async function startCore(port = 0): Promise<Core> {
       return jsonResponse(errorReply("not_found", "Not found"), 404);
     },
   });
+
+  // Declared after `server` (its default closes over it) but before any
+  // request can be dispatched — Bun only invokes `fetch` once this synchronous
+  // setup has run to completion, so the closure is always well-formed by then.
+  const onShutdownRequested =
+    options.onShutdownRequested ?? (() => { void server.stop(true); });
 
   const boundPort = server.port ?? 0;
   const url = `http://${BIND_HOST}:${boundPort}`;

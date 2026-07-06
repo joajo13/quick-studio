@@ -5,8 +5,14 @@
  * Boots the Trusted Core and logs the bound loopback URL to stderr. CLI mode
  * parsing (Ephemeral vs Persistent) and browser-open land in story 1.2 — not
  * here. Logging is terse and to stderr only; the token is NEVER logged.
+ *
+ * Clean shutdown (story 1.5): SIGINT/SIGTERM and the UI's `shutdown` RPC all
+ * converge on one idempotent `ShutdownController` built over `core.stop` +
+ * `process.exit(0)`, so however the session ends it terminates at most once,
+ * promptly, and without stalling OS shutdown.
  */
 
+import { createShutdownController, type ShutdownController } from "../src/core/lifecycle.ts";
 import { startCore } from "../src/core/server.ts";
 
 /** Parse QS_PORT into a valid TCP port (0 = ephemeral). Rejects garbage early. */
@@ -25,7 +31,26 @@ function resolvePort(): number {
 }
 
 try {
-  const core = await startCore(resolvePort());
+  // Forward reference: `startCore` needs `onShutdownRequested` (so the UI's
+  // `shutdown` RPC converges on the same teardown), but the controller itself
+  // needs `core.stop`, which only exists once `startCore` resolves. The thunk
+  // below is only ever invoked later, from a live RPC — by then `controller`
+  // has been assigned.
+  // Initialized to a safe no-op so the thunk below can never deref `undefined`
+  // if the timing invariant is ever broken. The thunk is only invoked from a
+  // live RPC (post-boot), by which point `controller` is the real one.
+  let controller: ShutdownController = { initiate: async () => {} };
+  const core = await startCore(resolvePort(), {
+    onShutdownRequested: () => controller.initiate(),
+  });
+  controller = createShutdownController({ stop: core.stop, exit: () => process.exit(0) });
+
+  // Registering a signal listener suppresses the default terminate behavior,
+  // so the handler itself must exit — that's exactly what the controller does.
+  // Keep this synchronous: no awaited work, so OS shutdown is never stalled.
+  process.on("SIGINT", () => controller.initiate());
+  process.on("SIGTERM", () => controller.initiate());
+
   // stderr only, terse. Never log the session token.
   process.stderr.write(`quick-studio Core listening on ${core.url}\n`);
 } catch (err) {

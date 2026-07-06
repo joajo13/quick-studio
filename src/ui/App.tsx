@@ -9,7 +9,12 @@
  */
 
 import { useEffect, useReducer, useState } from "react";
-import type { HealthResult, RpcErrorEnvelope, RpcReply } from "../shared/contract.ts";
+import type {
+  HealthResult,
+  RpcErrorEnvelope,
+  RpcReply,
+  ShutdownResult,
+} from "../shared/contract.ts";
 import { Workspace } from "./workspace/Workspace.tsx";
 import {
   activateTab,
@@ -53,7 +58,8 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
 type Status =
   | { phase: "loading" }
   | { phase: "ok"; result: HealthResult }
-  | { phase: "error"; error: RpcErrorEnvelope | { code: string; message: string } };
+  | { phase: "error"; error: RpcErrorEnvelope | { code: string; message: string } }
+  | { phase: "stopped" };
 
 async function callHealth(): Promise<Status> {
   const token = window.__QS_TOKEN__ ?? "";
@@ -79,20 +85,53 @@ async function callHealth(): Promise<Status> {
   }
 }
 
+/**
+ * Mirrors `callHealth()`: same token-gated POST shape. The reply acks
+ * `{stopping:true}` BEFORE the Core tears itself down, so a thrown fetch here
+ * (connection dropped mid-teardown) is an EXPECTED shape of "it stopped," not
+ * a real failure — both paths resolve to the `stopped` phase.
+ */
+async function callShutdown(): Promise<Status> {
+  const token = window.__QS_TOKEN__ ?? "";
+  try {
+    const res = await fetch("/rpc", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-qs-token": token,
+      },
+      body: JSON.stringify({ method: "shutdown" }),
+    });
+    const body = (await res.json()) as RpcReply<ShutdownResult>;
+    if (body.ok) {
+      return { phase: "stopped" };
+    }
+    return { phase: "error", error: body.error };
+  } catch {
+    // Same network-error catch shape as `callHealth`, but here a dropped
+    // connection means the shutdown worked — the server is gone.
+    return { phase: "stopped" };
+  }
+}
+
 function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element {
   const dotColor =
     status.phase === "ok"
       ? "bg-emerald-500"
       : status.phase === "error"
         ? "bg-red-500"
-        : "bg-amber-500";
+        : status.phase === "stopped"
+          ? "bg-muted-foreground"
+          : "bg-amber-500";
 
   const label =
     status.phase === "loading"
       ? "Connecting…"
       : status.phase === "ok"
         ? `Connected · schema v${status.result.schemaVersion}`
-        : `Disconnected · ${status.error.code}`;
+        : status.phase === "stopped"
+          ? "Stopped"
+          : `Disconnected · ${status.error.code}`;
 
   const title =
     status.phase === "error" ? `${status.error.code}: ${status.error.message}` : label;
@@ -116,16 +155,28 @@ function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element 
 export function App(): React.JSX.Element {
   const [workspace, dispatch] = useReducer(workspaceReducer, undefined, emptyWorkspace);
   const [status, setStatus] = useState<Status>({ phase: "loading" });
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     let alive = true;
     void callHealth().then((s) => {
-      if (alive) setStatus(s);
+      // `stopped` is terminal: a late-resolving mount probe must never clobber
+      // the state the user reached by hitting Stop (else the indicator flips
+      // from "Stopped" back to a scary "Disconnected · network_error").
+      if (alive) setStatus((prev) => (prev.phase === "stopped" ? prev : s));
     });
     return () => {
       alive = false;
     };
   }, []);
+
+  const onStop = (): void => {
+    // Guard the destructive control: ignore repeat clicks so a double-click
+    // can't fire a second `shutdown` RPC, and reflect a pending state.
+    if (stopping) return;
+    setStopping(true);
+    void callShutdown().then((s) => setStatus(s));
+  };
 
   return (
     <div className="h-full">
@@ -134,6 +185,8 @@ export function App(): React.JSX.Element {
         onOpen={(kind) => dispatch({ type: "open", kind })}
         onActivate={(id) => dispatch({ type: "activate", id })}
         onClose={(id) => dispatch({ type: "close", id })}
+        onStop={onStop}
+        stopping={stopping}
         connectionIndicator={<ConnectionIndicator status={status} />}
       />
     </div>

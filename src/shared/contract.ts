@@ -239,6 +239,11 @@ export type HealthResult = {
   readonly schemaVersion: FrozenSchemaVersion;
 };
 
+/** Result payload for the `shutdown` method. Ack-before-teardown (AD-notes). */
+export type ShutdownResult = {
+  readonly stopping: true;
+};
+
 /**
  * A discriminated RPC reply: either a typed OK result or the error envelope.
  * `T` is the method's typed result payload.

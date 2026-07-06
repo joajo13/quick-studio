@@ -47,12 +47,16 @@ export function Workspace({
   onOpen,
   onActivate,
   onClose,
+  onStop,
+  stopping,
   connectionIndicator,
 }: {
   state: WorkspaceState;
   onOpen: (kind: TabKind) => void;
   onActivate: (id: number) => void;
   onClose: (id: number) => void;
+  onStop: () => void;
+  stopping: boolean;
   connectionIndicator: React.ReactNode;
 }): React.JSX.Element {
   const activeTab =
@@ -65,7 +69,17 @@ export function Workspace({
           <span className="text-sm font-semibold text-foreground">quick-studio</span>
           <span className="text-xs text-muted-foreground">workspace</span>
         </div>
-        {connectionIndicator}
+        <div className="flex items-center gap-2">
+          {connectionIndicator}
+          <button
+            type="button"
+            onClick={onStop}
+            disabled={stopping}
+            className="rounded-[var(--radius)] border border-border px-3 py-1 text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent disabled:hover:text-foreground"
+          >
+            {stopping ? "Stopping…" : "Stop"}
+          </button>
+        </div>
       </header>
 
       <PanelGroup direction="horizontal" className="flex-1">

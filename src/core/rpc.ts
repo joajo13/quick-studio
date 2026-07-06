@@ -13,10 +13,20 @@ import {
   type HealthResult,
   type RpcReply,
   type RpcRequest,
+  type ShutdownResult,
 } from "../shared/contract.ts";
 
-/** A dispatch handler: takes typed params, returns a typed result payload. */
-type Handler = (params: unknown) => unknown;
+/**
+ * Per-request capabilities threaded into every handler. `requestShutdown`
+ * schedules the actual teardown (never invoked synchronously by a handler —
+ * see `server.ts`), so the RPC reply can flush before the socket closes.
+ */
+export type RpcContext = {
+  readonly requestShutdown: () => void;
+};
+
+/** A dispatch handler: takes typed params + context, returns a typed result payload. */
+type Handler = (params: unknown, ctx: RpcContext) => unknown;
 
 const HANDLERS: Readonly<Record<string, Handler>> = {
   /** Liveness + schema-version probe. Proves the authenticated channel works. */
@@ -24,6 +34,14 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     status: "ok",
     schemaVersion: FROZEN_SCHEMA_VERSION,
   }),
+  /**
+   * Ack-before-teardown: reply first, teardown is scheduled by `ctx` on a
+   * macrotask (never run synchronously here) so this reply always flushes.
+   */
+  shutdown: (_params, ctx): ShutdownResult => {
+    ctx.requestShutdown();
+    return { stopping: true };
+  },
 };
 
 /**
@@ -31,7 +49,7 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
  * handler throw is caught and wrapped as an `internal_error` envelope, so the
  * caller never sees a naked error.
  */
-export function dispatch(request: RpcRequest): RpcReply<unknown> {
+export function dispatch(request: RpcRequest, ctx: RpcContext): RpcReply<unknown> {
   const { method } = request;
   if (typeof method !== "string" || method.length === 0) {
     return errorReply("bad_request", "RPC request is missing a method name");
@@ -47,7 +65,7 @@ export function dispatch(request: RpcRequest): RpcReply<unknown> {
   }
 
   try {
-    return okReply(handler(request.params));
+    return okReply(handler(request.params, ctx));
   } catch (err) {
     // Log the real cause to stderr (terse, server-side only). Do NOT echo the
     // raw exception message to the client `detail` — internal error text may
