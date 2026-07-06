@@ -1,0 +1,109 @@
+# generated: 2026-07-06
+# last_updated: 2026-07-06
+# project: quick-studio
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: _bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; sprint-status surfaces open ones
+#
+# KEY CONVENTION:
+# ===============
+# - Story keys are shortened slugs; the leading epic-story number (e.g. 1-3) is the
+#   traceability anchor back to the matching "### Story X.Y" heading in epics.md.
+#   The full story title is kept as an inline comment on each line.
+
+generated: 2026-07-06
+last_updated: 2026-07-06
+project: quick-studio
+project_key: NOKEY
+tracking_system: file-system
+story_location: _bmad-output/implementation-artifacts
+
+development_status:
+  # Epic 1: One-Command Workspace & Live Connection
+  epic-1: backlog
+  1-1-walking-skeleton: backlog                 # Story 1.1: Walking skeleton — Core boots on localhost and the UI connects with a session token
+  1-2-one-command-run-mode-select: backlog      # Story 1.2: One-command run with mode selection
+  1-3-connect-postgres-mysql: backlog           # Story 1.3: Connect to PostgreSQL and MySQL through one engine-neutral driver interface
+  1-4-workspace-shell-tabs-panels: backlog      # Story 1.4: Workspace shell — open/close Tabs and resizable Panels
+  1-5-clean-shutdown: backlog                   # Story 1.5: Clean, instant shutdown
+  1-6-localhost-binding-port-warning: backlog   # Story 1.6: Localhost-by-default binding + Port-Exposure Warning
+  1-7-one-command-install: backlog              # Story 1.7: One-command install via dual distribution
+  epic-1-retrospective: optional
+
+  # Epic 2: Persistent Mode & Credential Store
+  epic-2: backlog
+  2-1-keyring-spike: backlog                    # Story 2.1: Spike — validate @napi-rs/keyring under Bun on Windows and Linux
+  2-2-encrypted-credential-store: backlog       # Story 2.2: Encrypted Credential Store at rest, key in OS keychain
+  2-3-passphrase-fallback: backlog              # Story 2.3: Keychain-unavailable passphrase fallback
+  2-4-manage-connections: backlog               # Story 2.4: Manage Connections (add, edit, remove)
+  2-5-persist-workspace-state: backlog          # Story 2.5: Persist and restore Workspace state
+  epic-2-retrospective: optional
+
+  # Epic 3: Data & Schema Workspace
+  epic-3: backlog
+  3-1-guarded-core-executor: backlog            # Story 3.1: Single guarded Core executor — two request shapes, confirmation by shape, with adversarial guard
+  3-2-browse-rows-pagination: backlog           # Story 3.2: Browse table rows with pagination
+  3-3-edit-insert-delete-rows: backlog          # Story 3.3: Edit, insert, and delete rows
+  3-4-create-tables: backlog                    # Story 3.4: Create tables
+  3-5-inspect-indexes: backlog                  # Story 3.5: Inspect indexes
+  3-6-run-adhoc-sql: backlog                    # Story 3.6: Run ad-hoc SQL in a query Tab
+  epic-3-retrospective: optional
+
+  # Epic 4: Interactive ERD
+  epic-4: backlog
+  4-1-render-erd: backlog                       # Story 4.1: Render and navigate the relational ERD
+  4-2-persist-erd-layout: backlog               # Story 4.2: Persist and restore ERD layout
+  epic-4-retrospective: optional
+
+  # Epic 5: AI Chat with Executable-JS Sandbox
+  epic-5: backlog
+  5-1-configure-ai-providers: backlog           # Story 5.1: Configure AI Providers with user-supplied API keys
+  5-2-chat-qa-schema-only: backlog              # Story 5.2: Chat Q&A with the Core as sole Provider caller, schema-only by default
+  5-3-nl-to-query-execution: backlog            # Story 5.3: Natural-language to query + execution from chat
+  5-4-streaming-reasoning: backlog              # Story 5.4: Streaming responses with visible reasoning
+  5-5-crossorigin-js-sandbox: backlog           # Story 5.5: Cross-origin executable-JS sandbox with adversarial containment
+  5-6-rich-mdx-rendering: backlog               # Story 5.6: Rich MDX rendering (Markdown + executable JS + charts)
+  epic-5-retrospective: optional
+
+  # Epic 6: Local Report Generation
+  epic-6: backlog
+  6-1-build-report: backlog                     # Story 6.1: Build a Report from query results
+  6-2-test-to-prod-targeting: backlog           # Story 6.2: Test-to-production Report targeting
+  6-3-export-static-snapshot: backlog           # Story 6.3: Export as a static Snapshot
+  6-4-export-live-report: backlog               # Story 6.4: Export as a Live Report
+  epic-6-retrospective: optional
