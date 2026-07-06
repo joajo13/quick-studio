@@ -7,13 +7,15 @@
  * and importing/booting `startCore` never reaches `process.exit` (the runner
  * surviving these tests is that assertion).
  *
- * One shared boot: `startCore` runs `buildUiBundle` (a full Tailwind build) on
- * every call, so booting once keeps the suite fast — hence a generous
- * `beforeAll` timeout and sequential assertions on a single Core.
+ * One shared boot keeps the suite fast — hence a generous `beforeAll` timeout
+ * and sequential assertions on a single Core. As of story 1.7 the UI is bundled
+ * at build time (`src/core/ui-bundle.generated.ts`) and served pre-built, so the
+ * generated module MUST exist before `bun test` (run `bun run build` first).
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { renderIndexHtml, startCore, type Core } from "./server.ts";
+import { uiBundle } from "./ui-bundle.generated.ts";
 
 let core: Core;
 let shutdownCalls = 0;
@@ -78,6 +80,33 @@ test("default boot is not exposed and injects exposed:false into the served HTML
 // duration of the run, an unacceptable smell in a security-first story. The
 // `startCore` → `core.exposed` plumbing is proven by the default boot above; the
 // `isExposed` classification is covered in `binding.test.ts`.
+// Story 1.7: the Core serves the pre-built UI bundle from the ONE generated
+// module — never a runtime `Bun.build`. These assertions lock that boot serves
+// exactly `uiBundle.js` / `uiBundle.css`, which is what makes the compiled
+// binary and the global-install path ship a byte-identical UI.
+describe("serves the pre-built UI bundle", () => {
+  test("GET /app.js returns 200 with the React app bundle", async () => {
+    const res = await fetch(`${core.url}/app.js`);
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(body.length).toBeGreaterThan(100);
+    // Proof it's the real app bundle: the entry mounts into `#root`.
+    expect(body).toContain("root");
+    // Boot serves exactly the pre-built module, not a runtime build.
+    expect(body).toBe(uiBundle.js);
+  });
+
+  test("GET /app.css returns 200 with the pre-built stylesheet", async () => {
+    const res = await fetch(`${core.url}/app.css`);
+    const body = await res.text();
+
+    expect(res.status).toBe(200);
+    expect(body.length).toBeGreaterThan(0);
+    expect(body).toBe(uiBundle.css);
+  });
+});
+
 describe("renderIndexHtml exposure injection", () => {
   test("carries exposed:true and the bound host into the served HTML", () => {
     const html = renderIndexHtml("abc123", { exposed: true, host: "0.0.0.0", port: 4321 });

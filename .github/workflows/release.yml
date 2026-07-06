@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      # Serialize the matrix legs: both upload to the same release for the tag,
+      # and parallel create/update via action-gh-release can race (one leg 422s
+      # and drops its asset). One leg at a time keeps the release consistent.
+      max-parallel: 1
+      matrix:
+        include:
+          - target: bun-linux-x64
+            outfile: quick-studio-linux-x64
+          - target: bun-windows-x64
+            outfile: quick-studio-windows-x64.exe
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build UI bundle
+        run: bun run build
+
+      - name: Compile self-contained binary
+        run: bun build --compile --target=${{ matrix.target }} bin/quick-studio.ts --outfile ${{ matrix.outfile }}
+
+      - name: Upload to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.outfile }}

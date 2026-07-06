@@ -1,12 +1,25 @@
 {
   "name": "quick-studio",
   "version": "0.0.1",
-  "private": true,
   "type": "module",
   "description": "Lightweight local-first DB manager (Postgres + MySQL) — walking skeleton",
+  "bin": {
+    "quick-studio": "bin/quick-studio.ts"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
   "scripts": {
-    "dev": "bun run bin/quick-studio.ts",
-    "build": "bun build ./src/ui/main.tsx --outdir ./dist --target browser",
+    "build": "bun scripts/build-ui.ts",
+    "build:binary": "bun run build && bun build --compile bin/quick-studio.ts --outfile dist/quick-studio",
+    "dev": "bun run build && bun run bin/quick-studio.ts",
+    "prepare": "bun run build",
+    "prepublishOnly": "bun run build",
     "test": "bun test"
   },
   "dependencies": {
