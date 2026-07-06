@@ -1,20 +1,54 @@
 /**
- * quick-studio UI (Ring 2) — App.
+ * quick-studio UI (Ring 2) — App / shell root.
  *
- * Minimal React 19 component. NO Tailwind/shadcn theming yet (that lands with
- * the Workspace shell in 1.4). Reads the injected per-boot token, calls the
- * `health` RPC over `POST /rpc` with the `X-QS-Token` header, and renders the
- * status + frozen-data schema version — proving the authenticated channel.
+ * Hosts the in-memory Workspace state (Ephemeral — React memory only) over the
+ * pure `workspace-state` model via `useReducer`, renders the Workspace shell,
+ * and still performs the token-gated `health` RPC on mount to drive a small
+ * connection indicator — proving the authenticated Core↔UI channel from story
+ * 1.1 remains intact.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import type { HealthResult, RpcErrorEnvelope, RpcReply } from "../shared/contract.ts";
+import { Workspace } from "./workspace/Workspace.tsx";
+import {
+  activateTab,
+  closeTab,
+  emptyWorkspace,
+  openTab,
+  type TabKind,
+  type WorkspaceState,
+} from "./workspace/workspace-state.ts";
 
 declare global {
   interface Window {
     __QS_TOKEN__?: string;
   }
 }
+
+/* ------------------------------------------------------------------ *
+ * Workspace reducer over the pure model
+ * ------------------------------------------------------------------ */
+
+type WorkspaceAction =
+  | { type: "open"; kind: TabKind }
+  | { type: "close"; id: number }
+  | { type: "activate"; id: number };
+
+function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
+  switch (action.type) {
+    case "open":
+      return openTab(state, action.kind);
+    case "close":
+      return closeTab(state, action.id);
+    case "activate":
+      return activateTab(state, action.id);
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Connection indicator — the proven token-gated `health` channel
+ * ------------------------------------------------------------------ */
 
 type Status =
   | { phase: "loading" }
@@ -45,7 +79,42 @@ async function callHealth(): Promise<Status> {
   }
 }
 
+function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element {
+  const dotColor =
+    status.phase === "ok"
+      ? "bg-emerald-500"
+      : status.phase === "error"
+        ? "bg-red-500"
+        : "bg-amber-500";
+
+  const label =
+    status.phase === "loading"
+      ? "Connecting…"
+      : status.phase === "ok"
+        ? `Connected · schema v${status.result.schemaVersion}`
+        : `Disconnected · ${status.error.code}`;
+
+  const title =
+    status.phase === "error" ? `${status.error.code}: ${status.error.message}` : label;
+
+  return (
+    <div
+      data-testid="health"
+      title={title}
+      className="flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1 text-xs text-muted-foreground"
+    >
+      <span className={`inline-block h-2 w-2 rounded-full ${dotColor}`} aria-hidden />
+      <span>{label}</span>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * App shell root
+ * ------------------------------------------------------------------ */
+
 export function App(): React.JSX.Element {
+  const [workspace, dispatch] = useReducer(workspaceReducer, undefined, emptyWorkspace);
   const [status, setStatus] = useState<Status>({ phase: "loading" });
 
   useEffect(() => {
@@ -59,30 +128,14 @@ export function App(): React.JSX.Element {
   }, []);
 
   return (
-    <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem", lineHeight: 1.5 }}>
-      <h1 style={{ margin: 0 }}>quick-studio</h1>
-      <p style={{ color: "#666" }}>walking skeleton — authenticated Core↔UI channel</p>
-
-      {status.phase === "loading" && <p data-testid="health">Connecting…</p>}
-
-      {status.phase === "ok" && (
-        <div data-testid="health">
-          <p>
-            Core health: <strong style={{ color: "#0a0" }}>{status.result.status}</strong>
-          </p>
-          <p>
-            Frozen-data schema version: <strong>{status.result.schemaVersion}</strong>
-          </p>
-        </div>
-      )}
-
-      {status.phase === "error" && (
-        <div data-testid="health" style={{ color: "#c00" }}>
-          <p>
-            RPC failed: <code>{status.error.code}</code> — {status.error.message}
-          </p>
-        </div>
-      )}
-    </main>
+    <div className="h-full">
+      <Workspace
+        state={workspace}
+        onOpen={(kind) => dispatch({ type: "open", kind })}
+        onActivate={(id) => dispatch({ type: "activate", id })}
+        onClose={(id) => dispatch({ type: "close", id })}
+        connectionIndicator={<ConnectionIndicator status={status} />}
+      />
+    </div>
   );
 }

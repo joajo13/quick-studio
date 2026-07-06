@@ -1,0 +1,61 @@
+/*
+ * quick-studio UI (Ring 2) — global styles + design tokens.
+ *
+ * Tailwind v4 entry. Processed through Bun.build via `bun-plugin-tailwind`
+ * (main.tsx imports this file), emitted as the `/app.css` asset by the Core.
+ *
+ * Dark-first, restrained shadcn-convention aesthetic for a dev tool.
+ * Anti-reference: the dense, Eclipse-era DBeaver UI. Tokens are CSS custom
+ * properties; the `@theme inline` block maps them to Tailwind utility colors so
+ * classes like `bg-background`, `text-foreground`, `border-border` resolve.
+ */
+
+@import "tailwindcss";
+
+/* Dark-first: the tokens defined on :root ARE the dark theme. */
+:root {
+  --background: hsl(224 14% 8%);
+  --foreground: hsl(210 14% 92%);
+  --card: hsl(224 13% 11%);
+  --card-foreground: hsl(210 14% 92%);
+  --border: hsl(220 10% 20%);
+  --muted: hsl(223 12% 15%);
+  --muted-foreground: hsl(215 12% 60%);
+  --primary: hsl(210 90% 60%);
+  --primary-foreground: hsl(210 40% 98%);
+  --accent: hsl(223 14% 18%);
+  --accent-foreground: hsl(210 14% 92%);
+  --radius: 0.5rem;
+}
+
+/* Map design tokens onto Tailwind's color scale so utilities resolve them. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-border: var(--border);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --radius: var(--radius);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}

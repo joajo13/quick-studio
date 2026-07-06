@@ -8,6 +8,9 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.tsx";
+// Import the Tailwind v4 stylesheet so `Bun.build` (with bun-plugin-tailwind)
+// emits a CSS asset the Core serves at `/app.css`.
+import "./styles/globals.css";
 
 const rootEl = document.getElementById("root");
 if (rootEl === null) {

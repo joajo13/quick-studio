@@ -10,6 +10,7 @@
  * to the RPC dispatcher. The token — not loopback — is the real gate (AD-12).
  */
 
+import tailwind from "bun-plugin-tailwind";
 import { errorReply } from "../shared/contract.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { dispatch } from "./rpc.ts";
@@ -49,12 +50,18 @@ function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
 }
 
+/** The built browser UI: JS entry bundle + the Tailwind-emitted stylesheet. */
+type UiBundle = { readonly js: string; readonly css: string };
+
 /**
- * Bundle the browser UI (Ring 2) with Bun's bundler and return the JS source.
- * Built once at boot; served as a static asset. Throws if the build fails so a
- * cold boot never silently serves a broken page.
+ * Bundle the browser UI (Ring 2) with Bun's bundler and return the JS source
+ * AND the stylesheet. `main.tsx` imports `styles/globals.css`, and the
+ * `bun-plugin-tailwind` plugin processes Tailwind v4 (`@import "tailwindcss"`),
+ * so the build emits a JS entry output plus a `.css` asset. Built once at boot
+ * and served as static assets. Throws if the build fails so a cold boot never
+ * silently serves a broken page.
  */
-async function buildUiBundle(): Promise<string> {
+async function buildUiBundle(): Promise<UiBundle> {
   // `import.meta.dir` is an OS-native path on every platform (unlike
   // `new URL(...).pathname`, which yields `/C:/...` on Windows).
   const entry = `${import.meta.dir}/../ui/main.tsx`;
@@ -62,17 +69,26 @@ async function buildUiBundle(): Promise<string> {
     entrypoints: [entry],
     target: "browser",
     minify: false,
+    plugins: [tailwind],
     define: { "process.env.NODE_ENV": '"production"' },
   });
   if (!result.success) {
     const msg = result.logs.map((l) => String(l)).join("\n");
     throw new Error(`UI bundle build failed:\n${msg}`);
   }
-  const [artifact] = result.outputs;
-  if (artifact === undefined) {
-    throw new Error("UI bundle produced no output artifact");
+  // Select the JS entry by kind (robust if code-splitting ever emits extra
+  // `.js` chunks), falling back to extension; the stylesheet is a `.css` asset.
+  const jsArtifact =
+    result.outputs.find((o) => o.kind === "entry-point") ??
+    result.outputs.find((o) => o.path.endsWith(".js"));
+  const cssArtifact = result.outputs.find((o) => o.path.endsWith(".css"));
+  if (jsArtifact === undefined) {
+    throw new Error("UI bundle produced no JS output artifact");
   }
-  return await artifact.text();
+  if (cssArtifact === undefined) {
+    throw new Error("UI bundle produced no CSS output artifact (Tailwind plugin?)");
+  }
+  return { js: await jsArtifact.text(), css: await cssArtifact.text() };
 }
 
 /**
@@ -88,6 +104,7 @@ function renderIndexHtml(token: string): string {
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>quick-studio</title>
+    <link rel="stylesheet" href="/app.css" />
     <script>window.__QS_TOKEN__ = ${JSON.stringify(safeToken)};</script>
   </head>
   <body>
@@ -104,7 +121,7 @@ function renderIndexHtml(token: string): string {
  */
 export async function startCore(port = 0): Promise<Core> {
   const token = mintSessionToken();
-  const appJs = await buildUiBundle();
+  const { js: appJs, css: appCss } = await buildUiBundle();
   const indexHtmlTemplate = renderIndexHtml(token);
 
   const server = Bun.serve({
@@ -123,6 +140,15 @@ export async function startCore(port = 0): Promise<Core> {
           status: 200,
           headers: {
             "content-type": "text/javascript; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          },
+        });
+      }
+      if (req.method === "GET" && url.pathname === "/app.css") {
+        return new Response(appCss, {
+          status: 200,
+          headers: {
+            "content-type": "text/css; charset=utf-8",
             "x-content-type-options": "nosniff",
           },
         });
