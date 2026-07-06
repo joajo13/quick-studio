@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quick-studio — Solution Design</title>
+<style>
+  :root{
+    --bg:#0a0a0b; --panel:#111114; --panel-2:#161619; --border:#26262b;
+    --fg:#e7e7ea; --muted:#9a9aa3; --faint:#6b6b74;
+    --ring1:#f97316; --ring2:#38bdf8; --ring3:#a78bfa;
+    --accent:#f97316; --ok:#34d399; --warn:#fbbf24; --danger:#f87171;
+    --radius:12px; --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Inter,sans-serif;
+  }
+  @media (prefers-color-scheme: light){
+    :root{--bg:#fafafa;--panel:#fff;--panel-2:#f4f4f5;--border:#e4e4e7;--fg:#18181b;--muted:#52525b;--faint:#a1a1aa;}
+  }
+  :root[data-theme="light"]{--bg:#fafafa;--panel:#fff;--panel-2:#f4f4f5;--border:#e4e4e7;--fg:#18181b;--muted:#52525b;--faint:#a1a1aa;}
+  :root[data-theme="dark"]{--bg:#0a0a0b;--panel:#111114;--panel-2:#161619;--border:#26262b;--fg:#e7e7ea;--muted:#9a9aa3;--faint:#6b6b74;}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+  a{color:var(--ring1);text-decoration:none}
+  code,.mono{font-family:var(--mono);font-size:.86em}
+  header.hero{padding:72px 0 40px;border-bottom:1px solid var(--border)}
+  .kicker{font-family:var(--mono);font-size:12px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);margin-bottom:14px}
+  h1{font-size:clamp(34px,6vw,54px);line-height:1.04;margin:0 0 16px;letter-spacing:-.02em;font-weight:680}
+  .lede{font-size:19px;color:var(--muted);max-width:70ch;margin:0}
+  .meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:26px}
+  .chip{font-family:var(--mono);font-size:12px;padding:5px 11px;border:1px solid var(--border);border-radius:999px;color:var(--muted);background:var(--panel)}
+  .chip b{color:var(--fg);font-weight:600}
+  section{padding:52px 0;border-bottom:1px solid var(--border)}
+  h2{font-size:13px;font-family:var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin:0 0 8px}
+  .h2sub{font-size:26px;font-weight:640;letter-spacing:-.01em;margin:0 0 28px}
+  h3{font-size:20px;margin:34px 0 12px;font-weight:620}
+  p{margin:0 0 16px}
+  .paradigm-quote{font-size:22px;line-height:1.4;color:var(--fg);border-left:3px solid var(--accent);padding:4px 0 4px 20px;margin:0 0 28px;font-weight:500}
+  .paradigm-quote b{color:var(--accent)}
+
+  /* rings */
+  .rings{display:grid;grid-template-columns:1.1fr .9fr;gap:28px;align-items:center}
+  @media(max-width:760px){.rings{grid-template-columns:1fr}}
+  .ringviz{position:relative;aspect-ratio:1;max-width:380px;margin:0 auto;width:100%}
+  .ringviz svg{width:100%;height:auto;display:block}
+  .ringrow{display:flex;gap:14px;padding:16px;border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);margin-bottom:12px}
+  .ringrow .no{font-family:var(--mono);font-weight:700;font-size:18px;width:26px;flex:none}
+  .r1 .no{color:var(--ring1)} .r2 .no{color:var(--ring2)} .r3 .no{color:var(--ring3)}
+  .ringrow h4{margin:0 0 3px;font-size:15px}
+  .ringrow p{margin:0;font-size:13.5px;color:var(--muted)}
+  .flow{font-family:var(--mono);font-size:13px;color:var(--muted);text-align:center;margin-top:18px}
+  .flow b{color:var(--fg)}
+
+  /* AD cards */
+  .ad{border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:18px 20px;margin-bottom:14px;border-left:3px solid var(--border)}
+  .ad.sec{border-left-color:var(--danger)}
+  .ad.crit{border-left-color:var(--accent);background:linear-gradient(180deg,color-mix(in srgb,var(--accent) 6%,var(--panel)),var(--panel))}
+  .ad .id{font-family:var(--mono);font-size:12px;color:var(--accent);font-weight:700}
+  .ad h4{margin:6px 0 12px;font-size:17px;font-weight:620}
+  .ad .grid{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:14px}
+  .ad .lbl{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);padding-top:2px}
+  .ad .binds{color:var(--muted)}
+  .tag{display:inline-block;font-family:var(--mono);font-size:10px;padding:2px 7px;border-radius:5px;margin-left:8px;vertical-align:middle;letter-spacing:.05em}
+  .tag.crit{background:color-mix(in srgb,var(--accent) 20%,transparent);color:var(--accent)}
+  .tag.sec{background:color-mix(in srgb,var(--danger) 18%,transparent);color:var(--danger)}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin:0 0 8px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  th{font-family:var(--mono);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint);font-weight:600}
+  td .mono{color:var(--muted)}
+  .scroll{overflow-x:auto}
+  .target{color:var(--ok);font-family:var(--mono);font-size:13px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:680px){.grid2{grid-template-columns:1fr}}
+  .card{border:1px solid var(--border);border-radius:var(--radius);background:var(--panel);padding:16px 18px}
+  .card h4{margin:0 0 8px;font-size:14px;font-family:var(--mono);color:var(--faint);text-transform:uppercase;letter-spacing:.06em}
+  .card ul{margin:0;padding-left:18px;font-size:14px;color:var(--muted)}
+  .card li{margin-bottom:5px}
+  .resolved{display:flex;gap:10px;align-items:baseline;padding:12px 0;border-bottom:1px solid var(--border)}
+  .resolved:last-child{border-bottom:0}
+  .resolved .q{font-family:var(--mono);font-size:12px;color:var(--danger);flex:none;width:132px}
+  .resolved .a{font-size:14px}
+  .resolved .a b{color:var(--ok)}
+  footer{padding:40px 0 80px;color:var(--faint);font-size:13px;font-family:var(--mono)}
+  .toggle{position:fixed;top:16px;right:16px;background:var(--panel);border:1px solid var(--border);color:var(--muted);border-radius:8px;padding:7px 11px;font-family:var(--mono);font-size:12px;cursor:pointer;z-index:9}
+  .toggle:hover{color:var(--fg)}
+</style>
+</head>
+<body>
+<button class="toggle" onclick="var r=document.documentElement;r.setAttribute('data-theme',r.getAttribute('data-theme')==='dark'?'light':'dark')">◐ theme</button>
+
+<header class="hero"><div class="wrap">
+  <div class="kicker">Architecture Spine · Solution Design</div>
+  <h1>quick-studio</h1>
+  <p class="lede">A lightweight, local-first database manager — one command to run, a fast web UI on <code>127.0.0.1</code>, a multi-provider AI chat that turns questions into queries, and local report generation. This is the architecture that keeps every feature honest to one promise: <b>lightweight is the identity, fast is the promise.</b></p>
+  <div class="meta">
+    <span class="chip">Paradigm · <b>Three-ring trust model</b></span>
+    <span class="chip">Altitude · <b>Initiative</b></span>
+    <span class="chip">Stack · <b>Full TypeScript / Bun</b></span>
+    <span class="chip">Platforms · <b>Windows + Linux</b></span>
+    <span class="chip">Invariants · <b>16 AD</b></span>
+    <span class="chip">Status · <b>Final</b></span>
+  </div>
+</div></header>
+
+<section><div class="wrap">
+  <h2>The paradigm</h2>
+  <div class="h2sub">Three rings of trust</div>
+  <p class="paradigm-quote">Data flows <b>outward</b> only; capability never flows <b>inward</b>.</p>
+  <p>The whole product is one privilege-separated local web app. Three concentric rings of decreasing trust, and no feature may build a path that lets a less-trusted ring reach a more-trusted ring's resources. This is the security model — there are no user accounts; the ring boundary <em>is</em> the boundary that matters.</p>
+  <div class="rings">
+    <div>
+      <div class="ringrow r1"><div class="no">1</div><div><h4>Trusted Core <span style="color:var(--faint);font-weight:400">· Bun process</span></h4><p>Sole holder of DB connections, decrypted credentials, and Provider keys. The only SQL executor and the only Provider caller. Home of the destructive-statement guard and port-exposure watcher.</p></div></div>
+      <div class="ringrow r2"><div class="no">2</div><div><h4>Semi-trusted UI <span style="color:var(--faint);font-weight:400">· browser origin</span></h4><p>React / shadcn. Orchestrates the workspace but holds no credential and runs no SQL — it asks the Core over localhost with a session token.</p></div></div>
+      <div class="ringrow r3"><div class="no">3</div><div><h4>Untrusted Sandbox <span style="color:var(--faint);font-weight:400">· cross-origin iframe</span></h4><p>Where the LLM's generated MDX JavaScript runs. Pure render, fed one-way. No network, filesystem, backend, credential, or SQL access — it can only draw.</p></div></div>
+    </div>
+    <div class="ringviz">
+      <svg viewBox="0 0 200 200" role="img" aria-label="Three concentric trust rings">
+        <circle cx="100" cy="100" r="94" fill="none" stroke="var(--ring3)" stroke-width="1.5" opacity=".5"/>
+        <circle cx="100" cy="100" r="94" fill="color-mix(in srgb,var(--ring3) 7%,transparent)"/>
+        <circle cx="100" cy="100" r="62" fill="none" stroke="var(--ring2)" stroke-width="1.5" opacity=".6"/>
+        <circle cx="100" cy="100" r="62" fill="color-mix(in srgb,var(--ring2) 8%,transparent)"/>
+        <circle cx="100" cy="100" r="32" fill="none" stroke="var(--ring1)" stroke-width="1.5"/>
+        <circle cx="100" cy="100" r="32" fill="color-mix(in srgb,var(--ring1) 14%,transparent)"/>
+        <text x="100" y="103" text-anchor="middle" fill="var(--ring1)" font-size="11" font-family="monospace" font-weight="700">CORE</text>
+        <text x="100" y="52" text-anchor="middle" fill="var(--ring2)" font-size="8.5" font-family="monospace">UI</text>
+        <text x="100" y="18" text-anchor="middle" fill="var(--ring3)" font-size="8.5" font-family="monospace">SANDBOX</text>
+        <path d="M100 100 L100 8" stroke="var(--faint)" stroke-width="1" stroke-dasharray="2 3" opacity=".5" marker-end="url(#a)"/>
+        <defs><marker id="a" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto"><path d="M0 0 L6 3 L0 6 z" fill="var(--faint)"/></marker></defs>
+      </svg>
+      <div class="flow">data → <b>outward</b> · requests → inward</div>
+    </div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>The decisions</h2>
+  <div class="h2sub">16 architecture invariants</div>
+  <p>Each fixes a call a future builder couldn't read off compliant code — the durable half of the contract. <span class="tag sec">security</span> marks a boundary invariant; <span class="tag crit">gate-hardened</span> marks one tightened or added by the adversarial review that closed a real hole.</p>
+
+  <div class="ad crit"><div class="id">AD-1</div><h4>Three-ring trust model is the root invariant</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>Every runtime unit belongs to exactly one ring. Data passes outward; capability and requests cross only to the ring immediately inward, via that boundary's authenticated channel. No unit widens its own ring's powers.</span>
+    <span class="lbl">Binds</span><span class="binds">all</span></div></div>
+
+  <div class="ad sec"><div class="id">AD-2</div><h4>The Core is the sole holder of secrets, sole SQL executor, sole Provider caller</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>Connections, decrypted credentials, and Provider keys exist only in the Core; all SQL runs there; every outbound Provider call is made there. Rings 2 &amp; 3 issue typed requests and receive results — never holding a credential or running SQL.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-4, 7–11, 14, 15</span></div></div>
+
+  <div class="ad sec crit"><div class="id">AD-3 <span class="tag crit">gate-hardened</span></div><h4>The Sandbox is a cross-origin iframe, pure-render, fed one-way</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>MDX JS runs in a separate-origin iframe — <code>allow-scripts</code> <em>without</em> <code>allow-same-origin</code>, CSP <code>default-src 'none'</code>. The channel is one-way for data: Ring 2 pushes frozen data in; the sandbox emits only render/interaction signals out. It cannot request data or trigger a query. In-process isolation (SES/QuickJS/ShadowRealm) is never the boundary — only the cross-origin process boundary is.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-17, R1</span></div></div>
+
+  <div class="ad sec crit"><div class="id">AD-4 <span class="tag crit">gate-hardened</span></div><h4>One Core executor gates every mutation; confirmation policy is set by request <em>shape</em>, not by ring</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>Every mutation runs through one Core executor — the sole classifier of risk (a UI dialog is UX, never the gate). It accepts <strong>two request shapes</strong>: <strong>(a) Structured operations</strong> — typed, parameterized UI-builder requests (single-row grid DML by primary key, and the create-table builder); the Core composes the SQL, so the path can express only a single-row <code>INSERT</code>/<code>UPDATE</code>/<code>DELETE</code> or a <code>CREATE TABLE</code> — never <code>DROP</code>/<code>TRUNCATE</code>/<code>ALTER</code>, raw, multi-row, or multi-statement; <code>INSERT</code>, single-row <code>UPDATE</code>, and <code>CREATE TABLE</code> auto-commit, row <code>DELETE</code> always confirms. <strong>(b) Raw SQL text</strong> — query Tab / AI, classified as opaque text; <code>UPDATE</code>, <code>DELETE</code>, <code>DROP</code>, <code>TRUNCATE</code>, <code>ALTER</code> are default-deny, always confirmed, and multi-statement input is rejected or split so nothing rides behind a safe SELECT; <code>DROP</code>/<code>TRUNCATE</code>/<code>ALTER</code> can arrive only on this path. The invariant holds — all mutation flows through the one executor, always parameterized; only the confirmation policy differs by shape.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-8, 9, 11, 15, R4</span></div></div>
+
+  <div class="ad sec"><div class="id">AD-5</div><h4>Credential Store: encrypted at rest, key in OS keychain, passphrase fallback, never plaintext</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>AES-256-GCM file; 32-byte key in the OS keychain (Windows Credential Manager / Linux Secret Service); passphrase-derived key when no keychain. Plaintext is never written, even as fallback. Ephemeral keys are session-only, in memory.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-4, 5, 6, 14, R2</span></div></div>
+
+  <div class="ad sec"><div class="id">AD-6</div><h4>Localhost by default; active exposure watcher</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>Binds <code>127.0.0.1</code> unless explicitly overridden. A watcher raises a prominent Port-Exposure Warning on any non-loopback binding, explaining the risk and how to revert.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-21, 22, R3</span></div></div>
+
+  <div class="ad sec crit"><div class="id">AD-7 <span class="tag crit">gate-hardened</span></div><h4>The Core owns the Provider boundary via a typed payload; schema-only default</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>The one outbound channel is the user's Provider, called by the Core. The request is a typed, Core-inspectable structure with schema and any row-sample as distinct fields — never opaque UI free text — so the Core enforces schema-only by default; rows go only via explicit, per-query, visible opt-in. Runs on the user's own keys: no account, no hosted cost (R6).</span>
+    <span class="lbl">Binds</span><span class="binds">FR-15, 17, R5, R6</span></div></div>
+
+  <div class="ad"><div class="id">AD-8</div><h4>Ephemeral mode writes nothing to disk</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>No Credential Store, no ERD layout, no Report, no panel state. All session state is in-memory and gone at exit; no daemon outlives the process.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-2, 3</span></div></div>
+
+  <div class="ad sec crit"><div class="id">AD-9 <span class="tag crit">gate-hardened</span></div><h4>A Live Report carries no credential and re-queries only through a running, authorizing quick-studio</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>A Snapshot embeds frozen data and renders offline. A Live Report holds no credential and no DB runtime; it re-queries only by targeting a running Core on <code>127.0.0.1</code>, which explicitly authorizes it (AD-12) and supplies the connection. Re-targeting re-runs queries without rebuilding the layout.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-19, 20</span></div></div>
+
+  <div class="ad"><div class="id">AD-10</div><h4>Charting is split by ring</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>In-app charts (Ring 2) use Recharts / shadcn; sandbox charts (Ring 3, no React host) use Observable Plot (framework-agnostic). TradingView lightweight-charts is dropped — financial-OHLC focus, wrong fit for generic DB data.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-17, 18</span></div></div>
+
+  <div class="ad"><div class="id">AD-11</div><h4>Streaming is SSE; reasoning is a distinct channel from the answer</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>Core→UI streaming (tokens, reasoning, large result pages) uses SSE over localhost. Model reasoning is rendered as a channel visually distinct from the final answer.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-16, NFR-6</span></div></div>
+
+  <div class="ad sec crit"><div class="id">AD-12 <span class="tag sec">security</span> <span class="tag crit">new · closes DNS-rebind</span></div><h4>The Core authenticates every caller — session token + anti-rebinding</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>The Core rejects every RPC without the current session's capability token and validates <code>Origin</code>/<code>Host</code> to block DNS-rebinding — loopback alone is not an auth boundary. The UI gets the token at boot. A Live Report is authorized only as an explicit second caller (AD-9).</span>
+    <span class="lbl">Binds</span><span class="binds">FR-2, 21, 22, R3</span></div></div>
+
+  <div class="ad crit"><div class="id">AD-13 <span class="tag crit">new</span></div><h4>One canonical frozen-data shape across every boundary</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>A single shared, versioned frozen-data schema (in <code>shared/</code>) is the only shape pushed to the Sandbox and embedded in a Snapshot. Wire conventions (ISO-8601 UTC dates, typed values) bind UI↔Sandbox exactly as Core RPC — never live <code>Date</code> objects one path, ISO strings the other.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-17, 18, 20</span></div></div>
+
+  <div class="ad crit"><div class="id">AD-14 <span class="tag crit">new</span></div><h4>Engine-dialect isolation lives inside the Core</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>All Postgres/MySQL-specific SQL, introspection, and pagination live only in the Core behind one uniform driver interface; Rings 2 &amp; 3 see an engine-neutral shape. The Core owns pagination/virtualization and never ships a whole live result set.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-7, 9–12, NFR-5</span></div></div>
+
+  <div class="ad crit"><div class="id">AD-15 <span class="tag crit">new</span></div><h4>Persistent state lives under one OS-convention app directory</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>Store, ERD layouts, Reports, panel/session state, and logs live under a single app-data dir (<code>%APPDATA%\quick-studio</code> / <code>$XDG_DATA_HOME/quick-studio</code>). No scattering — the footprint promise holds. Ephemeral writes nothing.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-4, 6, 13, 24</span></div></div>
+
+  <div class="ad crit"><div class="id">AD-16 <span class="tag crit">new</span></div><h4>Dual distribution: standalone binary and runtime package</h4>
+    <div class="grid"><span class="lbl">Rule</span><span>Two install paths, one run: a standalone <code>bun build --compile</code> binary per platform (the headline "one command, no runtime" path) and an npm/bun global package for devs who already have a runtime.</span>
+    <span class="lbl">Binds</span><span class="binds">FR-1, 2</span></div></div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>The numbers</h2>
+  <div class="h2sub">Performance budgets — acceptance criteria, not aspirations</div>
+  <p>Lightweight is the identity, so these are load-bearing. A budget failed is a defect, not a wish unmet.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Budget</th><th>Target</th><th>Ref</th></tr></thead>
+    <tbody>
+      <tr><td>Idle resident memory (connections open)</td><td class="target">≤ ~200 MB ceiling · Bun idle ~35–45 MB</td><td class="mono">NFR-1</td></tr>
+      <tr><td>Cold start → interactive Workspace</td><td class="target">≤ 2 s</td><td class="mono">NFR-2</td></tr>
+      <tr><td>Shutdown</td><td class="target">instant, non-blocking · no orphan / daemon</td><td class="mono">NFR-3</td></tr>
+      <tr><td>UI interaction (open table, switch Tab, resize)</td><td class="target">&lt; 100 ms · first paint bounded by DB</td><td class="mono">NFR-4</td></tr>
+      <tr><td>Large results / ERD</td><td class="target">responsive via Core pagination · ERD to 60–70 tables</td><td class="mono">NFR-5</td></tr>
+      <tr><td>AI streaming + MDX render</td><td class="target">never janks the UI thread</td><td class="mono">NFR-6</td></tr>
+    </tbody>
+  </table></div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>The stack</h2>
+  <div class="h2sub">Full TypeScript, verified current</div>
+  <p>One language end-to-end — the JS-heavy AI / MDX / chart core wants it, the builder is fluent in it, and an accepted ~200 MB footprint defuses the pull toward a Go/Rust backend. Load-bearing libraries were verified against their registries at authoring; framework majors are cold-start seed to confirm at scaffold.</p>
+  <div class="scroll"><table>
+    <thead><tr><th>Component</th><th>Choice</th><th>Version</th></tr></thead>
+    <tbody>
+      <tr><td>Runtime + single-binary build</td><td>Bun · <code>bun build --compile</code></td><td class="mono">1.2.x</td></tr>
+      <tr><td>Language</td><td>TypeScript</td><td class="mono">5.x</td></tr>
+      <tr><td>UI</td><td>React + shadcn/ui</td><td class="mono">React 19.x</td></tr>
+      <tr><td>AI (multi-provider)</td><td>Vercel AI SDK — Anthropic / OpenAI / Google</td><td class="mono">ai 7.0.15 · adapters 4.0.8</td></tr>
+      <tr><td>PostgreSQL</td><td>postgres.js</td><td class="mono">3.x</td></tr>
+      <tr><td>MySQL</td><td>mysql2</td><td class="mono">3.22.5</td></tr>
+      <tr><td>OS keychain</td><td>@napi-rs/keyring</td><td class="mono">1.3.0</td></tr>
+      <tr><td>In-app charts</td><td>Recharts / shadcn</td><td class="mono">3.9.2</td></tr>
+      <tr><td>Sandbox charts</td><td>Observable Plot</td><td class="mono">0.6.17</td></tr>
+    </tbody>
+  </table></div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Open questions, closed</h2>
+  <div class="h2sub">What the PRD handed architecture to resolve</div>
+  <div class="resolved"><div class="q">§11-R1 · JS sandbox</div><div class="a"><b>Resolved</b> — cross-origin iframe, pure-render, one-way channel (AD-3). In-process isolation rejected as an integrity-only, not security, boundary.</div></div>
+  <div class="resolved"><div class="q">Open Q1 · charting</div><div class="a"><b>Resolved</b> — TradingView dropped; Recharts in-app, Observable Plot in the React-less sandbox (AD-10).</div></div>
+  <div class="resolved"><div class="q">Open Q3 · Live Report</div><div class="a"><b>Resolved</b> — no credential in the file; re-queries only through a running, authorizing quick-studio (AD-9 + AD-12).</div></div>
+  <div class="resolved"><div class="q">Open Q4 · install delivery</div><div class="a"><b>Resolved</b> — dual distribution: standalone binary + runtime package (AD-16).</div></div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>The edges</h2>
+  <div class="h2sub">Deferred — the half that keeps the spine lean</div>
+  <div class="grid2">
+    <div class="card"><h4>Pushed to v2</h4><ul>
+      <li>NoSQL engines (Mongo, DynamoDB) — different paradigm, own UX pass</li>
+      <li>Deep visual ERD editing — v1 views &amp; navigates only</li>
+      <li>Auto-update mechanism for distributed binaries</li>
+      <li>macOS support</li>
+    </ul></div>
+    <div class="card"><h4>Owned by the code / to validate</h4><ul>
+      <li>Smoke-test <code>@napi-rs/keyring</code> under Bun on Windows + Linux (passphrase fallback is the safety net)</li>
+      <li>Data-volume ceilings — refine budgets against measurement</li>
+      <li>Exact MDX runtime &amp; per-provider default models</li>
+      <li>Confirm React / TS / shadcn exact versions at scaffold</li>
+    </ul></div>
+  </div>
+</div></section>
+
+<footer><div class="wrap">
+  quick-studio · architecture spine · initiative altitude · 16 AD · Windows + Linux · 2026-07-06<br>
+  Distilled from the final PRD + product brief. Reviewer gate: lint clean · reconcile · rubric · adversarial (2 critical holes closed).
+</div></footer>
+</body>
+</html>
