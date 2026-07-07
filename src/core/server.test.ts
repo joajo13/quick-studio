@@ -14,6 +14,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { resolveAppDir } from "./app-dir.ts";
 import { renderIndexHtml, startCore, type Core } from "./server.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
 
@@ -104,6 +108,46 @@ describe("serves the pre-built UI bundle", () => {
     expect(res.status).toBe(200);
     expect(body.length).toBeGreaterThan(0);
     expect(body).toBe(uiBundle.css);
+  });
+});
+
+// Story 1.2: threads the run mode through `startCore` and exposes a navigable
+// `openUrl`. The default (loopback) boot above already proves the plumbing for
+// `openUrl`; here we lock the Ephemeral no-write guarantee and mode threading.
+// A fresh temp dir is pointed at by every app-dir env var so `resolveAppDir`
+// (whichever platform branch runs) lands under it — and must stay absent after a
+// full boot, the concrete regressible form of "Ephemeral writes nothing".
+describe("Ephemeral boot writes nothing to the app-data dir", () => {
+  test("no app dir is created and core.mode/openUrl are set", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "qs-ephemeral-"));
+    const saved = {
+      APPDATA: process.env.APPDATA,
+      XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+      HOME: process.env.HOME,
+    };
+    process.env.APPDATA = tmp;
+    process.env.XDG_DATA_HOME = tmp;
+    process.env.HOME = tmp;
+
+    let ephemeralCore: Core | undefined;
+    try {
+      const appDir = resolveAppDir(process.env, process.platform);
+      ephemeralCore = await startCore(0, { mode: "ephemeral" });
+
+      expect(ephemeralCore.mode).toBe("ephemeral");
+      // Loopback default bind → the navigable open URL is the bind host verbatim.
+      expect(ephemeralCore.openUrl).toBe(`http://127.0.0.1:${ephemeralCore.port}`);
+      // The hard guarantee: boot touched no disk writer, so the app dir is absent.
+      expect(existsSync(appDir)).toBe(false);
+    } finally {
+      if (ephemeralCore) await ephemeralCore.stop();
+      // Restore env exactly (delete if it was originally unset).
+      for (const key of ["APPDATA", "XDG_DATA_HOME", "HOME"] as const) {
+        const value = saved[key];
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 });
 

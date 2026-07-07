@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { isExposed, isLoopbackHost, isWildcardHost, resolveBindHost } from "./binding.ts";
+import {
+  deriveOpenUrl,
+  isExposed,
+  isLoopbackHost,
+  isWildcardHost,
+  resolveBindHost,
+} from "./binding.ts";
 
 describe("resolveBindHost", () => {
   test("defaults to 127.0.0.1 when unset/empty/whitespace", () => {
@@ -65,4 +71,35 @@ describe("classification — concrete non-loopback IP (exposed, not wildcard)", 
       expect(isWildcardHost(host)).toBe(false);
     });
   }
+});
+
+describe("deriveOpenUrl — navigable, gate-passing browser URL", () => {
+  test("loopback host is used verbatim", () => {
+    expect(deriveOpenUrl("127.0.0.1", 4321)).toBe("http://127.0.0.1:4321");
+  });
+
+  test("wildcard v4 (0.0.0.0) remaps to 127.0.0.1", () => {
+    expect(deriveOpenUrl("0.0.0.0", 4321)).toBe("http://127.0.0.1:4321");
+  });
+
+  test("wildcard v6 (::) remaps to bracketed [::1]", () => {
+    expect(deriveOpenUrl("::", 4321)).toBe("http://[::1]:4321");
+  });
+
+  test("a bare IPv6 literal is bracketed so the port separator is unambiguous", () => {
+    expect(deriveOpenUrl("::1", 4321)).toBe("http://[::1]:4321");
+  });
+
+  test("a concrete non-loopback host is used verbatim", () => {
+    expect(deriveOpenUrl("192.168.1.10", 4321)).toBe("http://192.168.1.10:4321");
+  });
+
+  test("the scheme-default port 80 is omitted from the authority", () => {
+    expect(deriveOpenUrl("127.0.0.1", 80)).toBe("http://127.0.0.1");
+    expect(deriveOpenUrl("0.0.0.0", 80)).toBe("http://127.0.0.1");
+  });
+
+  test("padded/mixed-case host is normalized (trim + lower-case)", () => {
+    expect(deriveOpenUrl("  127.0.0.1  ", 4321)).toBe("http://127.0.0.1:4321");
+  });
 });

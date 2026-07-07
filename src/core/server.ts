@@ -15,7 +15,8 @@
 import type { ExposureInfo } from "../shared/contract.ts";
 import { errorReply } from "../shared/contract.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
-import { isExposed, resolveBindHost } from "./binding.ts";
+import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
+import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
 
@@ -33,6 +34,18 @@ export type Core = {
    * the in-page banner via the injected `window.__QS_EXPOSURE__` global.
    */
   readonly exposed: boolean;
+  /**
+   * Selected run mode (Ephemeral vs Persistent). Threaded from `bin/` via the
+   * CLI decision; the future credential-store call site inherits this gate so
+   * Ephemeral stays a hard no-write guarantee.
+   */
+  readonly mode: RunMode;
+  /**
+   * Navigable, gate-passing URL for browser-open — distinct from `url`, which is
+   * the bind host verbatim (e.g. `http://0.0.0.0:…` under a wildcard bind).
+   * Wildcard binds are mapped to a loopback address; port 80 is omitted.
+   */
+  readonly openUrl: string;
   /** Stop the server and release the port. May be awaited (async teardown). */
   stop(): void | Promise<void>;
 };
@@ -69,6 +82,11 @@ export type StartCoreOptions = {
    * flips `Core.exposed` on. `bin/` resolves this from `QS_HOST`.
    */
   host?: string;
+  /**
+   * Selected run mode. Defaults to Persistent. `bin/` passes the CLI-resolved
+   * mode; Ephemeral means no disk writer is ever engaged for this session.
+   */
+  mode?: RunMode;
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -133,6 +151,7 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // padded/mixed-case host that would silently 403 every RPC.
   const bindHost = resolveBindHost(options.host);
   const exposed = isExposed(bindHost);
+  const mode = options.mode ?? DEFAULT_RUN_MODE;
   const { js: appJs, css: appCss } = uiBundle;
 
   const server = Bun.serve({
@@ -247,12 +266,15 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   });
 
   const url = `http://${bindHost}:${boundPort}`;
+  const openUrl = deriveOpenUrl(bindHost, boundPort);
   return {
     url,
     host: bindHost,
     port: boundPort,
     token,
     exposed,
+    mode,
+    openUrl,
     stop: () => server.stop(true),
   };
 }

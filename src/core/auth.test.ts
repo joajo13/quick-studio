@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
+import { deriveOpenUrl } from "./binding.ts";
 
 describe("mintSessionToken", () => {
   test("produces 256-bit (64 hex char) lowercase-hex tokens", () => {
@@ -78,6 +79,38 @@ describe("validateOrigin", () => {
   });
 });
 
+describe("validateOrigin — scheme-default port 80 (browser omits the port)", () => {
+  const host = "127.0.0.1";
+
+  test("accepts a bare-host Host with absent/matching bare-host Origin", () => {
+    // A browser at http://127.0.0.1 (port 80 implicit) sends Host: 127.0.0.1 and
+    // Origin: http://127.0.0.1 — both without the port.
+    expect(validateOrigin(null, host, host, 80)).toBe(true);
+    expect(validateOrigin("", host, host, 80)).toBe(true);
+    expect(validateOrigin(`http://${host}`, host, host, 80)).toBe(true);
+  });
+
+  test("still accepts the explicit :80 authority form", () => {
+    expect(validateOrigin(`http://${host}:80`, `${host}:80`, host, 80)).toBe(true);
+    expect(validateOrigin(null, `${host}:80`, host, 80)).toBe(true);
+  });
+
+  test("rejects a foreign bare Host / Origin even on port 80", () => {
+    expect(validateOrigin(null, "localhost", host, 80)).toBe(false);
+    expect(validateOrigin("http://localhost", host, host, 80)).toBe(false);
+    expect(validateOrigin("http://evil.example.com", host, host, 80)).toBe(false);
+  });
+
+  test("a non-80 port still REQUIRES the explicit port (no bare-host relaxation)", () => {
+    const port = 4321;
+    // Bare host with no port is rejected when the bound port is not 80.
+    expect(validateOrigin(null, host, host, port)).toBe(false);
+    expect(validateOrigin(`http://${host}`, host, host, port)).toBe(false);
+    // The explicit authority still works.
+    expect(validateOrigin(null, `${host}:${port}`, host, port)).toBe(true);
+  });
+});
+
 describe("validateOrigin — wildcard bind (0.0.0.0 / ::)", () => {
   const port = 4321;
 
@@ -129,6 +162,60 @@ describe("validateOrigin — wildcard bind (0.0.0.0 / ::)", () => {
     test(`${boundHost}: rejects an absent Host header`, () => {
       expect(validateOrigin(null, null, boundHost, port)).toBe(false);
       expect(validateOrigin(null, undefined, boundHost, port)).toBe(false);
+    });
+  }
+});
+
+describe("validateOrigin — concrete IPv6 bind (::1)", () => {
+  // A browser opens `deriveOpenUrl("::1", port)` = `http://[::1]:<port>`, so it
+  // sends a BRACKETED Host/Origin. The gate must bracket the bound host to match,
+  // otherwise every RPC on an IPv6 loopback bind 403s.
+  const boundHost = "::1";
+  const port = 4321;
+
+  test("accepts the bracketed [::1]:<port> authority", () => {
+    const authority = `[::1]:${port}`;
+    expect(validateOrigin(null, authority, boundHost, port)).toBe(true);
+    expect(validateOrigin(`http://${authority}`, authority, boundHost, port)).toBe(true);
+  });
+
+  test("rejects an unbracketed or foreign IPv6 Host", () => {
+    expect(validateOrigin(null, `::1:${port}`, boundHost, port)).toBe(false);
+    expect(validateOrigin(null, `[::2]:${port}`, boundHost, port)).toBe(false);
+  });
+
+  test("port-80 bind accepts the portless bracketed authority", () => {
+    expect(validateOrigin(null, "[::1]", boundHost, 80)).toBe(true);
+    expect(validateOrigin("http://[::1]", "[::1]", boundHost, 80)).toBe(true);
+  });
+});
+
+describe("validateOrigin ⇔ deriveOpenUrl coherence (the URL we open passes the gate)", () => {
+  // Regression harness for the class of bug where browser-open navigates to a URL
+  // the Origin/Host gate then rejects (wildcard+80, bracketed IPv6). For each bind
+  // config, simulate exactly what the browser sends for `deriveOpenUrl`'s output:
+  // Host = the authority, Origin = the full URL (the browser already dropped :80).
+  const cases: Array<[string, number]> = [
+    ["127.0.0.1", 5555],
+    ["127.0.0.1", 80],
+    ["0.0.0.0", 5555],
+    ["0.0.0.0", 80],
+    ["::1", 5555],
+    ["::1", 80],
+    ["::", 5555],
+    ["::", 80],
+    ["192.168.1.10", 5555],
+    ["192.168.1.10", 80],
+  ];
+
+  for (const [bindHost, port] of cases) {
+    test(`deriveOpenUrl(${bindHost}, ${port}) is accepted by validateOrigin`, () => {
+      const url = deriveOpenUrl(bindHost, port);
+      const authority = url.slice("http://".length);
+      // Browser sends both the Origin (full URL) and a Host (the authority).
+      expect(validateOrigin(url, authority, bindHost, port)).toBe(true);
+      // Non-CORS caller (curl): Origin absent, Host present.
+      expect(validateOrigin(null, authority, bindHost, port)).toBe(true);
     });
   }
 });

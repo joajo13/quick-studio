@@ -66,3 +66,42 @@ export function isWildcardHost(host: string): boolean {
 export function isExposed(host: string): boolean {
   return !isLoopbackHost(host);
 }
+
+/** The scheme-default HTTP port, omitted from a navigable URL's authority. */
+const HTTP_DEFAULT_PORT = 80;
+
+/**
+ * Derive a navigable, gate-passing browser URL from the bind host + bound port.
+ *
+ * `Core.url` is the bind host verbatim, so under a wildcard bind it is
+ * `http://0.0.0.0:<port>` (non-navigable) and `validateOrigin` treats `localhost`
+ * and `127.0.0.1` as distinct. This maps the bind host to an address a browser
+ * can actually reach AND the Origin/Host gate accepts:
+ *  - wildcard `0.0.0.0` → `127.0.0.1`, `::` → `[::1]` (the wildcard-bind auth
+ *    relaxation then passes it by port-match);
+ *  - a concrete host is used verbatim — a bare IPv6 literal is bracketed so the
+ *    `:` port separator is unambiguous;
+ *  - the scheme-default port 80 is omitted (browsers drop it; the port-80 auth
+ *    fix accepts the resulting bare-authority Host/Origin).
+ *
+ * Pure and total; mirrors `resolveBindHost`'s trim + lower-case normalization so
+ * a direct caller cannot pass a padded/mixed-case host.
+ */
+export function deriveOpenUrl(bindHost: string, port: number): string {
+  const h = bindHost.trim().toLowerCase();
+
+  let host: string;
+  if (h === "0.0.0.0") {
+    host = "127.0.0.1";
+  } else if (h === "::") {
+    host = "[::1]";
+  } else if (h.includes(":") && !h.startsWith("[")) {
+    // Bare IPv6 literal (e.g. `::1`) — bracket it so `:<port>` is unambiguous.
+    host = `[${h}]`;
+  } else {
+    host = h;
+  }
+
+  const authority = port === HTTP_DEFAULT_PORT ? host : `${host}:${port}`;
+  return `http://${authority}`;
+}

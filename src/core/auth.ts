@@ -14,6 +14,37 @@ import { isWildcardHost } from "./binding.ts";
 /** Number of random bytes in the session token (256 bits). */
 const TOKEN_BYTES = 32;
 
+/** Scheme-default HTTP port, which browsers omit from `Host`/`Origin`. */
+const HTTP_DEFAULT_PORT = 80;
+
+/**
+ * Bracket a bare IPv6 literal so `:<port>` is unambiguous in an authority
+ * (`::1` → `[::1]`), matching `deriveOpenUrl`'s normalization. IPv4 addresses,
+ * hostnames, and already-bracketed literals pass through unchanged. Without this
+ * the browser opens `http://[::1]:<port>` (bracketed) while the gate expected the
+ * unbracketed `::1:<port>` — a Host mismatch that 403s every RPC on an IPv6 bind.
+ */
+function bracketIfIpv6(host: string): string {
+  return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+/**
+ * Extract the port segment from an authority (a `Host` header value),
+ * bracket-aware so a bracketed IPv6 literal's inner colons are not mistaken for
+ * the port separator. Returns "" when no explicit port is present — e.g. a
+ * browser omitting `:80` from `127.0.0.1` or `[::1]`.
+ */
+function authorityPort(authority: string): string {
+  if (authority.startsWith("[")) {
+    const close = authority.indexOf("]");
+    if (close === -1) return "";
+    const rest = authority.slice(close + 1);
+    return rest.startsWith(":") ? rest.slice(1) : "";
+  }
+  const colon = authority.lastIndexOf(":");
+  return colon === -1 ? "" : authority.slice(colon + 1);
+}
+
 /**
  * Mint a fresh per-boot session token: 256 bits of CSPRNG output as lowercase
  * hex. A new token is generated on every call (every boot). The caller holds it
@@ -90,31 +121,47 @@ export function validateOrigin(
   boundHost: string,
   boundPort: number,
 ): boolean {
+  // A port-80 bind is reached with the port omitted: browsers drop the
+  // scheme-default `:80` from both `Host` and `Origin`, and `deriveOpenUrl`
+  // omits it from the URL it opens. So on port 80 a bare (portless) authority is
+  // also valid. Only when `boundPort === 80` — every other port still requires
+  // the explicit `<host>:<port>` form, byte-identical to before this relaxation.
+  const acceptBareHost = boundPort === HTTP_DEFAULT_PORT;
+
   // Wildcard bind: relax the hostname to a port-match + Origin==Host same-origin
-  // check. Port is the segment after the LAST colon so bracketed IPv6 authorities
-  // (`[::1]:<port>`) parse correctly rather than splitting on the address colons.
+  // check. Port extraction is bracket-aware (`authorityPort`) so a bracketed IPv6
+  // authority (`[::1]`) parses correctly and a port-80 bind (port omitted) still
+  // matches — `deriveOpenUrl` remaps a wildcard to `127.0.0.1`/`[::1]`, dropping
+  // `:80`, and this must accept exactly that.
   if (isWildcardHost(boundHost)) {
     if (typeof hostHeader !== "string") return false;
-    const lastColon = hostHeader.lastIndexOf(":");
-    const portStr = lastColon === -1 ? "" : hostHeader.slice(lastColon + 1);
-    if (portStr !== String(boundPort)) return false;
+    const portStr = authorityPort(hostHeader);
+    const portOk =
+      portStr === String(boundPort) || (acceptBareHost && portStr === "");
+    if (!portOk) return false;
     if (originHeader === null || originHeader === undefined || originHeader === "") {
       return true;
     }
     return originHeader === `http://${hostHeader}`;
   }
 
-  const expectedAuthority = `${boundHost}:${boundPort}`;
+  // Concrete bind: pin the full authority. Bracket a bare IPv6 bind host so it
+  // matches the bracketed `Host` a browser sends (and `deriveOpenUrl` opens).
+  const authHost = bracketIfIpv6(boundHost);
+  const expectedAuthority = `${authHost}:${boundPort}`;
 
-  // Host must exactly match the bound authority.
-  if (typeof hostHeader !== "string" || hostHeader !== expectedAuthority) {
+  // Host must exactly match the bound authority (or the bare host on port 80).
+  if (typeof hostHeader !== "string") return false;
+  if (hostHeader !== expectedAuthority && !(acceptBareHost && hostHeader === authHost)) {
     return false;
   }
 
   // Origin is optional (absent for same-process / curl). If present it must be
-  // exactly the loopback http origin — no localhost, no foreign host.
+  // exactly the loopback http origin — no localhost, no foreign host — or, on
+  // port 80, the bare-host http origin the browser actually sends.
   if (originHeader === null || originHeader === undefined || originHeader === "") {
     return true;
   }
-  return originHeader === `http://${expectedAuthority}`;
+  if (originHeader === `http://${expectedAuthority}`) return true;
+  return acceptBareHost && originHeader === `http://${authHost}`;
 }
