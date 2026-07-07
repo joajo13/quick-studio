@@ -2,7 +2,7 @@
 title: 'Story 2.3: Keychain-unavailable passphrase fallback'
 type: 'feature'
 created: '2026-07-06'
-status: 'done'
+status: 'in-review'
 baseline_revision: '203e9c4fb1030694a966f086e5ba6ee0646012ed'
 final_revision: '9c0735d3fcca40b98df76dc2f871ea64c2501057'
 review_loop_iteration: 0
