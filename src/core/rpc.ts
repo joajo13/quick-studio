@@ -10,6 +10,7 @@ import {
   FROZEN_SCHEMA_VERSION,
   errorReply,
   okReply,
+  type ConnectResult,
   type HealthResult,
   type RpcReply,
   type RpcRequest,
@@ -20,13 +21,19 @@ import {
  * Per-request capabilities threaded into every handler. `requestShutdown`
  * schedules the actual teardown (never invoked synchronously by a handler —
  * see `server.ts`), so the RPC reply can flush before the socket closes.
+ * `connect` opens (once) and introspects the Core-held database connection.
  */
 export type RpcContext = {
   readonly requestShutdown: () => void;
+  /** Open + introspect the Core's connection, resolving a neutral outcome payload. */
+  readonly connect: () => Promise<ConnectResult>;
 };
 
-/** A dispatch handler: takes typed params + context, returns a typed result payload. */
-type Handler = (params: unknown, ctx: RpcContext) => unknown;
+/**
+ * A dispatch handler: takes typed params + context and returns a typed result
+ * payload (or a promise thereof — `connect` is the first async handler).
+ */
+type Handler = (params: unknown, ctx: RpcContext) => unknown | Promise<unknown>;
 
 const HANDLERS: Readonly<Record<string, Handler>> = {
   /** Liveness + schema-version probe. Proves the authenticated channel works. */
@@ -42,6 +49,12 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     ctx.requestShutdown();
     return { stopping: true };
   },
+  /**
+   * Open (idempotently) and introspect the Core-held connection. The neutral
+   * {@link ConnectResult} — including host/auth/network/unsupported-scheme
+   * failures — is a normal OK payload; only a genuine bug rejects → internal_error.
+   */
+  connect: (_params, ctx): Promise<ConnectResult> => ctx.connect(),
 };
 
 /**
@@ -49,7 +62,10 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
  * handler throw is caught and wrapped as an `internal_error` envelope, so the
  * caller never sees a naked error.
  */
-export function dispatch(request: RpcRequest, ctx: RpcContext): RpcReply<unknown> {
+export async function dispatch(
+  request: RpcRequest,
+  ctx: RpcContext,
+): Promise<RpcReply<unknown>> {
   const { method } = request;
   if (typeof method !== "string" || method.length === 0) {
     return errorReply("bad_request", "RPC request is missing a method name");
@@ -65,7 +81,10 @@ export function dispatch(request: RpcRequest, ctx: RpcContext): RpcReply<unknown
   }
 
   try {
-    return okReply(handler(request.params, ctx));
+    // `await` resolves a sync handler's value AND a promise-returning handler's
+    // (e.g. `connect`) to a concrete result, so `result` is never a live Promise.
+    // The same try/catch now also catches a rejected promise → internal_error.
+    return okReply(await handler(request.params, ctx));
   } catch (err) {
     // Log the real cause to stderr (terse, server-side only). Do NOT echo the
     // raw exception message to the client `detail` — internal error text may

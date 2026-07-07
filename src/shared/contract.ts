@@ -204,6 +204,76 @@ function encodeCell(cell: FrozenCell): FrozenCell {
 const decodeCell = encodeCell;
 
 /* ------------------------------------------------------------------ *
+ * Engine-neutral database schema + connect outcome (AR-10)
+ * ------------------------------------------------------------------ */
+
+/**
+ * The relational engines quick-studio speaks to. Selected by URL scheme in the
+ * Core (`postgres`/`postgresql` → `"postgres"`, `mysql` → `"mysql"`); all engine
+ * specifics stay behind the Core-side driver — every ring sees only this tag.
+ */
+export type DbEngine = "postgres" | "mysql";
+
+/**
+ * One column of a table, in the single engine-neutral shape both rings share.
+ * `dataType` mirrors the live database's own type name verbatim (identifiers are
+ * never rewritten); `nullable` reflects the column's `IS NULLABLE` flag.
+ */
+export type SchemaColumnInfo = {
+  readonly name: string;
+  readonly dataType: string;
+  readonly nullable: boolean;
+};
+
+/**
+ * One table (or view) of the introspected schema. `schema` is the owning
+ * namespace/database as the engine reports it; `name` and `columns` mirror the
+ * live database verbatim, ordered as introspected (schema/table/ordinal).
+ */
+export type SchemaTableInfo = {
+  readonly schema: string;
+  readonly name: string;
+  readonly columns: ReadonlyArray<SchemaColumnInfo>;
+};
+
+/**
+ * The single engine-neutral schema shape (AR-10). Regardless of engine, Ring 2
+ * receives exactly this — an engine tag plus a flat, ordered list of tables.
+ */
+export type DatabaseSchema = {
+  readonly engine: DbEngine;
+  readonly tables: ReadonlyArray<SchemaTableInfo>;
+};
+
+/**
+ * How a connection attempt failed, classified behind the driver from the raw
+ * engine/OS error so no naked exception ever crosses a boundary:
+ *  - `host` — the host does not resolve (DNS / unknown host).
+ *  - `auth` — the credentials were rejected by the engine.
+ *  - `network` — reachable-but-refused / timeout / reset (the default bucket).
+ *  - `unsupported_scheme` — the URL scheme is not a relational engine we speak.
+ */
+export type ConnectionFailureKind =
+  | "host"
+  | "auth"
+  | "network"
+  | "unsupported_scheme";
+
+/**
+ * The outcome of a `connect` RPC. This is a DOMAIN result carried inside a
+ * successful {@link RpcReply} — NOT a transport error — discriminated by `status`
+ * (deliberately not `ok`, to avoid confusion with `RpcReply.ok`). A `failed`
+ * result carries a neutral, credential-free message; only a genuine bug throws.
+ */
+export type ConnectResult =
+  | { readonly status: "connected"; readonly schema: DatabaseSchema }
+  | {
+      readonly status: "failed";
+      readonly failure: ConnectionFailureKind;
+      readonly message: string;
+    };
+
+/* ------------------------------------------------------------------ *
  * RPC contract — request / reply / error envelope
  * ------------------------------------------------------------------ */
 

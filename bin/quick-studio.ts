@@ -64,6 +64,9 @@ try {
     onShutdownRequested: () => controller.initiate(),
     host: resolveBindHost(process.env.QS_HOST),
     mode: cli.mode,
+    // Thread the in-memory Ephemeral URL through to the Core's connection manager
+    // (Story 1.3). Held only in Core memory — never persisted, never logged here.
+    databaseUrl: cli.databaseUrl ?? undefined,
   });
   controller = createShutdownController({ stop: core.stop, exit: () => process.exit(0) });
 

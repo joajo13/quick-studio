@@ -16,6 +16,8 @@ import type { ExposureInfo } from "../shared/contract.ts";
 import { errorReply } from "../shared/contract.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
+import { createConnectionManager } from "./connection.ts";
+import type { DriverFactory } from "./driver.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
@@ -87,6 +89,18 @@ export type StartCoreOptions = {
    * mode; Ephemeral means no disk writer is ever engaged for this session.
    */
   mode?: RunMode;
+  /**
+   * The in-memory Ephemeral database URL (from `bin/` via `parseCliArgs`). Held
+   * only in the Core's connection-manager closure — never persisted, never logged,
+   * never surfaced on `Core`. Absent ⇒ `connect` reports "no connection target".
+   */
+  databaseUrl?: string;
+  /**
+   * Driver factory for the connection manager. Defaults to the real scheme-
+   * selecting `createDriver`; tests inject a fake so `connect` never needs a live
+   * Postgres/MySQL (the DI testability seam).
+   */
+  createDriver?: DriverFactory;
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -154,6 +168,14 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   const mode = options.mode ?? DEFAULT_RUN_MODE;
   const { js: appJs, css: appCss } = uiBundle;
 
+  // Core-owned connection manager: holds the in-memory URL, opens the driver
+  // lazily+once on the first `connect` RPC, and is closed in `stop()`. The URL
+  // lives only in this closure — never on `Core`, never logged.
+  const connectionManager = createConnectionManager({
+    databaseUrl: options.databaseUrl,
+    createDriver: options.createDriver,
+  });
+
   const server = Bun.serve({
     hostname: bindHost,
     port,
@@ -165,6 +187,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         // here — it would close the socket carrying this very reply. Deferring
         // to a macrotask lets Bun flush the `/rpc` Response first.
         requestShutdown: () => setTimeout(onShutdownRequested, 0),
+        // Idempotent open+introspect; a live connection is reused across calls.
+        connect: () => connectionManager.connect(),
       };
 
       // --- Static UI assets ---------------------------------------------
@@ -234,7 +258,7 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
           );
         }
 
-        const reply = dispatch(parsed as { method: string; params?: unknown }, rpcContext);
+        const reply = await dispatch(parsed as { method: string; params?: unknown }, rpcContext);
         if (reply.ok) {
           return jsonResponse(reply, 200);
         }
@@ -275,6 +299,12 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     exposed,
     mode,
     openUrl,
-    stop: () => server.stop(true),
+    // Teardown closes the DB driver FIRST (so no socket/pool lingers past
+    // `stop()`), then releases the port. `close()` swallows its own errors, so a
+    // wedged driver can never block shutdown.
+    stop: async () => {
+      await connectionManager.close();
+      await server.stop(true);
+    },
   };
 }

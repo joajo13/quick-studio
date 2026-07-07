@@ -17,7 +17,9 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { DatabaseSchema } from "../shared/contract.ts";
 import { resolveAppDir } from "./app-dir.ts";
+import { DriverConnectionError, type Driver, type DriverFactory } from "./driver.ts";
 import { renderIndexHtml, startCore, type Core } from "./server.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
 
@@ -148,6 +150,111 @@ describe("Ephemeral boot writes nothing to the app-data dir", () => {
         else process.env[key] = value;
       }
     }
+  });
+});
+
+// Story 1.3: the `connect` RPC opens the Core-held URL through the uniform driver
+// and returns a neutral ConnectResult — proven end-to-end through the real server
+// + gate with a FAKE driver factory (no live Postgres/MySQL). Each case boots its
+// own Core so the shared-boot spy above stays untouched.
+describe("connect RPC through the gate (Story 1.3)", () => {
+  const FAKE_SCHEMA: DatabaseSchema = {
+    engine: "postgres",
+    tables: [
+      {
+        schema: "public",
+        name: "widgets",
+        columns: [{ name: "id", dataType: "integer", nullable: false }],
+      },
+    ],
+  };
+
+  /** POST an RPC to an arbitrary core with a valid token. */
+  async function rpc(target: Core, body: unknown): Promise<Response> {
+    return fetch(`${target.url}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-qs-token": target.token },
+      body: JSON.stringify(body),
+    });
+  }
+
+  test("valid target → 200 with status:'connected' and a neutral schema", async () => {
+    const factory: DriverFactory = () => ({
+      async connect() {},
+      async listSchema() {
+        return FAKE_SCHEMA;
+      },
+      async close() {},
+    });
+    const c = await startCore(0, {
+      databaseUrl: "postgres://u:p@h/db",
+      createDriver: factory,
+    });
+    try {
+      const res = await rpc(c, { method: "connect" });
+      const reply = await res.json();
+      expect(res.status).toBe(200);
+      expect(reply.ok).toBe(true);
+      expect(reply.result).toEqual({ status: "connected", schema: FAKE_SCHEMA });
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test("auth-failing driver → 200 with status:'failed', failure:'auth' (domain payload, no leak)", async () => {
+    const factory: DriverFactory = () => ({
+      async connect() {
+        throw new DriverConnectionError("auth", "the database rejected the provided credentials");
+      },
+      async listSchema() {
+        return FAKE_SCHEMA;
+      },
+      async close() {},
+    });
+    const c = await startCore(0, {
+      databaseUrl: "postgres://u:wrong@h/db",
+      createDriver: factory,
+    });
+    try {
+      const res = await rpc(c, { method: "connect" });
+      const reply = await res.json();
+      expect(res.status).toBe(200);
+      expect(reply.ok).toBe(true);
+      expect(reply.result.status).toBe("failed");
+      expect(reply.result.failure).toBe("auth");
+      expect(reply.result.message).not.toContain("wrong");
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test("stop() closes the live driver (nothing lingers past teardown)", async () => {
+    let closes = 0;
+    let connects = 0;
+    const driver: Driver = {
+      async connect() {
+        connects++;
+      },
+      async listSchema() {
+        return FAKE_SCHEMA;
+      },
+      async close() {
+        closes++;
+      },
+    };
+    const factory: DriverFactory = () => driver;
+    const c = await startCore(0, {
+      databaseUrl: "postgres://u:p@h/db",
+      createDriver: factory,
+    });
+
+    // Open the connection, then a second call proves idempotency (connect once).
+    await rpc(c, { method: "connect" });
+    await rpc(c, { method: "connect" });
+    expect(connects).toBe(1);
+
+    await c.stop();
+    expect(closes).toBe(1);
   });
 });
 
