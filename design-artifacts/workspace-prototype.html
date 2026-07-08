@@ -1,0 +1,808 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>quick-studio — workspace prototype</title>
+<style>
+  :root {
+    /* neutrals — cool, faintly blue-biased (an instrument, not a warm doc) */
+    --bg: #0b0d11;
+    --surface: #101319;
+    --surface-2: #161a21;
+    --surface-3: #1c212a;
+    --border: #222835;
+    --border-strong: #313a49;
+    --text: #e7eaf0;
+    --text-dim: #98a1b0;
+    --text-faint: #616a7a;
+
+    /* the one bold place: coral */
+    --accent: #f2705d;
+    --accent-ink: #0b0d11;
+    --accent-soft: rgba(242, 112, 93, 0.14);
+    --accent-line: rgba(242, 112, 93, 0.45);
+
+    /* semantic — state of a row/query, kept apart from the accent */
+    --ok: #46c99a;
+    --ok-soft: rgba(70, 201, 154, 0.13);
+    --warn: #e0a458;
+    --warn-soft: rgba(224, 164, 88, 0.14);
+    --err: #f05a63;
+    --err-soft: rgba(240, 90, 99, 0.13);
+
+    /* data-type coding — a real information system */
+    --t-int: #6ba5ff;
+    --t-time: #b18cff;
+    --t-bool: #e0a458;
+    --t-json: #3ec6b6;
+    --t-text: #98a1b0;
+    --t-key: var(--accent);
+
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace;
+
+    --rail: 52px;
+    --tree: 232px;
+    --radius: 7px;
+
+    color-scheme: dark;
+  }
+
+  :root[data-theme="light"] {
+    --bg: #eef0f3;
+    --surface: #ffffff;
+    --surface-2: #f4f6f8;
+    --surface-3: #e9edf1;
+    --border: #dde1e7;
+    --border-strong: #c6cdd7;
+    --text: #171b22;
+    --text-dim: #56606f;
+    --text-faint: #8a93a2;
+    --accent: #dd5641;
+    --accent-ink: #ffffff;
+    --accent-soft: rgba(221, 86, 65, 0.10);
+    --accent-line: rgba(221, 86, 65, 0.40);
+    --ok: #1f9d6f;
+    --ok-soft: rgba(31, 157, 111, 0.11);
+    --warn: #b3781f;
+    --warn-soft: rgba(179, 120, 31, 0.12);
+    --err: #d23b45;
+    --err-soft: rgba(210, 59, 69, 0.10);
+    --t-int: #2f6fd6;
+    --t-time: #7d54cf;
+    --t-bool: #b3781f;
+    --t-json: #1a9b8c;
+    --t-text: #56606f;
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #eef0f3;
+      --surface: #ffffff;
+      --surface-2: #f4f6f8;
+      --surface-3: #e9edf1;
+      --border: #dde1e7;
+      --border-strong: #c6cdd7;
+      --text: #171b22;
+      --text-dim: #56606f;
+      --text-faint: #8a93a2;
+      --accent: #dd5641;
+      --accent-ink: #ffffff;
+      --accent-soft: rgba(221, 86, 65, 0.10);
+      --accent-line: rgba(221, 86, 65, 0.40);
+      --ok: #1f9d6f;
+      --ok-soft: rgba(31, 157, 111, 0.11);
+      --warn: #b3781f;
+      --warn-soft: rgba(179, 120, 31, 0.12);
+      --err: #d23b45;
+      --err-soft: rgba(210, 59, 69, 0.10);
+      --t-int: #2f6fd6;
+      --t-time: #7d54cf;
+      --t-bool: #b3781f;
+      --t-json: #1a9b8c;
+      --t-text: #56606f;
+      color-scheme: light;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b0d11; --surface: #101319; --surface-2: #161a21; --surface-3: #1c212a;
+    --border: #222835; --border-strong: #313a49;
+    --text: #e7eaf0; --text-dim: #98a1b0; --text-faint: #616a7a;
+    --accent: #f2705d; --accent-ink: #0b0d11; --accent-soft: rgba(242,112,93,.14); --accent-line: rgba(242,112,93,.45);
+    --ok: #46c99a; --ok-soft: rgba(70,201,154,.13); --warn: #e0a458; --warn-soft: rgba(224,164,88,.14);
+    --err: #f05a63; --err-soft: rgba(240,90,99,.13);
+    --t-int: #6ba5ff; --t-time: #b18cff; --t-bool: #e0a458; --t-json: #3ec6b6; --t-text: #98a1b0;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  .label {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+  }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- app shell ---------- */
+  .app {
+    height: 100vh;
+    display: grid;
+    grid-template-columns: var(--rail) var(--tree) 1fr;
+    grid-template-rows: 1fr;
+  }
+  @media (max-width: 720px) {
+    .app { grid-template-columns: var(--rail) 1fr; }
+    .tree { display: none; }
+  }
+
+  /* ---------- launcher rail ---------- */
+  .rail {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 10px 0;
+    gap: 4px;
+  }
+  .rail .mark {
+    width: 30px; height: 30px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: var(--accent-ink);
+    display: grid; place-items: center;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 15px;
+    margin-bottom: 12px;
+    box-shadow: 0 2px 10px var(--accent-soft);
+  }
+  .rail button {
+    width: 36px; height: 36px;
+    border: none; background: transparent;
+    color: var(--text-faint);
+    border-radius: 8px;
+    cursor: pointer;
+    display: grid; place-items: center;
+    transition: color .12s, background .12s;
+  }
+  .rail button:hover { color: var(--text-dim); background: var(--surface-2); }
+  .rail button.on { color: var(--accent); background: var(--accent-soft); }
+  .rail button svg { width: 18px; height: 18px; }
+  .rail .spacer { flex: 1; }
+
+  /* ---------- schema tree ---------- */
+  .tree {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    min-height: 0;
+  }
+  .tree-head {
+    padding: 13px 14px 9px;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--border);
+  }
+  .conn {
+    display: flex; align-items: center; gap: 8px;
+    min-width: 0;
+  }
+  .conn .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--ok);
+    box-shadow: 0 0 0 3px var(--ok-soft);
+    flex-shrink: 0;
+  }
+  .conn .name {
+    font-family: var(--mono); font-size: 12px; font-weight: 600;
+    color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .conn .host { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); }
+  .mode-chip {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--t-time); background: color-mix(in srgb, var(--t-time) 14%, transparent);
+    padding: 2px 6px; border-radius: 5px; white-space: nowrap;
+  }
+  .tree-scroll { overflow-y: auto; padding: 8px 8px 16px; flex: 1; min-height: 0; }
+  .tree-group { margin-bottom: 4px; }
+  .tree-group > .label { padding: 8px 8px 5px; display: block; }
+  .tbl {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 9px; border-radius: 6px;
+    cursor: pointer; color: var(--text-dim);
+    font-family: var(--mono); font-size: 12px;
+    transition: background .1s, color .1s;
+  }
+  .tbl:hover { background: var(--surface-2); color: var(--text); }
+  .tbl.on { background: var(--accent-soft); color: var(--text); }
+  .tbl.on .tbl-ico { color: var(--accent); }
+  .tbl-ico { width: 14px; height: 14px; color: var(--text-faint); flex-shrink: 0; }
+  .tbl.on .tbl-ico { color: var(--accent); }
+  .tbl .rows { margin-left: auto; font-size: 10px; color: var(--text-faint); }
+
+  /* ---------- main ---------- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
+
+  /* top bar: tabs + window actions */
+  .topbar {
+    display: flex; align-items: stretch;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding-right: 10px;
+  }
+  .tabs { display: flex; align-items: stretch; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 14px; height: 40px;
+    border: none; border-right: 1px solid var(--border);
+    background: transparent; color: var(--text-faint);
+    font-family: var(--mono); font-size: 12px; cursor: pointer;
+    white-space: nowrap; position: relative;
+    transition: color .12s, background .12s;
+  }
+  .tab:hover { color: var(--text-dim); }
+  .tab.on { color: var(--text); background: var(--bg); }
+  .tab.on::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px;
+    background: var(--accent);
+  }
+  .tab .k { width: 13px; height: 13px; color: currentColor; opacity: .8; }
+  .tab .x { color: var(--text-faint); border-radius: 4px; width: 15px; height: 15px; display: grid; place-items: center; margin-left: 2px; }
+  .tab .x:hover { background: var(--surface-3); color: var(--text); }
+  .tab-add {
+    border: none; background: transparent; color: var(--text-faint);
+    width: 38px; cursor: pointer; font-size: 16px;
+  }
+  .tab-add:hover { color: var(--text); }
+  .win { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+  .icon-btn {
+    border: none; background: transparent; color: var(--text-faint);
+    width: 30px; height: 30px; border-radius: 6px; cursor: pointer;
+    display: grid; place-items: center;
+  }
+  .icon-btn:hover { background: var(--surface-2); color: var(--text); }
+  .icon-btn svg { width: 15px; height: 15px; }
+  .stop {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+    color: var(--err); border: 1px solid transparent; background: var(--err-soft);
+    padding: 5px 10px; border-radius: 6px; cursor: pointer; margin-left: 6px;
+  }
+  .stop:hover { border-color: color-mix(in srgb, var(--err) 40%, transparent); }
+
+  /* editor */
+  .editor-wrap { border-bottom: 1px solid var(--border); background: var(--surface); }
+  .editor-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+  }
+  .run {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--accent); color: var(--accent-ink);
+    border: none; border-radius: 6px; padding: 7px 13px;
+    font-family: var(--sans); font-size: 12.5px; font-weight: 600; cursor: pointer;
+    transition: transform .06s, filter .12s;
+  }
+  .run:hover { filter: brightness(1.06); }
+  .run:active { transform: translateY(1px); }
+  .run svg { width: 13px; height: 13px; }
+  .run .kbd {
+    font-family: var(--mono); font-size: 10px; opacity: .7;
+    border: 1px solid color-mix(in srgb, var(--accent-ink) 28%, transparent);
+    border-radius: 4px; padding: 0 4px; line-height: 15px;
+  }
+  .editor-bar .sql-name { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+  .editor-bar .spacer { flex: 1; }
+  .latency {
+    display: inline-flex; align-items: baseline; gap: 5px;
+    font-family: var(--mono);
+  }
+  .latency .n { font-size: 15px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+  .latency.pulse .n { animation: pop .5s ease; }
+  @keyframes pop { 0% { transform: scale(.8); opacity: .3; } 55% { transform: scale(1.12); } 100% { transform: scale(1); opacity: 1; } }
+  .latency .u { font-size: 10px; color: var(--text-faint); }
+
+  .editor {
+    font-family: var(--mono); font-size: 13px; line-height: 1.7;
+    padding: 13px 16px 15px; margin: 0; overflow-x: auto;
+    color: var(--text); tab-size: 2;
+  }
+  .editor .ln { color: var(--text-faint); user-select: none; display: inline-block; width: 22px; text-align: right; margin-right: 16px; }
+  .kw { color: var(--accent); font-weight: 600; }
+  .fn { color: var(--t-time); }
+  .str { color: var(--ok); }
+  .num { color: var(--t-int); }
+  .idn { color: var(--text); }
+  .pun { color: var(--text-faint); }
+  .com { color: var(--text-faint); font-style: italic; }
+
+  /* results */
+  .results { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  .result-bar {
+    display: flex; align-items: center; gap: 14px;
+    padding: 7px 14px; border-bottom: 1px solid var(--border);
+    background: var(--bg);
+  }
+  .result-bar .count { font-family: var(--mono); font-size: 11.5px; color: var(--text-dim); }
+  .result-bar .count b { color: var(--text); font-weight: 600; }
+  .result-bar .count .accent { color: var(--accent); }
+  .result-bar .grow { flex: 1; }
+  .filter {
+    display: flex; align-items: center; gap: 7px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 9px; color: var(--text-faint);
+    font-family: var(--mono); font-size: 11px; min-width: 200px;
+  }
+  .filter svg { width: 12px; height: 12px; }
+  .filter input {
+    border: none; background: transparent; color: var(--text);
+    font-family: var(--mono); font-size: 11.5px; outline: none; width: 100%;
+  }
+  .filter input::placeholder { color: var(--text-faint); }
+  .ghost {
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text-dim); border-radius: 6px; padding: 5px 10px;
+    font-family: var(--mono); font-size: 11px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .ghost:hover { border-color: var(--border-strong); color: var(--text); }
+  .ghost svg { width: 12px; height: 12px; }
+
+  .grid-scroll { flex: 1; overflow: auto; min-height: 0; }
+  table.grid { border-collapse: separate; border-spacing: 0; width: 100%; font-family: var(--mono); font-size: 12.5px; }
+  table.grid thead th {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border-strong);
+    text-align: left; padding: 0; font-weight: 500;
+    white-space: nowrap;
+  }
+  .th-inner { padding: 8px 14px 7px; display: flex; flex-direction: column; gap: 3px; }
+  .th-inner .col { color: var(--text); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .th-inner .col .keyico { width: 11px; height: 11px; color: var(--t-key); }
+  .th-inner .type { font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; }
+  .type-int { color: var(--t-int); }
+  .type-text { color: var(--t-text); }
+  .type-time { color: var(--t-time); }
+  .type-bool { color: var(--t-bool); }
+  .type-num { color: var(--t-json); }
+
+  table.grid td {
+    padding: 7px 14px; border-bottom: 1px solid var(--border);
+    white-space: nowrap; color: var(--text); vertical-align: middle;
+  }
+  table.grid tbody tr { cursor: default; }
+  table.grid tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface) 45%, transparent); }
+  table.grid tbody tr:hover td { background: var(--accent-soft); }
+  table.grid tbody tr.sel td { background: var(--accent-soft); box-shadow: inset 2px 0 0 var(--accent); }
+  td.num-cell { color: var(--t-int); text-align: right; font-variant-numeric: tabular-nums; }
+  td.pk { color: var(--text-faint); }
+  td.time-cell { color: var(--text-dim); }
+  .null { color: var(--text-faint); font-style: italic; opacity: .7; }
+  .fk { color: var(--t-int); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--t-int) 45%, transparent); text-underline-offset: 2px; cursor: pointer; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 11px; padding: 2px 8px 2px 6px; border-radius: 20px;
+    font-family: var(--mono);
+  }
+  .pill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .pill.paid { color: var(--ok); background: var(--ok-soft); }
+  .pill.pending { color: var(--warn); background: var(--warn-soft); }
+  .pill.refunded { color: var(--err); background: var(--err-soft); }
+
+  /* status bar */
+  .statusbar {
+    display: flex; align-items: center; gap: 18px;
+    padding: 5px 14px; border-top: 1px solid var(--border);
+    background: var(--surface); font-family: var(--mono); font-size: 10.5px;
+    color: var(--text-faint);
+  }
+  .statusbar .seg { display: inline-flex; align-items: center; gap: 6px; }
+  .statusbar .seg b { color: var(--text-dim); font-weight: 500; }
+  .statusbar .dot-ok { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .statusbar .grow { flex: 1; }
+  .statusbar .ms { color: var(--accent); }
+
+  ::-webkit-scrollbar { width: 11px; height: 11px; }
+  ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 6px; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  button:focus-visible, .tbl:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 5px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- launcher rail -->
+  <nav class="rail" aria-label="Workspace tools">
+    <div class="mark" title="quick-studio">q</div>
+    <button class="on" title="Tables" aria-label="Tables">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M3 14.5h18M9 9v11M15 9v11"/></svg>
+    </button>
+    <button title="Query" aria-label="Query editor">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 8l4 4-4 4M12.5 16H18"/><rect x="2.5" y="4" width="19" height="16" rx="2"/></svg>
+    </button>
+    <button title="ERD" aria-label="Entity diagram">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="6" rx="1"/><rect x="14" y="15" width="7" height="6" rx="1"/><path d="M6.5 9v4a2 2 0 0 0 2 2h5.5"/></svg>
+    </button>
+    <button title="AI Chat" aria-label="AI chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-4 3.5V16H4z"/><path d="M9 10.5h.01M12.5 10.5h.01M16 10.5h.01"/></svg>
+    </button>
+    <button title="Report" aria-label="Report">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+    </button>
+    <div class="spacer"></div>
+    <button title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+    </button>
+  </nav>
+
+  <!-- schema tree -->
+  <aside class="tree">
+    <div class="tree-head">
+      <div class="conn">
+        <span class="dot" title="Connected"></span>
+        <div style="min-width:0">
+          <div class="name" id="db-name">shop_prod</div>
+          <div class="host">127.0.0.1:5432 · postgres</div>
+        </div>
+      </div>
+      <span class="mode-chip" title="Credentials stored encrypted">persistent</span>
+    </div>
+    <div class="tree-scroll">
+      <div class="tree-group">
+        <span class="label">public · 6 tables</span>
+        <div class="tbl on" data-table="orders" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          orders <span class="rows">142</span>
+        </div>
+        <div class="tbl" data-table="customers" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          customers <span class="rows">89</span>
+        </div>
+        <div class="tbl" data-table="products" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          products <span class="rows">54</span>
+        </div>
+        <div class="tbl" data-table="order_items" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          order_items <span class="rows">318</span>
+        </div>
+        <div class="tbl" data-table="categories" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          categories <span class="rows">12</span>
+        </div>
+        <div class="tbl" data-table="sessions" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          sessions <span class="rows">1.2k</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- main -->
+  <section class="main">
+    <div class="topbar">
+      <div class="tabs" id="tabs">
+        <button class="tab on" data-tab="orders">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          public.orders
+          <span class="x" role="button" aria-label="Close">×</span>
+        </button>
+        <button class="tab" data-tab="query">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 8l4 4-4 4M12.5 16H18"/></svg>
+          revenue.sql
+          <span class="x" role="button" aria-label="Close">×</span>
+        </button>
+      </div>
+      <button class="tab-add" title="New tab">+</button>
+      <div class="win">
+        <button class="icon-btn" id="theme" title="Toggle theme" aria-label="Toggle theme">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
+        </button>
+        <button class="stop" title="Stop the local server and exit">■ Stop</button>
+      </div>
+    </div>
+
+    <!-- SQL editor -->
+    <div class="editor-wrap">
+      <div class="editor-bar">
+        <button class="run" id="run">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5l12 7-12 7z"/></svg>
+          Run
+          <span class="kbd">⌘↵</span>
+        </button>
+        <span class="sql-name">query on shop_prod</span>
+        <span class="spacer"></span>
+        <span class="label">executed</span>
+        <span class="latency" id="latency"><span class="n">11</span><span class="u">ms</span></span>
+      </div>
+      <pre class="editor" id="editor"><code><span class="ln">1</span><span class="kw">SELECT</span> id, customer, email, total, status, created_at
+<span class="ln">2</span><span class="kw">FROM</span> <span class="idn">public.orders</span>
+<span class="ln">3</span><span class="kw">WHERE</span> status <span class="pun">=</span> <span class="str">'paid'</span> <span class="kw">OR</span> status <span class="pun">=</span> <span class="str">'pending'</span>
+<span class="ln">4</span><span class="kw">ORDER BY</span> created_at <span class="kw">DESC</span>
+<span class="ln">5</span><span class="kw">LIMIT</span> <span class="num">100</span><span class="pun">;</span></code></pre>
+    </div>
+
+    <!-- results -->
+    <div class="results">
+      <div class="result-bar">
+        <span class="count" id="count"><b>142</b> rows · <span class="accent" id="ms-inline">11 ms</span></span>
+        <span class="grow"></span>
+        <label class="filter">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+          <input id="filter" placeholder="filter rows…" aria-label="Filter rows">
+        </label>
+        <button class="ghost" title="Add row">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+          Row
+        </button>
+        <button class="ghost" title="Export">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v11M8 10l4 4 4-4M5 20h14"/></svg>
+          Export
+        </button>
+      </div>
+      <div class="grid-scroll">
+        <table class="grid" id="grid"><thead id="grid-head"></thead><tbody id="grid-body"></tbody></table>
+      </div>
+    </div>
+
+    <!-- status bar -->
+    <div class="statusbar">
+      <span class="seg"><span class="dot-ok"></span> <b>shop_prod</b> connected</span>
+      <span class="seg">query <span class="ms" id="status-ms">11 ms</span></span>
+      <span class="seg"><b id="status-rows">142</b> rows</span>
+      <span class="seg">UTF-8</span>
+      <span class="grow"></span>
+      <span class="seg">encrypted store · OS keychain</span>
+      <span class="seg">127.0.0.1 only</span>
+    </div>
+  </section>
+</div>
+
+<script>
+  "use strict";
+
+  const K = (t) => `<svg class="keyico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M17 4h3v3"/></svg>`;
+
+  // column schemas + rows per table — real-ish shop data
+  const TABLES = {
+    orders: {
+      cols: [
+        { name: "id", type: "int8", cls: "type-int", kind: "int", pk: true },
+        { name: "customer", type: "varchar", cls: "type-text", kind: "fk" },
+        { name: "email", type: "citext", cls: "type-text", kind: "text" },
+        { name: "total", type: "numeric", cls: "type-num", kind: "money" },
+        { name: "status", type: "order_status", cls: "type-bool", kind: "status" },
+        { name: "created_at", type: "timestamptz", cls: "type-time", kind: "time" },
+      ],
+      rows: [
+        [1042, "Mara Quinteros", "mara.q@gmail.com", 218.40, "paid", "2026-07-05 18:22"],
+        [1041, "Diego Salvatierra", null, 54.00, "pending", "2026-07-05 17:58"],
+        [1040, "Ana Belén Roldán", "ab.roldan@hey.com", 1290.00, "paid", "2026-07-05 16:11"],
+        [1039, "Tomás Iríbarne", "tomasi@fastmail.com", 42.90, "refunded", "2026-07-05 15:40"],
+        [1038, "Carla Mendizábal", "carla.m@proton.me", 376.15, "paid", "2026-07-05 14:03"],
+        [1037, "Nahuel Paredes", "n.paredes@gmail.com", 88.00, "pending", "2026-07-05 12:47"],
+        [1036, "Sofía Bengochea", "sofi.b@outlook.com", 512.30, "paid", "2026-07-05 11:20"],
+        [1035, "Julián Ferreyra", null, 19.99, "paid", "2026-07-05 10:05"],
+        [1034, "Valentina Ocampo", "vale.ocampo@gmail.com", 964.75, "paid", "2026-07-04 22:31"],
+        [1033, "Emiliano Sosa", "emi.sosa@hey.com", 130.00, "refunded", "2026-07-04 20:18"],
+        [1032, "Renata Villalba", "renata.v@proton.me", 245.60, "pending", "2026-07-04 19:52"],
+        [1031, "Facundo Almirón", "f.almiron@gmail.com", 77.40, "paid", "2026-07-04 18:09"],
+      ],
+    },
+    customers: {
+      cols: [
+        { name: "id", type: "int8", cls: "type-int", kind: "int", pk: true },
+        { name: "name", type: "varchar", cls: "type-text", kind: "text" },
+        { name: "email", type: "citext", cls: "type-text", kind: "text" },
+        { name: "orders", type: "int4", cls: "type-int", kind: "int" },
+        { name: "verified", type: "bool", cls: "type-bool", kind: "bool" },
+        { name: "joined_at", type: "timestamptz", cls: "type-time", kind: "time" },
+      ],
+      rows: [
+        [17, "Mara Quinteros", "mara.q@gmail.com", 9, true, "2025-11-02 09:14"],
+        [18, "Diego Salvatierra", "d.salva@gmail.com", 2, false, "2026-01-19 20:41"],
+        [19, "Ana Belén Roldán", "ab.roldan@hey.com", 14, true, "2025-08-27 13:02"],
+        [20, "Tomás Iríbarne", "tomasi@fastmail.com", 1, false, "2026-06-30 11:55"],
+        [21, "Carla Mendizábal", "carla.m@proton.me", 6, true, "2025-12-11 16:20"],
+        [22, "Nahuel Paredes", null, 3, false, "2026-03-08 08:33"],
+        [23, "Sofía Bengochea", "sofi.b@outlook.com", 11, true, "2025-09-15 21:07"],
+      ],
+    },
+    products: {
+      cols: [
+        { name: "id", type: "int8", cls: "type-int", kind: "int", pk: true },
+        { name: "sku", type: "varchar", cls: "type-text", kind: "text" },
+        { name: "name", type: "varchar", cls: "type-text", kind: "text" },
+        { name: "price", type: "numeric", cls: "type-num", kind: "money" },
+        { name: "stock", type: "int4", cls: "type-int", kind: "int" },
+        { name: "active", type: "bool", cls: "type-bool", kind: "bool" },
+      ],
+      rows: [
+        [301, "TS-BLK-M", "Camiseta lisa negra M", 24.90, 140, true],
+        [302, "TS-WHT-L", "Camiseta lisa blanca L", 24.90, 0, false],
+        [303, "HD-GRY-XL", "Buzo con capucha gris XL", 58.00, 37, true],
+        [304, "CAP-NVY", "Gorra navy", 18.50, 212, true],
+        [305, "SCK-3PK", "Pack 3 medias", 12.00, 88, true],
+        [306, "JKT-DNM-M", "Campera de jean M", 96.00, 14, true],
+      ],
+    },
+    order_items: {
+      cols: [
+        { name: "id", type: "int8", cls: "type-int", kind: "int", pk: true },
+        { name: "order_id", type: "int8", cls: "type-int", kind: "fkint" },
+        { name: "product_id", type: "int8", cls: "type-int", kind: "fkint" },
+        { name: "qty", type: "int4", cls: "type-int", kind: "int" },
+        { name: "unit_price", type: "numeric", cls: "type-num", kind: "money" },
+        { name: "meta", type: "jsonb", cls: "type-num", kind: "json" },
+      ],
+      rows: [
+        [9001, 1042, 303, 2, 58.00, '{"gift":true}'],
+        [9002, 1042, 305, 1, 12.00, null],
+        [9003, 1040, 306, 3, 96.00, '{"engrave":"AB"}'],
+        [9004, 1039, 301, 1, 24.90, null],
+        [9005, 1038, 304, 4, 18.50, '{"color":"navy"}'],
+      ],
+    },
+    categories: {
+      cols: [
+        { name: "id", type: "int4", cls: "type-int", kind: "int", pk: true },
+        { name: "slug", type: "varchar", cls: "type-text", kind: "text" },
+        { name: "name", type: "varchar", cls: "type-text", kind: "text" },
+        { name: "products", type: "int4", cls: "type-int", kind: "int" },
+      ],
+      rows: [
+        [1, "remeras", "Remeras", 18],
+        [2, "buzos", "Buzos & hoodies", 9],
+        [3, "accesorios", "Accesorios", 21],
+        [4, "camperas", "Camperas", 6],
+      ],
+    },
+    sessions: {
+      cols: [
+        { name: "id", type: "uuid", cls: "type-text", kind: "text", pk: true },
+        { name: "customer_id", type: "int8", cls: "type-int", kind: "fkint" },
+        { name: "ip", type: "inet", cls: "type-text", kind: "text" },
+        { name: "expires_at", type: "timestamptz", cls: "type-time", kind: "time" },
+      ],
+      rows: [
+        ["a3f1…c92", 17, "127.0.0.1", "2026-07-06 04:00"],
+        ["7b0e…1d4", 19, "190.2.14.6", "2026-07-06 03:12"],
+        ["e51a…88f", 21, "181.44.9.2", "2026-07-05 23:58"],
+      ],
+    },
+  };
+
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+  function cell(val, kind) {
+    if (val === null) return `<td><span class="null">NULL</span></td>`;
+    switch (kind) {
+      case "int": return `<td class="num-cell">${esc(val)}</td>`;
+      case "pk": return `<td class="pk">${esc(val)}</td>`;
+      case "money": return `<td class="num-cell">${Number(val).toFixed(2)}</td>`;
+      case "fk": return `<td><span class="fk">${esc(val)}</span></td>`;
+      case "fkint": return `<td class="num-cell"><span class="fk">${esc(val)}</span></td>`;
+      case "time": return `<td class="time-cell">${esc(val)}</td>`;
+      case "bool": return `<td>${val ? '<span class="pill paid">true</span>' : '<span class="pill refunded">false</span>'}</td>`;
+      case "status": return `<td><span class="pill ${esc(val)}">${esc(val)}</span></td>`;
+      case "json": return `<td style="color:var(--t-json)">${esc(val)}</td>`;
+      default: return `<td>${esc(val)}</td>`;
+    }
+  }
+
+  function render(name) {
+    const t = TABLES[name];
+    const head = document.getElementById("grid-head");
+    const body = document.getElementById("grid-body");
+    head.innerHTML = "<tr>" + t.cols.map((c) => `
+      <th><div class="th-inner">
+        <span class="col">${c.pk ? K() : ""}${esc(c.name)}</span>
+        <span class="type ${c.cls}">${esc(c.type)}${c.pk ? " · pk" : ""}</span>
+      </div></th>`).join("") + "</tr>";
+
+    body.innerHTML = t.rows.map((r) => "<tr>" + r.map((v, i) => {
+      const col = t.cols[i];
+      const kind = col.pk ? "pk" : col.kind;
+      return cell(v, kind);
+    }).join("") + "</tr>").join("");
+
+    // row selection
+    body.querySelectorAll("tr").forEach((tr) => {
+      tr.addEventListener("click", () => {
+        body.querySelectorAll("tr.sel").forEach((x) => x.classList.remove("sel"));
+        tr.classList.add("sel");
+      });
+    });
+
+    const n = t.rows.length;
+    document.getElementById("count").innerHTML = `<b>${n}</b> row${n === 1 ? "" : "s"} · <span class="accent" id="ms-inline">${lastMs} ms</span>`;
+    document.getElementById("status-rows").textContent = n;
+  }
+
+  let lastMs = 11;
+  function runQuery() {
+    lastMs = 6 + Math.floor(Math.random() * 22);
+    const lat = document.getElementById("latency");
+    lat.querySelector(".n").textContent = lastMs;
+    lat.classList.remove("pulse"); void lat.offsetWidth; lat.classList.add("pulse");
+    document.getElementById("status-ms").textContent = lastMs + " ms";
+    const inline = document.getElementById("ms-inline");
+    if (inline) inline.textContent = lastMs + " ms";
+  }
+
+  // schema tree → load table
+  document.querySelectorAll(".tbl").forEach((el) => {
+    const load = () => {
+      document.querySelectorAll(".tbl.on").forEach((x) => x.classList.remove("on"));
+      el.classList.add("on");
+      const name = el.dataset.table;
+      render(name);
+      runQuery();
+      // reflect in the active data tab
+      const tab = document.querySelector('.tab[data-tab="orders"]');
+      tab.childNodes[2].textContent = " public." + name + " ";
+      document.getElementById("db-name");
+    };
+    el.addEventListener("click", load);
+    el.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); load(); } });
+  });
+
+  // tabs
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", (e) => {
+      if (e.target.classList.contains("x")) { e.stopPropagation(); return; }
+      document.querySelectorAll(".tab.on").forEach((x) => x.classList.remove("on"));
+      tab.classList.add("on");
+    });
+  });
+
+  // filter (visual)
+  document.getElementById("filter").addEventListener("input", (e) => {
+    const q = e.target.value.toLowerCase();
+    document.querySelectorAll("#grid-body tr").forEach((tr) => {
+      tr.style.display = tr.textContent.toLowerCase().includes(q) ? "" : "none";
+    });
+  });
+
+  // run
+  document.getElementById("run").addEventListener("click", runQuery);
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); runQuery(); }
+  });
+
+  // theme toggle
+  document.getElementById("theme").addEventListener("click", () => {
+    const root = document.documentElement;
+    const dark = getComputedStyle(root).getPropertyValue("color-scheme").trim().includes("dark");
+    root.setAttribute("data-theme", dark ? "light" : "dark");
+  });
+
+  render("orders");
+</script>
+
+</body>
+</html>
