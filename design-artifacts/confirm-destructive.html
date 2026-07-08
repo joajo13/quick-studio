@@ -1,0 +1,1437 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>quick-studio — confirm destructive (chat shell)</title>
+<style>
+  /* ============================================================
+     OWN TOKENS — cloning ChatGPT dark: near-black, flat, neutral.
+     Dark-first. No coral. Color only where functional (SQL, KPIs,
+     privacy semantics in restrained green).
+     ============================================================ */
+  :root {
+    /* chat canvas — TRUE black, uniform, no gradients */
+    --bg:        #0a0a0a;   /* main chat column + active tab + panel (near pure black) */
+    --bg-deep:   #000000;   /* window / tab-strip / sub-sidebar — pure black, the darker tone the concave feet reveal */
+    --rail-bg:   #000000;   /* quick-studio icon rail (pure black) */
+    --topbar-bg: #050505;   /* workspace tabs bar */
+
+    --user-bubble: #2f2f2f; /* the grey user bubble */
+    --composer-bg: #2f2f2f; /* the input pill */
+    --surface:   #2a2a2a;   /* subtle raised chips / SQL block */
+    --surface-2: #303030;
+    --hover:     #2f2f2f;   /* sidebar item hover */
+    --active:    #2f2f2f;   /* active conversation row */
+
+    --border:    #ffffff12; /* very tenuous hairlines / horizontal rules — visible on black */
+    --border-2:  #ffffff24;
+
+    --text:      #ececec;   /* high-contrast body */
+    --text-dim:  #b4b4b4;   /* secondary */
+    --text-faint:#8f8f8f;   /* tertiary / action icons at rest */
+
+    /* neutral "accent" — ChatGPT's active is white/light, not colored */
+    --ink:       #ececec;
+    --ink-btn:   #ffffff;   /* filled send button */
+    --ink-btn-fg:#0d0d0d;
+
+    /* functional semantics only */
+    --ok:        #3fbf7f;   /* privacy / schema-only green, restrained */
+    --ok-soft:   rgba(63,191,127,0.12);
+    --money:     #6ec6a8;   /* KPI money */
+    --count:     #7fb3ff;   /* KPI count / ints */
+
+    /* SQL syntax highlighting (subtle, ChatGPT codeblock palette) */
+    --sql-kw:  #f0868a;     /* keywords — soft rose */
+    --sql-fn:  #c9a2f0;     /* functions — soft violet */
+    --sql-str: #8dd6a0;     /* strings — soft green */
+    --sql-num: #82aaff;     /* numbers — soft blue */
+    --sql-idn: #ececec;
+    --sql-pun: #8f8f8f;
+
+    --sans: "Söhne", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+    --rail: 52px;
+    --side: 260px;
+    --read: 760px;   /* narrow, centered reading column */
+
+    color-scheme: dark;
+  }
+
+  /* ---- LIGHT (ChatGPT light: pure white, light-grey bubbles) ---- */
+  :root[data-theme="light"] {
+    --bg:        #ffffff;
+    --bg-deep:   #f9f9f9;
+    --rail-bg:   #ececec;
+    --user-bubble: #e8e8e8;
+    --composer-bg: #f4f4f4;
+    --surface:   #f7f7f7;
+    --surface-2: #efefef;
+    --hover:     #ececec;
+    --active:    #e8e8e8;
+    --border:    #0000000f;
+    --border-2:  #00000020;
+    --text:      #0d0d0d;
+    --text-dim:  #4d4d4d;
+    --text-faint:#767676;
+    --ink:       #0d0d0d;
+    --ink-btn:   #0d0d0d;
+    --ink-btn-fg:#ffffff;
+    --ok:        #1a8a55;
+    --ok-soft:   rgba(26,138,85,0.10);
+    --money:     #157a56;
+    --count:     #2f6fd6;
+    --sql-kw:  #c2334a;
+    --sql-fn:  #7a3fb8;
+    --sql-str: #1f7a3f;
+    --sql-num: #2f6fd6;
+    --sql-idn: #0d0d0d;
+    --sql-pun: #767676;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg:#ffffff; --bg-deep:#f9f9f9; --rail-bg:#ececec;
+      --user-bubble:#e8e8e8; --composer-bg:#f4f4f4;
+      --surface:#f7f7f7; --surface-2:#efefef; --hover:#ececec; --active:#e8e8e8;
+      --border:#0000000f; --border-2:#00000020;
+      --text:#0d0d0d; --text-dim:#4d4d4d; --text-faint:#767676;
+      --ink:#0d0d0d; --ink-btn:#0d0d0d; --ink-btn-fg:#ffffff;
+      --ok:#1a8a55; --ok-soft:rgba(26,138,85,0.10); --money:#157a56; --count:#2f6fd6;
+      --sql-kw:#c2334a; --sql-fn:#7a3fb8; --sql-str:#1f7a3f; --sql-num:#2f6fd6; --sql-idn:#0d0d0d; --sql-pun:#767676;
+      color-scheme: light;
+    }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+  /* data numerals/labels: clean financial sans with tabular figures */
+  .mono { font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; }
+
+  /* ============================================================ shell */
+  .app {
+    height: 100vh;
+    display: grid;
+    /* conversations sidebar COLLAPSED by default → column 0 */
+    grid-template-columns: var(--rail) 0px 1fr;
+    transition: grid-template-columns .22s ease;
+  }
+  .app.side-open { grid-template-columns: var(--rail) var(--side) 1fr; }
+  /* the sidebar itself clips when collapsed */
+  .side {
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity .18s ease;
+  }
+  .app.side-open .side { opacity: 1; }
+  @media (max-width: 900px) {
+    .app, .app.side-open { grid-template-columns: var(--rail) 1fr; }
+    .side { display: none; }
+  }
+
+  /* ---------- quick-studio identity rail (icons) ---------- */
+  .rail {
+    background: var(--rail-bg);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 10px 0; gap: 3px;
+  }
+  .rail .mark {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: var(--ink-btn); color: var(--ink-btn-fg);
+    display: grid; place-items: center;
+    font-family: var(--mono); font-weight: 700; font-size: 15px;
+    margin-bottom: 12px;
+  }
+  .rail button {
+    width: 36px; height: 36px; border: none; background: transparent;
+    color: var(--text-faint); border-radius: 8px; cursor: pointer;
+    display: grid; place-items: center; transition: color .12s, background .12s;
+  }
+  .rail button:hover { color: var(--text); background: #ffffff12; }
+  .rail button.on { color: var(--text); background: #ffffff1f; }
+  .rail button svg { width: 18px; height: 18px; }
+  .rail .spacer { flex: 1; }
+
+  /* rail status bar (bottom) — connection dot + provider */
+  .rail-status {
+    display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding-top: 8px; border-top: 1px solid var(--border); margin-top: 4px;
+  }
+  .rail-status .sdot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft);
+  }
+  .rail-status .vlabel {
+    writing-mode: vertical-rl; transform: rotate(180deg);
+    font-family: var(--mono); font-size: 9px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+
+  /* ---------- ChatGPT-style conversations sub-sidebar ---------- */
+  .side {
+    background: var(--bg-deep);
+    display: flex; flex-direction: column; min-height: 0;
+    padding: 8px;
+  }
+  .side-top { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+  .new-chat {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 10px; border-radius: 9px; cursor: pointer;
+    color: var(--text); font-size: 14px; font-weight: 500;
+    background: transparent; border: none; text-align: left; width: 100%;
+    transition: background .12s;
+  }
+  .new-chat:hover { background: var(--hover); }
+  .new-chat svg { width: 17px; height: 17px; color: var(--text-dim); }
+  .new-chat .plus { margin-left: auto; color: var(--text-faint); }
+  .side-search {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 10px; border-radius: 9px; cursor: pointer;
+    color: var(--text-dim); font-size: 14px; background: transparent; border: none;
+    text-align: left; width: 100%; transition: background .12s;
+  }
+  .side-search:hover { background: var(--hover); }
+  .side-search svg { width: 16px; height: 16px; }
+
+  .side-scroll { flex: 1; overflow-y: auto; min-height: 0; padding-top: 4px; }
+  .side-cap {
+    font-size: 12px; color: var(--text-faint); font-weight: 600;
+    padding: 8px 10px 4px; letter-spacing: .01em;
+  }
+  .conv {
+    display: block; width: 100%; text-align: left; border: none; cursor: pointer;
+    background: transparent; color: var(--text-dim);
+    padding: 8px 10px; border-radius: 9px; font-size: 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: background .1s, color .1s;
+  }
+  .conv:hover { background: var(--hover); color: var(--text); }
+  .conv.on { background: var(--active); color: var(--text); }
+
+  /* user footer of the sidebar */
+  .side-user {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 8px; margin-top: 6px; border-top: 1px solid var(--border);
+    cursor: pointer; border-radius: 9px;
+  }
+  .side-user:hover { background: var(--hover); }
+  .side-user .ua {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: linear-gradient(135deg,#5b6ee1,#9b59b6);
+    color: #fff; display: grid; place-items: center;
+    font-weight: 700; font-size: 12px; font-family: var(--mono);
+  }
+  .side-user .un { font-size: 14px; color: var(--text); font-weight: 500; }
+  .side-user .up { font-size: 11px; color: var(--text-faint); }
+
+  /* ============================================================ main
+     Chrome-like "window": .main is the deepest black behind everything.
+     The tab strip floats on it; the page content lives in a rounded,
+     slightly detached panel below — same color as the active tab, so
+     the active tab visually fuses into the panel. */
+  .main {
+    display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    background: var(--bg-deep);
+  }
+
+  /* ---------- quick-studio workspace tab bar (the chat is ONE tab) ---------- */
+  /* tabs sit at the BOTTOM of the strip so the active one kisses the panel */
+  .topbar {
+    display: flex; align-items: flex-end; flex-shrink: 0;
+    background: transparent;
+    padding: 5px 8px 0 6px; gap: 2px;
+  }
+  /* sidebar toggle (ChatGPT-style panel/hamburguer) — shows/hides conversations */
+  .side-toggle {
+    border: none; background: transparent; color: var(--text-dim);
+    width: 38px; height: 34px; cursor: pointer; display: grid; place-items: center;
+    border-radius: 8px; flex-shrink: 0; margin-bottom: 3px;
+    transition: color .12s, background .12s;
+  }
+  .side-toggle:hover { color: var(--text); background: #ffffff0f; }
+  .app.side-open .side-toggle { color: var(--text); }
+  .side-toggle svg { width: 17px; height: 17px; }
+  /* overflow VISIBLE so the active tab's concave feet (which stick out to the
+     sides and below) are never clipped by a scroll box */
+  .tabs { display: flex; align-items: flex-end; gap: 3px; overflow: visible; }
+  .tabs::-webkit-scrollbar { display: none; }
+  /* FIXED box in every state (rest, hover, active) — same height, no margin/padding
+     jumps → the icon+label stay dead-centered and never jitter on hover. */
+  .tab {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 14px; height: 36px;
+    border: none;
+    /* Chrome tab: rounded top corners; concave feet carved at the bottom via ::before/::after
+       top radius == foot radius (12px) so the top curve mirrors the bottom flare */
+    border-radius: 12px 12px 0 0;
+    background: transparent; color: var(--text-faint);
+    font-family: var(--sans); font-size: 12px; letter-spacing: .01em; cursor: pointer;
+    white-space: nowrap; position: relative;
+    /* room for the carved concave feet outside the tab box */
+    margin: 0 8px; z-index: 1;
+    /* only color animates on the tab box itself — never geometry */
+    transition: color .12s;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tab { transition: color .12s; }
+    .tab::before, .tab::after { transition: opacity .12s, background .12s; }
+  }
+  /* shared pseudo base: absolutely-positioned layers that do NOT participate in the
+     tab's layout (so they can never move the box). ::before doubles as the hover
+     pill (inactive) and the left concave foot (active); ::after is the right foot. */
+  .tab::before, .tab::after {
+    content: ""; position: absolute; pointer-events: none;
+    opacity: 0; transition: opacity .12s, background .12s;
+  }
+  /* INACTIVE hover: a floating grey pill drawn as a pure background LAYER via ::before,
+     inset inside the fixed tab box (gap top/right/left, a touch more at the bottom so it
+     lifts off the bar). Rounded on all four corners. Only opacity/background transition —
+     zero geometry change → no jitter, content stays centered. z-index:-1 keeps it behind
+     the icon/label but above the (transparent) topbar. */
+  .tab:hover:not(.on)::before {
+    inset: 4px 4px 4px 4px;   /* symmetric → pill center == content center, no vertical off-set */
+    border-radius: 10px;
+    background: #ffffff0a;
+    z-index: -1;
+    opacity: 1;
+  }
+  /* ACTIVE tab: same colour as the content panel below → they fuse into one piece.
+     Extra height + a tiny negative bottom margin let it overlap the panel seam. This
+     geometry is static (only on .on), so it never animates and never jitters. */
+  .tab.on {
+    color: var(--text); background: var(--bg);
+    /* 1px taller + 1px negative bottom margin: the tab bottom lands exactly on the
+       panel top (they share --bg) and overlaps it by 1px so there is never a seam. */
+    height: 37px; margin-bottom: -1px; z-index: 3;
+    /* no border/hairline — the tab silhouette reads from contrast alone */
+  }
+  /* concave "feet": a square the PANEL colour, with a transparent circle punched at the
+     inner-top corner via a radial-gradient mask → the leftover crescent flares OUT and
+     curves down into the panel, the classic Chrome curved base. Revealed against the
+     deeper topbar colour behind. width/radius matched to the 11px top corners. */
+  .tab.on::before, .tab.on::after {
+    bottom: 0; width: 12px; height: 12px;
+    background: var(--bg);
+    opacity: 1; z-index: 2;
+    /* No edge line: the concave foot reads from contrast alone — foot/panel var(--bg)
+       #0a0a0a against the strip var(--bg-deep) #000 revealed inside the notch. */
+  }
+  .tab.on::before {
+    left: -12px;
+    -webkit-mask: radial-gradient(circle at top left, transparent 11.5px, #000 12.1px);
+            mask: radial-gradient(circle at top left, transparent 11.5px, #000 12.1px);
+  }
+  .tab.on::after {
+    right: -12px;
+    -webkit-mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
+            mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
+  }
+  :root[data-theme="light"] .tab:hover:not(.on)::before { background: #00000008; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .tab:hover:not(.on)::before { background:#00000008; } }
+  .tab .k { width: 13px; height: 13px; color: currentColor; opacity: .85; }
+  .tab .x { color: var(--text-faint); border-radius: 4px; width: 15px; height: 15px; display: grid; place-items: center; margin-left: 2px; }
+  .tab .x:hover { background: #ffffff1a; color: var(--text); }
+  /* new-tab "+" — a real box aligned to the tab row (bottom-aligned via topbar's
+     flex-end), glyph centred with grid, and the same floating hover pill as tabs. */
+  .tab-add {
+    border: none; background: transparent; color: var(--text-faint);
+    width: 34px; height: 36px; align-self: flex-end;
+    display: grid; place-items: center; padding: 0; margin: 0 2px;
+    border-radius: 10px; cursor: pointer;
+    font-size: 19px; line-height: 1; font-weight: 400;
+    transition: color .12s, background .12s;
+  }
+  .tab-add:hover { color: var(--text); background: #ffffff0a; }
+  :root[data-theme="light"] .tab-add:hover { background: #00000008; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .tab-add:hover { background: #00000008; } }
+  .win { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+  .icon-btn {
+    border: none; background: transparent; color: var(--text-faint);
+    width: 30px; height: 30px; border-radius: 6px; cursor: pointer;
+    display: grid; place-items: center; transition: background .12s, color .12s;
+  }
+  .icon-btn:hover { background: #ffffff12; color: var(--text); }
+  :root[data-theme="light"] .icon-btn:hover, :root[data-theme="light"] .side-toggle:hover, :root[data-theme="light"] .tab .x:hover { background: #00000010; }
+  .icon-btn svg { width: 15px; height: 15px; }
+  .stop {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+    color: #ef6a63; border: 1px solid transparent; background: rgba(239,106,99,0.12);
+    padding: 5px 10px; border-radius: 6px; cursor: pointer; margin-left: 6px;
+  }
+  .stop:hover { border-color: rgba(239,106,99,0.4); }
+
+  /* ---------- content panel — Chrome "page area" as a rounded floating card ----------
+     Detached from the window edges by a small gap; shares the active tab's color. */
+  .content-panel {
+    flex: 1; min-height: 0; min-width: 0;
+    display: flex; flex-direction: column;
+    background: var(--bg);
+    border-radius: 12px;
+    margin: 0 6px 6px 6px;
+    overflow: hidden;
+    box-shadow: 0 1px 0 var(--border-2);
+  }
+
+  /* top header: model ▾  ·  privacy chip  ·  share / more */
+  .chat-head {
+    display: flex; align-items: center; gap: 10px;
+    height: 52px; padding: 0 16px; flex-shrink: 0;
+  }
+  .model-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: transparent; border: none; cursor: pointer;
+    color: var(--text); font-size: 16px; font-weight: 600;
+    padding: 6px 8px; border-radius: 9px; transition: background .12s;
+  }
+  .model-btn:hover { background: var(--hover); }
+  .model-btn .prov { color: var(--text); }
+  .model-btn .mode { color: var(--text-faint); font-weight: 500; font-family: var(--mono); font-size: 12.5px; }
+  .model-btn .chev { width: 15px; height: 15px; color: var(--text-faint); }
+
+  .privacy {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; color: var(--ok); background: var(--ok-soft);
+    border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+    padding: 4px 10px 4px 8px; border-radius: 20px; cursor: default;
+  }
+  .privacy svg { width: 13px; height: 13px; }
+  .privacy b { font-weight: 600; }
+  .head-spacer { flex: 1; }
+  .head-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--text-dim); border-radius: 20px; padding: 6px 12px;
+    font-size: 13px; cursor: pointer; transition: background .12s, color .12s;
+  }
+  .head-btn:hover { background: var(--hover); color: var(--text); }
+  .head-btn svg { width: 14px; height: 14px; }
+  .head-icon {
+    width: 34px; height: 34px; border-radius: 50%; border: none;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    display: grid; place-items: center; transition: background .12s;
+  }
+  .head-icon:hover { background: var(--hover); color: var(--text); }
+  .head-icon svg { width: 18px; height: 18px; }
+
+  /* conversation scroll — narrow centered column, lots of vertical air */
+  .thread { flex: 1; overflow-y: auto; min-height: 0; }
+  .turns {
+    max-width: var(--read); margin: 0 auto; padding: 20px 20px 40px;
+    display: flex; flex-direction: column; gap: 30px;
+  }
+
+  /* ---- USER: grey rounded bubble, right aligned ---- */
+  .msg.user { display: flex; justify-content: flex-end; }
+  .user-bubble {
+    background: var(--user-bubble); color: var(--text);
+    border-radius: 22px; padding: 11px 18px;
+    font-size: 16px; line-height: 1.55; max-width: 75%;
+  }
+
+  /* ---- ASSISTANT ---- */
+  .msg.assistant { display: flex; flex-direction: column; }
+  .assistant-inner { display: flex; gap: 16px; }
+  .a-avatar {
+    width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; margin-top: 2px;
+    background: var(--ink-btn); color: var(--ink-btn-fg);
+    display: grid; place-items: center; font-family: var(--mono);
+    font-weight: 700; font-size: 13px;
+  }
+  .a-body { flex: 1; min-width: 0; }
+
+  /* ---------- REASONING CHANNEL — plain muted stream, no card ---------- */
+  .reasoning { margin-bottom: 14px; }
+  .reasoning summary {
+    list-style: none; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 0; color: var(--text-faint); user-select: none;
+    font-size: 14px; transition: color .12s;
+  }
+  .reasoning summary:hover { color: var(--text-dim); }
+  .reasoning summary::-webkit-details-marker { display: none; }
+  .reasoning summary .chev {
+    width: 14px; height: 14px; transition: transform .18s; flex-shrink: 0;
+    color: var(--text-faint);
+  }
+  .reasoning[open] summary .chev { transform: rotate(90deg); }
+  .reasoning summary .r-live { display: none; }
+  .reasoning.thinking summary .r-live { display: inline; color: var(--text-dim); }
+  .reasoning.thinking summary .r-done { display: none; }
+
+  /* body: plain muted prose, atten. left rule like ChatGPT thoughts */
+  .reasoning .steps {
+    padding: 6px 0 4px 18px; margin-left: 6px;
+    border-left: 2px solid var(--border);
+    display: flex; flex-direction: column; gap: 10px; overflow: hidden;
+  }
+  .reasoning .step {
+    font-size: 14.5px; line-height: 1.7; color: var(--text-dim);
+  }
+  .reasoning .step .tbl-ref { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+  .reasoning .step.privacy-note { color: color-mix(in srgb, var(--ok) 65%, var(--text-dim)); }
+  /* live: lines fade in one by one (shimmer) */
+  .reasoning.thinking .step {
+    color: var(--text-faint); animation: r-fade .6s ease both;
+  }
+  .reasoning.thinking .step:nth-child(1){animation-delay:0s}
+  .reasoning.thinking .step:nth-child(2){animation-delay:.5s}
+  .reasoning.thinking .step:nth-child(3){animation-delay:1s}
+  .reasoning.thinking .step:nth-child(4){animation-delay:1.5s}
+  .reasoning.thinking .step:nth-child(5){animation-delay:2s}
+  .reasoning.thinking .step:nth-child(6){animation-delay:2.5s}
+  .reasoning.thinking .step:nth-child(7){animation-delay:3s}
+  .reasoning.thinking .step:nth-child(8){animation-delay:3.5s}
+  @keyframes r-fade { from{opacity:0;transform:translateY(1px)} to{opacity:1;transform:none} }
+
+  /* ---------- FINAL ANSWER — clean sans, ~16px, roomy line-height ---------- */
+  .answer { font-size: 16px; line-height: 1.75; color: var(--text); }
+  .answer p { margin: 0 0 18px; }
+  .answer p:last-child { margin-bottom: 0; }
+  .answer strong { font-weight: 650; color: var(--text); }
+  .answer .money { font-family: var(--sans); color: var(--money); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; font-weight: 600; }
+  /* section headers — bold, small leading emoji */
+  .answer h3 {
+    font-size: 16px; font-weight: 700; color: var(--text);
+    margin: 0 0 12px; display: flex; align-items: center; gap: 8px;
+  }
+  /* very subtle horizontal rules between big blocks */
+  .answer hr {
+    border: none; border-top: 1px solid var(--border);
+    margin: 24px 0;
+  }
+  /* well-spaced bulleted lists */
+  .answer ul { margin: 0 0 18px; padding-left: 22px; }
+  .answer li { margin-bottom: 9px; line-height: 1.7; }
+  .answer li::marker { color: var(--text-faint); }
+
+  /* generated SQL block — ChatGPT codeblock look */
+  .gen-sql {
+    margin: 4px 0 18px; border-radius: 12px;
+    background: #0d0d0d; overflow: hidden; border: 1px solid var(--border);
+  }
+  :root[data-theme="light"] .gen-sql { background: #f0f0f0; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .gen-sql { background:#f0f0f0; } }
+  .gen-sql .sql-bar {
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 12px; background: #ffffff0a;
+    font-size: 12px; color: var(--text-faint);
+  }
+  :root[data-theme="light"] .gen-sql .sql-bar { background:#00000008; }
+  .gen-sql .sql-bar .tag { font-family: var(--mono); letter-spacing: .04em; }
+  .gen-sql .sql-bar .grow { flex: 1; }
+  .gen-sql .sql-bar .mini {
+    border: none; background: transparent; color: var(--text-faint);
+    font-size: 12px; cursor: pointer; display: inline-flex; align-items: center;
+    gap: 5px; padding: 3px 7px; border-radius: 6px;
+  }
+  .gen-sql .sql-bar .mini:hover { color: var(--text); background: #ffffff12; }
+  .gen-sql .sql-bar .mini svg { width: 12px; height: 12px; }
+  .gen-sql pre {
+    margin: 0; padding: 13px 15px; overflow-x: auto;
+    font-family: var(--mono); font-size: 13.5px; line-height: 1.7; color: var(--text); tab-size: 2;
+  }
+  .gen-sql .ln { color: var(--text-faint); user-select: none; display: inline-block; width: 16px; text-align: right; margin-right: 14px; }
+  .kw{color:var(--sql-kw);font-weight:600} .fn{color:var(--sql-fn)} .str{color:var(--sql-str)}
+  .num{color:var(--sql-num)} .idn{color:var(--sql-idn)} .pun{color:var(--sql-pun)} .com{color:var(--text-faint);font-style:italic}
+
+  /* inline result — KPIs + mini table */
+  .inline-result { margin: 0 0 18px; }
+  .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .kpi {
+    border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    padding: 11px 15px; min-width: 140px;
+  }
+  .kpi .k-label { font-family: var(--sans); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 5px; }
+  .kpi .k-val { font-family: var(--sans); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; color: var(--text); }
+  .kpi.money .k-val { color: var(--money); }
+  .kpi.count .k-val { color: var(--count); }
+
+  table.mini {
+    border-collapse: separate; border-spacing: 0; width: 100%;
+    font-family: var(--sans); font-size: 13.5px;
+    font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1;
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  }
+  table.mini thead th {
+    background: var(--surface); border-bottom: 1px solid var(--border-2);
+    text-align: left; padding: 9px 14px; font-weight: 600; color: var(--text-dim);
+    font-size: 12.5px; white-space: nowrap;
+  }
+  table.mini thead th.r { text-align: right; }
+  table.mini td { padding: 9px 14px; border-bottom: 1px solid var(--border); color: var(--text); white-space: nowrap; }
+  table.mini tbody tr:last-child td { border-bottom: none; }
+  table.mini td.num { color: var(--count); text-align: right; font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; }
+  table.mini td.money { color: var(--money); text-align: right; font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; }
+  table.mini td .lead { font-weight: 600; }
+
+  /* streaming caret */
+  .caret {
+    display: inline-block; width: 9px; height: 17px;
+    background: var(--text); margin-left: 3px; vertical-align: -3px;
+    animation: blink 1s steps(2, start) infinite; border-radius: 1px;
+  }
+  @keyframes blink { 0%,50%{opacity:1} 50.01%,100%{opacity:0} }
+
+  /* ---- assistant action row (copy / up / down / share / regen / more) ---- */
+  .actions { display: flex; align-items: center; gap: 2px; margin-top: 14px; }
+  .act {
+    width: 32px; height: 32px; border-radius: 7px; border: none;
+    background: transparent; color: var(--text-faint); cursor: pointer;
+    display: grid; place-items: center; transition: background .12s, color .12s;
+  }
+  .act:hover { background: var(--hover); color: var(--text); }
+  .act svg { width: 17px; height: 17px; }
+
+  /* ============================================================ composer */
+  .composer-wrap { flex-shrink: 0; padding: 6px 20px 8px; }
+  .composer {
+    max-width: var(--read); margin: 0 auto;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg); border-radius: 26px;
+    padding: 8px 8px 8px 8px;
+    border: 1px solid #ffffff1f; transition: border-color .12s, box-shadow .12s;
+  }
+  :root[data-theme="light"] .composer { border-color: var(--border-2); }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .composer { border-color: var(--border-2); } }
+  .composer:focus-within { border-color: #ffffff33; box-shadow: 0 0 0 3px #ffffff0f; }
+  .comp-plus, .comp-icon {
+    width: 36px; height: 36px; border-radius: 50%; border: none;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    display: grid; place-items: center; flex-shrink: 0; transition: background .12s;
+  }
+  .comp-plus:hover, .comp-icon:hover { background: #ffffff12; color: var(--text); }
+  :root[data-theme="light"] .comp-plus:hover, :root[data-theme="light"] .comp-icon:hover { background:#00000010; }
+  .comp-plus svg { width: 20px; height: 20px; }
+  .comp-icon svg { width: 20px; height: 20px; }
+  .composer textarea {
+    flex: 1; resize: none; border: none; background: transparent; outline: none;
+    color: var(--text); font-family: var(--sans); font-size: 16px; line-height: 1.5;
+    max-height: 160px; padding: 8px 4px;
+  }
+  .composer textarea::placeholder { color: var(--text-faint); }
+  .comp-send {
+    width: 36px; height: 36px; border-radius: 50%; border: none; cursor: pointer;
+    background: var(--ink-btn); color: var(--ink-btn-fg);
+    display: grid; place-items: center; flex-shrink: 0; transition: filter .12s, transform .06s;
+  }
+  .comp-send:hover { filter: brightness(1.08); }
+  .comp-send:active { transform: translateY(1px); }
+  .comp-send svg { width: 18px; height: 18px; }
+  .composer-note {
+    max-width: var(--read); margin: 8px auto 4px; text-align: center;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 12px; color: var(--text-faint);
+  }
+  .composer-note .schema-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-thumb { background: #ffffff26; border-radius: 7px; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #ffffff40; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  :root[data-theme="light"] ::-webkit-scrollbar-thumb { background:#00000026; background-clip:padding-box; }
+
+  /* discreet, monochrome focus — never the harsh white default rectangle */
+  :focus { outline: none; }
+  button:focus-visible, .conv:focus-visible, summary:focus-visible, .tab:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px #ffffff2e;
+    border-radius: 8px;
+  }
+  :root[data-theme="light"] button:focus-visible,
+  :root[data-theme="light"] .conv:focus-visible,
+  :root[data-theme="light"] summary:focus-visible,
+  :root[data-theme="light"] .tab:focus-visible {
+    box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px #0000002e;
+  }
+  /* composer: focus lives on the pill (focus-within above), textarea itself stays clean */
+  .composer textarea:focus-visible { outline: none; box-shadow: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .caret { opacity: 1; }
+  }
+</style>
+<style>
+  /* ============================================================
+     DESTRUCTIVE-CONFIRM ADDENDA (new, additive only)
+     The <style> block above is the ai-chat-chatgpt.html shell,
+     copied verbatim — no shell token, color, or tab rule is edited
+     here. This block only (a) adds new --err* tokens for the
+     destructive semantic (the shell had none — it borrows the same
+     red the shell already uses on .stop, #ef6a63), and (b) adds
+     "dx-" prefixed classes for the scrim/modal/toast, namespaced so
+     they can never collide with or override a shell selector.
+     ============================================================ */
+  :root {
+    --err:      #ef6a63;   /* destructive semantic — same red as the shell's own .stop */
+    --err-soft: rgba(239,106,99,0.14);
+    --err-line: rgba(239,106,99,0.40);
+  }
+  :root[data-theme="light"] {
+    --err:      #d23b45;
+    --err-soft: rgba(210,59,69,0.10);
+    --err-line: rgba(210,59,69,0.35);
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --err:      #d23b45;
+      --err-soft: rgba(210,59,69,0.10);
+      --err-line: rgba(210,59,69,0.35);
+    }
+  }
+  :root[data-theme="dark"] { --err:#ef6a63; --err-soft:rgba(239,106,99,0.14); --err-line:rgba(239,106,99,0.40); }
+
+  /* real monospace (the shell's own .mono is sans+tabular-nums, reserved for
+     chat KPIs — SQL/counts/labels in this modal need var(--mono) instead) */
+  .dx-mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- scrim — dims the shell behind the modal ---------- */
+  .dx-scrim {
+    position: fixed; inset: 0; z-index: 60;
+    background: rgba(0,0,0,.66);
+    display: grid; place-items: center;
+    padding: 24px;
+    animation: dx-fade .15s ease;
+  }
+  .dx-scrim[hidden] { display: none; }
+  :root[data-theme="light"] .dx-scrim { background: rgba(20,20,20,.38); }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .dx-scrim { background: rgba(20,20,20,.38); } }
+  @keyframes dx-fade { from{opacity:0} to{opacity:1} }
+  @keyframes dx-lift { from{opacity:0; transform:translateY(8px) scale(.985);} to{opacity:1; transform:none;} }
+
+  /* ---------- modal card — same dark surface language as .content-panel,
+     accent is --err (destructive), never the shell's neutral ink ---------- */
+  .dx-modal {
+    width: 100%; max-width: 480px;
+    background: var(--bg);
+    border-radius: 12px;
+    box-shadow: 0 24px 70px -14px rgba(0,0,0,.55), 0 0 0 1px var(--err-line);
+    overflow: hidden;
+    animation: dx-lift .16s ease;
+  }
+  .dx-rule-top { height: 2px; background: linear-gradient(90deg, var(--err), transparent); }
+
+  .dx-modal-head { display: flex; align-items: flex-start; gap: 13px; padding: 18px 20px 14px; }
+  .dx-danger-ico {
+    flex-shrink: 0; width: 34px; height: 34px; border-radius: 9px;
+    display: grid; place-items: center; color: var(--err); background: var(--err-soft);
+  }
+  .dx-danger-ico svg { width: 19px; height: 19px; }
+  .dx-htext { min-width: 0; }
+  .dx-title { font-family: var(--sans); font-size: 16px; font-weight: 650; letter-spacing: -.01em; color: var(--text); margin: 1px 0 4px; }
+  .dx-title .dx-mono { color: var(--err); font-size: 15px; }
+  .dx-sub { font-family: var(--sans); font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
+  .dx-sub b { color: var(--text); font-weight: 600; }
+
+  .dx-body { padding: 0 20px; }
+
+  .dx-stmt-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .dx-label {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+  .dx-affected {
+    display: inline-flex; align-items: baseline; gap: 5px; font-family: var(--mono);
+    color: var(--err); background: var(--err-soft); border-radius: 6px; padding: 3px 9px;
+  }
+  .dx-affected .n { font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .dx-affected .u { font-size: 10.5px; opacity: .85; }
+
+  pre.dx-stmt {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.65; margin: 0;
+    background: #0d0d0d; border: 1px solid var(--border); border-left: 2px solid var(--err);
+    border-radius: 8px; padding: 11px 13px; overflow-x: auto; color: var(--text);
+  }
+  :root[data-theme="light"] pre.dx-stmt { background: #f0f0f0; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) pre.dx-stmt { background: #f0f0f0; } }
+  pre.dx-stmt .kw   { color: var(--sql-kw); font-weight: 600; }
+  pre.dx-stmt .fn   { color: var(--sql-fn); }
+  pre.dx-stmt .str  { color: var(--sql-str); }
+  pre.dx-stmt .num  { color: var(--sql-num); }
+  pre.dx-stmt .idn  { color: var(--sql-idn); }
+  pre.dx-stmt .pun  { color: var(--sql-pun); }
+  pre.dx-stmt .dngr { color: var(--err); font-weight: 600; }
+
+  /* dependent objects — part of the impact line, alongside affected rows */
+  .dx-deps { margin: 10px 0 0; }
+  .dx-dep-row {
+    display: flex; align-items: baseline; gap: 7px; padding: 5px 0;
+    font-family: var(--mono); font-size: 12px; color: var(--text-dim);
+    border-top: 1px solid var(--border);
+  }
+  .dx-dep-row:first-child { border-top: none; }
+  .dx-dep-row .dx-fk { color: var(--sql-num); }
+  .dx-dep-row .dx-arrow { color: var(--text-faint); }
+
+  .dx-note {
+    display: flex; align-items: center; gap: 7px; margin: 12px 0 2px;
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+  }
+  .dx-note svg { width: 12px; height: 12px; flex-shrink: 0; color: var(--ok); }
+  .dx-note b { color: var(--text-dim); font-weight: 500; }
+
+  /* type-to-confirm — escalated friction, shown for DROP / TRUNCATE */
+  .dx-ttc { margin: 14px 0 2px; }
+  .dx-ttc-prompt { font-family: var(--sans); font-size: 12px; color: var(--text-dim); margin-bottom: 7px; }
+  .dx-ttc-prompt code {
+    font-family: var(--mono); font-size: 12px; color: var(--err);
+    background: var(--err-soft); padding: 1px 6px; border-radius: 5px;
+  }
+  .dx-ttc input {
+    width: 100%; font-family: var(--mono); font-size: 13px; color: var(--text);
+    background: var(--surface); border: 1px solid var(--border-2); border-radius: 7px;
+    padding: 9px 11px; outline: none; transition: border-color .12s, box-shadow .12s;
+  }
+  .dx-ttc input::placeholder { color: var(--text-faint); }
+  .dx-ttc input:focus { border-color: var(--err); box-shadow: 0 0 0 3px var(--err-soft); }
+  .dx-ttc input.dx-match { border-color: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+
+  .dx-foot {
+    display: flex; align-items: center; gap: 9px;
+    padding: 16px 20px 18px; margin-top: 15px;
+    border-top: 1px solid var(--border); background: var(--surface);
+  }
+  .dx-foot .dx-grow { flex: 1; }
+  .dx-btn {
+    font-family: var(--sans); font-size: 12.5px; font-weight: 600;
+    border-radius: 20px; padding: 8px 16px; cursor: pointer;
+    border: 1px solid transparent; display: inline-flex; align-items: center; gap: 7px;
+    transition: filter .12s, background .12s, border-color .12s, opacity .12s;
+  }
+  .dx-btn .kbd {
+    font-family: var(--mono); font-size: 9.5px; opacity: .65;
+    border: 1px solid currentColor; border-radius: 4px; padding: 0 4px; line-height: 14px;
+  }
+  /* Cancel = quiet, safe default, takes focus on open */
+  .dx-btn-cancel { background: transparent; color: var(--text-dim); border-color: var(--border-2); }
+  .dx-btn-cancel:hover { color: var(--text); background: var(--hover); }
+  /* destructive = --err, filled, disabled until the type-to-confirm matches */
+  .dx-btn-danger { background: var(--err); color: #fff; border-color: var(--err); }
+  .dx-btn-danger:hover { filter: brightness(1.08); }
+  .dx-btn-danger:active { transform: translateY(1px); }
+  .dx-btn-danger:disabled { opacity: .4; cursor: not-allowed; filter: none; }
+  .dx-btn-danger svg { width: 14px; height: 14px; }
+
+  /* ---------- fast-path toast — reversible actions auto-commit, no dialog ---------- */
+  .dx-toast-zone {
+    position: fixed; right: 18px; bottom: 18px; z-index: 55;
+    display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+  }
+  .dx-toast {
+    display: flex; align-items: center; gap: 9px;
+    background: var(--surface); border: 1px solid var(--border-2);
+    border-left: 2px solid var(--ok); border-radius: 10px;
+    padding: 9px 14px 9px 12px;
+    box-shadow: 0 10px 30px -8px rgba(0,0,0,.45);
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
+    animation: dx-toast-in .2s ease;
+  }
+  .dx-toast.dx-out { animation: dx-toast-out .3s ease forwards; }
+  @keyframes dx-toast-in { from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:none;} }
+  @keyframes dx-toast-out { to{opacity:0; transform:translateY(6px);} }
+  .dx-toast .dx-tick { width: 15px; height: 15px; color: var(--ok); flex-shrink: 0; }
+  .dx-toast b { color: var(--text); font-weight: 600; }
+  .dx-toast .dx-sep { color: var(--text-faint); margin: 0 1px; }
+  .dx-toast .dx-undo {
+    color: var(--text); font-weight: 600; cursor: pointer;
+    background: none; border: none; font-family: var(--mono); font-size: 11.5px;
+    padding: 0; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .dx-toast .dx-undo:hover { color: var(--ok); }
+
+  /* ---------- demo switcher (bottom-left, small, mono chrome) ---------- */
+  .dx-demo {
+    position: fixed; left: 18px; bottom: 18px; z-index: 56;
+    display: flex; gap: 7px; align-items: center;
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+  }
+  .dx-demo .dx-demo-cap { letter-spacing: .08em; text-transform: uppercase; }
+  .dx-demo button {
+    border: 1px solid var(--border-2); background: var(--surface); color: var(--text-dim);
+    border-radius: 20px; padding: 5px 11px; font-family: var(--mono); font-size: 11px; cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+  .dx-demo button:hover { color: var(--text); background: var(--hover); }
+  .dx-demo button.dx-demo-danger { color: var(--err); }
+  .dx-demo button.dx-demo-danger:hover { background: var(--err-soft); border-color: var(--err-line); }
+
+  button:focus-visible.dx-btn, button:focus-visible.dx-undo, .dx-ttc input:focus-visible {
+    outline: none; box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px var(--err-line);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .dx-scrim, .dx-modal, .dx-toast { animation: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ quick-studio identity rail (NOT ChatGPT — the app) ============ -->
+  <nav class="rail" aria-label="Workspace tools">
+    <div class="mark" title="quick-studio">q</div>
+    <button class="on" title="Tables" aria-label="Tables">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M3 14.5h18M9 9v11M15 9v11"/></svg>
+    </button>
+    <button title="Query" aria-label="Query editor">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 8l4 4-4 4M12.5 16H18"/><rect x="2.5" y="4" width="19" height="16" rx="2"/></svg>
+    </button>
+    <button title="ERD" aria-label="Entity diagram">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="6" rx="1"/><rect x="14" y="15" width="7" height="6" rx="1"/><path d="M6.5 9v4a2 2 0 0 0 2 2h5.5"/></svg>
+    </button>
+    <button title="AI Chat" aria-label="AI chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-4 3.5V16H4z"/><path d="M9 10.5h.01M12.5 10.5h.01M16 10.5h.01"/></svg>
+    </button>
+    <button title="Report" aria-label="Report">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+    </button>
+    <div class="spacer"></div>
+    <button title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+    </button>
+    <!-- rail status bar (bottom): connection + provider -->
+    <div class="rail-status" title="shop_prod connected · claude-opus-4-8 · schema-only · 127.0.0.1">
+      <span class="sdot"></span>
+      <span class="vlabel">127.0.0.1 · schema-only</span>
+    </div>
+  </nav>
+
+  <!-- ============ ChatGPT-style conversations sub-sidebar ============ -->
+  <aside class="side" aria-label="Conversations">
+    <div class="side-top">
+      <button class="new-chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v8m0 0v8m0-8h8m-8 0H4"/></svg>
+        Nuevo chat
+        <span class="plus"></span>
+      </button>
+      <button class="side-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        Buscar chats
+      </button>
+    </div>
+    <div class="side-scroll">
+      <div class="side-cap">Hoy</div>
+      <button class="conv on">Weekly revenue</button>
+      <button class="conv">Schema overview</button>
+      <div class="side-cap">Anteriores</div>
+      <button class="conv">Refund analysis</button>
+      <button class="conv">Top customers by LTV</button>
+      <button class="conv">Orders missing shipping</button>
+      <button class="conv">Slow query on order_items</button>
+      <button class="conv">Category revenue split</button>
+      <button class="conv">Session funnel Q2</button>
+    </div>
+    <div class="side-user">
+      <span class="ua">M</span>
+      <div style="min-width:0">
+        <div class="un">Martín</div>
+        <div class="up">quick-studio · local</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ main: workspace tabs + chat as the active tab ============ -->
+  <section class="main">
+
+    <!-- quick-studio workspace tab bar — a DATA tab (public.orders) is active here,
+         since the guarded action below targets that table -->
+    <div class="topbar">
+      <button class="side-toggle" id="side-toggle" title="Mostrar/ocultar chats" aria-label="Alternar lista de chats" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+      </button>
+      <div class="tabs" id="tabs">
+        <button class="tab on" data-tab="orders">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          public.orders
+          <span class="x" role="button" aria-label="Cerrar">×</span>
+        </button>
+        <button class="tab" data-tab="query">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 8l4 4-4 4M12.5 16H18"/></svg>
+          revenue.sql
+          <span class="x" role="button" aria-label="Cerrar">×</span>
+        </button>
+        <button class="tab" data-tab="chat">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H9l-4 3.5V16H4z"/><path d="M9 10.5h.01M12.5 10.5h.01M16 10.5h.01"/></svg>
+          assistant
+          <span class="x" role="button" aria-label="Cerrar">×</span>
+        </button>
+      </div>
+      <button class="tab-add" title="Nueva tab">+</button>
+      <div class="win">
+        <button class="icon-btn" id="theme" title="Cambiar tema" aria-label="Cambiar tema">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
+        </button>
+        <button class="stop" title="Detener el server local y salir">■ Stop</button>
+      </div>
+    </div>
+
+    <!-- content panel: rounded floating card holding the whole chat (Chrome page area) —
+         dimmed by the scrim below while the destructive confirmation is open -->
+    <div class="content-panel">
+
+    <!-- header: model ▾ · privacy chip · share / more -->
+    <div class="chat-head">
+      <button class="model-btn" title="Switch model / mode">
+        <span class="prov">claude-opus-4-8</span>
+        <span class="mode">· schema-only</span>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+      </button>
+      <span class="privacy" title="The Core sends the Provider your schema shape only — table & column names and types. Row data never leaves your machine.">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+        Provider sees <b>schema only</b> — no rows leave the Core
+      </span>
+      <span class="head-spacer"></span>
+      <button class="head-btn" title="Compartir conversación">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 12v6a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M12 3v13M8 7l4-4 4 4"/></svg>
+        Compartir
+      </button>
+      <button class="head-icon" title="Más acciones" aria-label="Más">
+        <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>
+      </button>
+    </div>
+
+    <!-- conversation -->
+    <div class="thread" id="thread">
+      <div class="turns">
+
+        <!-- user turn -->
+        <div class="msg user">
+          <div class="user-bubble">¿cuánto facturamos esta semana y qué producto lideró?</div>
+        </div>
+
+        <!-- assistant turn -->
+        <div class="msg assistant">
+          <div class="assistant-inner">
+            <div class="a-avatar">q</div>
+            <div class="a-body">
+
+              <!-- REASONING CHANNEL — collapsed by default -->
+              <details class="reasoning">
+                <summary>
+                  <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 6l6 6-6 6"/></svg>
+                  <span class="r-live">Thinking…</span>
+                  <span class="r-done">Thought for 1.4s</span>
+                </summary>
+                <div class="steps">
+                  <div class="step">Let me read the request — they want the last 7 days: revenue plus the top product.</div>
+                  <div class="step">Checking the schema for <span class="tbl-ref">public.orders</span> — there's a numeric total, a status, and a created_at timestamptz.</div>
+                  <div class="step">And <span class="tbl-ref">public.order_items</span> joined to <span class="tbl-ref">public.products</span> should give me the leader.</div>
+                  <div class="step">Only paid orders should count toward revenue, so I'll filter on status.</div>
+                  <div class="step privacy-note">No data leaves the Core — I only see column names and types here, never the row values.</div>
+                  <div class="step">Joining order_items → products and summing qty × unit_price per product.</div>
+                  <div class="step">Composing the query — aggregating where created_at ≥ now() − interval '7 days'.</div>
+                  <div class="step">It's read-only (a plain SELECT), so it's safe to propose for execution.</div>
+                </div>
+              </details>
+
+              <!-- FINAL ANSWER -->
+              <div class="answer">
+                <h3>📊 Resumen de la semana</h3>
+                <p>Esta semana facturaste <span class="money">$4,218.40</span> en <strong>47 órdenes pagas</strong>. El producto que lideró fue el <strong>Buzo con capucha gris XL</strong> (SKU <span class="mono">HD-GRY-XL</span>), con 31 unidades vendidas.</p>
+
+                <hr>
+
+                <h3>🧮 Consulta generada</h3>
+                <p>Armé esta consulta para obtenerlo — corre solo lectura sobre <span class="mono">shop_prod</span>:</p>
+
+                <div class="gen-sql">
+                  <div class="sql-bar">
+                    <span class="tag">sql · generated</span>
+                    <span class="grow"></span>
+                    <button class="mini" title="Abrir en el editor de queries">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+                      Abrir en editor
+                    </button>
+                    <button class="mini" title="Copiar">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>
+                      Copiar
+                    </button>
+                  </div>
+                  <pre><code><span class="ln">1</span><span class="kw">SELECT</span> p.name, <span class="fn">sum</span>(oi.qty) <span class="kw">AS</span> units, <span class="fn">sum</span>(oi.qty <span class="pun">*</span> oi.unit_price) <span class="kw">AS</span> revenue
+<span class="ln">2</span><span class="kw">FROM</span> <span class="idn">public.orders</span> o
+<span class="ln">3</span><span class="kw">JOIN</span> <span class="idn">public.order_items</span> oi <span class="kw">ON</span> oi.order_id <span class="pun">=</span> o.id
+<span class="ln">4</span><span class="kw">JOIN</span> <span class="idn">public.products</span> p <span class="kw">ON</span> p.id <span class="pun">=</span> oi.product_id
+<span class="ln">5</span><span class="kw">WHERE</span> o.status <span class="pun">=</span> <span class="str">'paid'</span>
+<span class="ln">6</span>  <span class="kw">AND</span> o.created_at <span class="pun">&gt;=</span> <span class="fn">now</span>() <span class="pun">-</span> <span class="kw">interval</span> <span class="str">'7 days'</span>
+<span class="ln">7</span><span class="kw">GROUP BY</span> p.name
+<span class="ln">8</span><span class="kw">ORDER BY</span> revenue <span class="kw">DESC</span><span class="pun">;</span></code></pre>
+                </div>
+
+                <hr>
+
+                <h3>📈 Resultado</h3>
+                <div class="inline-result">
+                  <div class="kpis">
+                    <div class="kpi money">
+                      <div class="k-label">revenue · 7d</div>
+                      <div class="k-val">$4,218.40</div>
+                    </div>
+                    <div class="kpi count">
+                      <div class="k-label">paid orders</div>
+                      <div class="k-val">47</div>
+                    </div>
+                  </div>
+                  <table class="mini">
+                    <thead>
+                      <tr><th>producto</th><th class="r">units</th><th class="r">revenue</th></tr>
+                    </thead>
+                    <tbody>
+                      <tr><td><span class="lead">Buzo con capucha gris XL</span></td><td class="num">31</td><td class="money">1,798.00</td></tr>
+                      <tr><td>Campera de jean M</td><td class="num">14</td><td class="money">1,344.00</td></tr>
+                      <tr><td>Camiseta lisa negra M</td><td class="num">22</td><td class="money">547.80</td></tr>
+                      <tr><td>Gorra navy</td><td class="num">15</td><td class="money">277.50</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <p>Un par de cosas que noté mirando los números:</p>
+                <ul>
+                  <li>El <strong>Buzo gris XL</strong> concentra el <strong>43%</strong> del revenue con solo 31 unidades — margen por unidad alto.</li>
+                  <li>La <strong>Camiseta lisa negra M</strong> vende volumen (22 u) pero aporta poco: ticket bajo.</li>
+                </ul>
+
+                <p>Estos números salieron de correr la consulta localmente sobre tus datos<span class="caret" aria-hidden="true"></span></p>
+              </div>
+
+              <!-- action row: copy / up / down / share / regenerate / more -->
+              <div class="actions" role="toolbar" aria-label="Acciones de respuesta">
+                <button class="act" title="Copiar" aria-label="Copiar">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>
+                </button>
+                <button class="act" title="Buena respuesta" aria-label="Me gusta">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M7 10v10H4V10zM7 10l4-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1.2 6A2 2 0 0 1 16.8 20H7"/></svg>
+                </button>
+                <button class="act" title="Mala respuesta" aria-label="No me gusta">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M17 14V4h3v10zM17 14l-4 7a2 2 0 0 1-2-2v-3H6a2 2 0 0 1-2-2.3l1.2-6A2 2 0 0 1 7.2 4H17"/></svg>
+                </button>
+                <button class="act" title="Compartir" aria-label="Compartir">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="6" cy="12" r="2.4"/><circle cx="18" cy="6" r="2.4"/><circle cx="18" cy="18" r="2.4"/><path d="M8 11l8-4M8 13l8 4"/></svg>
+                </button>
+                <button class="act" title="Regenerar" aria-label="Regenerar">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M20 11a8 8 0 0 0-14-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14 4.5L20 16M20 20v-4h-4"/></svg>
+                </button>
+                <button class="act" title="Más" aria-label="Más">
+                  <svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="19" cy="12" r="1.9"/></svg>
+                </button>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- composer: the ChatGPT pill -->
+    <div class="composer-wrap">
+      <div class="composer">
+        <button class="comp-plus" title="Adjuntar / más" aria-label="Adjuntar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 5v14M5 12h14"/></svg>
+        </button>
+        <textarea rows="1" placeholder="Preguntar lo que quieras" aria-label="Mensaje"></textarea>
+        <button class="comp-icon" title="Dictar" aria-label="Micrófono">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+        </button>
+        <button class="comp-send" title="Enviar / voz" aria-label="Enviar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 20V5M6 11l6-6 6 6"/></svg>
+        </button>
+      </div>
+      <div class="composer-note">
+        <span class="schema-dot"></span>
+        quick-studio puede cometer errores — verificá los datos importantes. Exposición: schema-only, sin filas fuera del Core.
+      </div>
+    </div>
+
+    </div><!-- /.content-panel -->
+
+  </section>
+</div>
+
+<!-- ============ DESTRUCTIVE CONFIRMATION MODAL (DROP / TRUNCATE — guarded path) ============ -->
+<div class="dx-scrim" id="dx-scrim">
+  <div class="dx-modal" role="alertdialog" aria-modal="true" aria-labelledby="dx-title" aria-describedby="dx-sub">
+    <div class="dx-rule-top"></div>
+    <div class="dx-modal-head">
+      <div class="dx-danger-ico" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3.2 1.8 20.4h20.4z"/><path d="M12 9.5v5" stroke-linecap="round"/><circle cx="12" cy="17.7" r=".2" stroke-width="2.2"/></svg>
+      </div>
+      <div class="dx-htext">
+        <div class="dx-title" id="dx-title">Drop table <span class="dx-mono">public.orders</span>?</div>
+        <div class="dx-sub" id="dx-sub"><b>DROP TABLE</b> removes the table, every row in it, and its indexes. This is irreversible from quick-studio and breaks 1 dependent foreign key.</div>
+      </div>
+    </div>
+
+    <div class="dx-body">
+      <div class="dx-stmt-label">
+        <span class="dx-label">Statement</span>
+        <span class="dx-affected"><span class="n" id="dx-aff-n">142</span><span class="u">rows destroyed</span></span>
+      </div>
+      <pre class="dx-stmt" id="dx-stmt"><span class="dngr">DROP TABLE</span> <span class="idn">public.orders</span><span class="pun">;</span></pre>
+
+      <div class="dx-deps">
+        <div class="dx-dep-row">
+          <span class="dx-label" style="text-transform:none;letter-spacing:0;">dependent</span>
+          <span class="dx-fk dx-mono">order_items.order_id</span>
+          <span class="dx-arrow dx-mono">→ FK →</span>
+          <span class="dx-mono">orders.id</span>
+        </div>
+      </div>
+
+      <div class="dx-note">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3l7 3v5c0 4.2-2.8 7.6-7 9-4.2-1.4-7-4.8-7-9V6z"/><path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span>guarded by Core executor · <b>default-deny</b> — this dialog is a heads-up, the Core is the real gate</span>
+      </div>
+
+      <!-- escalated friction: type-to-confirm for DROP / TRUNCATE -->
+      <div class="dx-ttc" id="dx-ttc">
+        <div class="dx-ttc-prompt">Type the table name <code id="dx-ttc-target">public.orders</code> to confirm.</div>
+        <input id="dx-ttc-input" type="text" autocomplete="off" spellcheck="false" placeholder="table name" aria-label="Type table name to confirm">
+      </div>
+    </div>
+
+    <div class="dx-foot">
+      <button class="dx-btn dx-btn-cancel" id="dx-btn-cancel">Cancel <span class="kbd">Esc</span></button>
+      <span class="dx-grow"></span>
+      <button class="dx-btn dx-btn-danger" id="dx-btn-confirm" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span id="dx-btn-confirm-label">Drop table</span>
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- fast-path toast zone — reversible actions (e.g. row edits/deletes) auto-commit, no dialog -->
+<div class="dx-toast-zone" id="dx-toast-zone" aria-live="polite"></div>
+
+<!-- demo switcher: flip between the guarded flow and the fast path -->
+<div class="dx-demo">
+  <span class="dx-demo-cap">demo</span>
+  <button id="dx-demo-drop" class="dx-demo-danger">DROP TABLE</button>
+  <button id="dx-demo-truncate" class="dx-demo-danger">TRUNCATE</button>
+  <button id="dx-demo-toast">fast-path: delete 3 rows</button>
+</div>
+
+<script>
+  "use strict";
+
+  // theme toggle — flips data-theme, respecting current computed scheme
+  document.getElementById("theme").addEventListener("click", () => {
+    const root = document.documentElement;
+    const dark = getComputedStyle(root).getPropertyValue("color-scheme").trim().includes("dark");
+    root.setAttribute("data-theme", dark ? "light" : "dark");
+  });
+
+  // conversations sidebar toggle — collapsed by default, slides in/out
+  const app = document.querySelector(".app");
+  const sideToggle = document.getElementById("side-toggle");
+  sideToggle.addEventListener("click", () => {
+    const open = app.classList.toggle("side-open");
+    sideToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  // workspace tabs (visual selection)
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", (e) => {
+      if (e.target.classList.contains("x")) { e.stopPropagation(); return; }
+      document.querySelectorAll(".tab.on").forEach((x) => x.classList.remove("on"));
+      tab.classList.add("on");
+    });
+  });
+
+  // sidebar conversation selection (visual)
+  document.querySelectorAll(".conv").forEach((c) => {
+    c.addEventListener("click", () => {
+      document.querySelectorAll(".conv.on").forEach((x) => x.classList.remove("on"));
+      c.classList.add("on");
+    });
+  });
+
+  // composer: auto-grow + send appends the typed message (visual only)
+  const ta = document.querySelector(".composer textarea");
+  ta.addEventListener("input", () => {
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
+  });
+
+  const thread = document.getElementById("thread");
+  const turns = thread.querySelector(".turns");
+  function send() {
+    const v = ta.value.trim();
+    if (!v) return;
+    const msg = document.createElement("div");
+    msg.className = "msg user";
+    const bubble = document.createElement("div");
+    bubble.className = "user-bubble";
+    bubble.textContent = v;
+    msg.appendChild(bubble);
+    turns.appendChild(msg);
+    ta.value = ""; ta.style.height = "auto";
+    thread.scrollTop = thread.scrollHeight;
+  }
+  document.querySelector(".comp-send").addEventListener("click", send);
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  // scroll to latest on load
+  thread.scrollTop = thread.scrollHeight;
+
+  // ============================================================
+  // DESTRUCTIVE CONFIRMATION MODAL — guarded path (DROP/TRUNCATE)
+  // ============================================================
+  const dxScrim = document.getElementById("dx-scrim");
+  const dxTtc = document.getElementById("dx-ttc");
+  const dxTtcInput = document.getElementById("dx-ttc-input");
+  const dxTtcTarget = document.getElementById("dx-ttc-target");
+  const dxBtnConfirm = document.getElementById("dx-btn-confirm");
+  const dxBtnConfirmLabel = document.getElementById("dx-btn-confirm-label");
+  const dxBtnCancel = document.getElementById("dx-btn-cancel");
+  const dxTitle = document.getElementById("dx-title");
+  const dxSub = document.getElementById("dx-sub");
+  const dxStmt = document.getElementById("dx-stmt");
+  const dxAffN = document.getElementById("dx-aff-n");
+  let dxLastFocus = null;
+
+  const DX_CONFIGS = {
+    drop: {
+      title: `Drop table <span class="dx-mono">public.orders</span>?`,
+      sub: `<b>DROP TABLE</b> removes the table, every row in it, and its indexes. This is irreversible from quick-studio and breaks 1 dependent foreign key.`,
+      stmt: `<span class="dngr">DROP TABLE</span> <span class="idn">public.orders</span><span class="pun">;</span>`,
+      affected: 142,
+      affectedUnit: "rows destroyed",
+      confirmLabel: "Drop table",
+      target: "public.orders",
+    },
+    truncate: {
+      title: `Truncate <span class="dx-mono">public.sessions</span>?`,
+      sub: `<b>TRUNCATE</b> empties the table in place. Faster than DELETE, but just as irreversible from quick-studio.`,
+      stmt: `<span class="dngr">TRUNCATE TABLE</span> <span class="idn">public.sessions</span><span class="pun">;</span>`,
+      affected: 1204,
+      affectedUnit: "rows destroyed",
+      confirmLabel: "Truncate table",
+      target: "public.sessions",
+    },
+  };
+
+  function dxOpen(key) {
+    const c = DX_CONFIGS[key];
+    dxLastFocus = document.activeElement;
+    dxTitle.innerHTML = c.title;
+    dxSub.innerHTML = c.sub;
+    dxStmt.innerHTML = c.stmt;
+    dxAffN.textContent = c.affected.toLocaleString();
+    dxAffN.nextElementSibling.textContent = c.affectedUnit;
+    dxBtnConfirmLabel.textContent = c.confirmLabel;
+
+    dxTtcTarget.textContent = c.target;
+    dxTtcInput.value = "";
+    dxTtcInput.classList.remove("dx-match");
+    dxTtcInput.dataset.target = c.target;
+    dxBtnConfirm.disabled = true;
+
+    dxScrim.hidden = false;
+    // Cancel is the safe default → it takes focus
+    dxBtnCancel.focus();
+  }
+
+  function dxClose() {
+    dxScrim.hidden = true;
+    if (dxLastFocus && dxLastFocus.focus) dxLastFocus.focus();
+  }
+
+  dxTtcInput.addEventListener("input", () => {
+    const ok = dxTtcInput.value.trim() === dxTtcInput.dataset.target;
+    dxTtcInput.classList.toggle("dx-match", ok);
+    dxBtnConfirm.disabled = !ok;
+  });
+
+  dxBtnCancel.addEventListener("click", dxClose);
+  dxBtnConfirm.addEventListener("click", () => {
+    if (dxBtnConfirm.disabled) return;
+    dxClose();
+    dxToast(`statement executed`, `Core allowed · gate passed`);
+  });
+
+  // clicking the scrim itself cancels (safe default)
+  dxScrim.addEventListener("click", (e) => { if (e.target === dxScrim) dxClose(); });
+
+  document.addEventListener("keydown", (e) => {
+    if (dxScrim.hidden) return;
+    if (e.key === "Escape") { e.preventDefault(); dxClose(); }
+    // focus trap
+    if (e.key === "Tab") {
+      const f = dxScrim.querySelectorAll("button:not([disabled]), input:not([disabled])");
+      const list = Array.from(f).filter((el) => el.offsetParent !== null);
+      if (!list.length) return;
+      const first = list[0], last = list[list.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    }
+  });
+
+  // ============================================================
+  // FAST-PATH TOAST — reversible actions auto-commit, no dialog
+  // ============================================================
+  const dxZone = document.getElementById("dx-toast-zone");
+  function dxToast(main, commitOrUndo, withUndo) {
+    const el = document.createElement("div");
+    el.className = "dx-toast";
+    const tick = `<svg class="dx-tick" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+    if (withUndo) {
+      let secs = 5;
+      el.innerHTML = `${tick}<span><b>${main}</b><span class="dx-sep">·</span><button class="dx-undo" id="dx-undo-btn">Undo (${secs}s)</button></span>`;
+      zoneAppendAndSchedule(el, () => {
+        const undoBtn = el.querySelector("#dx-undo-btn");
+        const timer = setInterval(() => {
+          secs -= 1;
+          if (!undoBtn) { clearInterval(timer); return; }
+          if (secs <= 0) { clearInterval(timer); dxDismiss(el); return; }
+          undoBtn.textContent = `Undo (${secs}s)`;
+        }, 1000);
+        undoBtn.addEventListener("click", () => { clearInterval(timer); dxDismiss(el); dxToast("undone", "reverted", false); });
+        return timer;
+      });
+    } else {
+      el.innerHTML = `${tick}<span><b>${main}</b><span class="commit dx-sep-text" style="color:var(--text-faint)"> · ${commitOrUndo}</span></span>`;
+      zoneAppendAndSchedule(el, null, 2600);
+    }
+  }
+  function zoneAppendAndSchedule(el, onMount, autoMs) {
+    dxZone.appendChild(el);
+    let timer = null;
+    if (onMount) timer = onMount();
+    if (autoMs) setTimeout(() => dxDismiss(el), autoMs);
+  }
+  function dxDismiss(el) {
+    if (!el.isConnected) return;
+    el.classList.add("dx-out");
+    setTimeout(() => el.remove(), 320);
+  }
+
+  // ---------- demo wiring ----------
+  document.getElementById("dx-demo-drop").addEventListener("click", () => dxOpen("drop"));
+  document.getElementById("dx-demo-truncate").addEventListener("click", () => dxOpen("truncate"));
+  document.getElementById("dx-demo-toast").addEventListener("click", () => dxToast("Deleted 3 rows", null, true));
+
+  // open the DROP modal on load (the guarded path is "the confirmation moment"),
+  // and drop a fast-path toast shortly after, to show the contrast between the two.
+  dxOpen("drop");
+  setTimeout(() => dxToast("Deleted 3 rows", null, true), 900);
+</script>
+
+</body>
+</html>

@@ -1,0 +1,876 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>quick-studio — AI chat · editorial</title>
+<style>
+  /* =====================================================================
+     EDITORIAL / PAPER identity — light-first, warm ink on warm paper.
+     Own token set (not copied from the instrument variant).
+     Accent: muted terracotta / oxidized clay, used with discipline.
+     ===================================================================== */
+  :root {
+    /* PRIMARY = warm paper (light). Dark is the secondary variant. */
+    --paper:      #f7f4ee;   /* page — warm bone */
+    --leaf:       #fbf9f4;   /* raised surfaces — cream */
+    --leaf-2:     #f1ece2;   /* recessed panels */
+    --leaf-3:     #e9e2d5;   /* deeper wells */
+    --rule:       #e2dccf;   /* hairlines */
+    --rule-ink:   #cfc6b4;   /* stronger rules */
+    --ink:        #2b2822;   /* body ink — warm near-black */
+    --ink-soft:   #6b6459;   /* secondary */
+    --ink-faint:  #9a9384;   /* tertiary / marginalia */
+
+    /* the one accent — oxidized terracotta */
+    --clay:       #a8563a;
+    --clay-ink:   #fbf9f4;
+    --clay-soft:  rgba(168, 86, 58, 0.10);
+    --clay-line:  rgba(168, 86, 58, 0.38);
+
+    /* quiet semantics (sage for OK, amber for caution) */
+    --sage:       #5b7052;
+    --sage-soft:  rgba(91, 112, 82, 0.12);
+    --amber:      #9a7327;
+    --amber-soft: rgba(154, 115, 39, 0.12);
+    --rose:       #a63d43;
+    --rose-soft:  rgba(166, 61, 67, 0.10);
+
+    /* SQL syntax — subdued, ink-family with the clay for keywords */
+    --s-kw:   #97502f;
+    --s-fn:   #6a5f8a;
+    --s-str:  #5b7052;
+    --s-num:  #37627f;
+    --s-idn:  var(--ink);
+    --s-pun:  var(--ink-faint);
+
+    --serif: "Iowan Old Style", "Palatino Linotype", "Charter", Georgia, "Times New Roman", ui-serif, serif;
+    --sans:  ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    --mono:  ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+    --rail: 56px;
+    --tree: 236px;
+    --radius: 12px;
+    --shadow: 0 1px 2px rgba(43,40,34,.04), 0 6px 20px rgba(43,40,34,.05);
+
+    color-scheme: light;
+  }
+
+  /* ---- DARK = espresso paper (secondary) ---- */
+  :root[data-theme="dark"] {
+    --paper:      #1c1814;
+    --leaf:       #241f19;
+    --leaf-2:     #2b251e;
+    --leaf-3:     #332c23;
+    --rule:       #38302655;
+    --rule-ink:   #4a3f30;
+    --ink:        #ece4d6;
+    --ink-soft:   #b3a893;
+    --ink-faint:  #7d7361;
+
+    --clay:       #d08560;
+    --clay-ink:   #1c1814;
+    --clay-soft:  rgba(208, 133, 96, 0.14);
+    --clay-line:  rgba(208, 133, 96, 0.42);
+
+    --sage:       #9db386;
+    --sage-soft:  rgba(157, 179, 134, 0.14);
+    --amber:      #d8ab5c;
+    --amber-soft: rgba(216, 171, 92, 0.14);
+    --rose:       #dc7d81;
+    --rose-soft:  rgba(220, 125, 129, 0.13);
+
+    --s-kw:   #d89066;
+    --s-fn:   #b6a9dd;
+    --s-str:  #a6bf8e;
+    --s-num:  #86b4d3;
+    --s-idn:  var(--ink);
+    --s-pun:  var(--ink-faint);
+
+    --rule:     #3a3226;
+    --shadow: 0 1px 2px rgba(0,0,0,.25), 0 8px 26px rgba(0,0,0,.30);
+    color-scheme: dark;
+  }
+
+  /* prefers-color-scheme mirrors the same espresso set unless overridden */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme]) {
+      --paper:#1c1814; --leaf:#241f19; --leaf-2:#2b251e; --leaf-3:#332c23;
+      --rule:#3a3226; --rule-ink:#4a3f30;
+      --ink:#ece4d6; --ink-soft:#b3a893; --ink-faint:#7d7361;
+      --clay:#d08560; --clay-ink:#1c1814; --clay-soft:rgba(208,133,96,.14); --clay-line:rgba(208,133,96,.42);
+      --sage:#9db386; --sage-soft:rgba(157,179,134,.14); --amber:#d8ab5c; --amber-soft:rgba(216,171,92,.14);
+      --rose:#dc7d81; --rose-soft:rgba(220,125,129,.13);
+      --s-kw:#d89066; --s-fn:#b6a9dd; --s-str:#a6bf8e; --s-num:#86b4d3; --s-idn:var(--ink); --s-pun:var(--ink-faint);
+      --shadow:0 1px 2px rgba(0,0,0,.25),0 8px 26px rgba(0,0,0,.30);
+      color-scheme: dark;
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 13px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+
+  .label {
+    font-family: var(--sans);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    font-weight: 600;
+  }
+  .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+  /* ---------- app shell ---------- */
+  .app {
+    height: 100vh;
+    display: grid;
+    grid-template-columns: var(--rail) var(--tree) 1fr;
+    grid-template-rows: 1fr;
+  }
+  @media (max-width: 720px) {
+    .app { grid-template-columns: var(--rail) 1fr; }
+    .tree { display: none; }
+  }
+
+  /* ---------- launcher rail ---------- */
+  .rail {
+    background: var(--leaf);
+    border-right: 1px solid var(--rule);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 12px 0; gap: 4px;
+  }
+  .rail .mark {
+    width: 32px; height: 32px; border-radius: 10px;
+    background: var(--clay); color: var(--clay-ink);
+    display: grid; place-items: center;
+    font-family: var(--serif); font-weight: 700; font-size: 17px; font-style: italic;
+    margin-bottom: 14px;
+    box-shadow: 0 2px 8px var(--clay-soft);
+  }
+  .rail button {
+    width: 38px; height: 38px; border: none; background: transparent;
+    color: var(--ink-faint); border-radius: 10px; cursor: pointer;
+    display: grid; place-items: center;
+    transition: color .14s, background .14s;
+  }
+  .rail button:hover { color: var(--ink-soft); background: var(--leaf-2); }
+  .rail button.on { color: var(--clay); background: var(--clay-soft); }
+  .rail button svg { width: 18px; height: 18px; }
+  .rail .spacer { flex: 1; }
+
+  /* ---------- schema tree ---------- */
+  .tree {
+    background: var(--leaf);
+    border-right: 1px solid var(--rule);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  .tree-head {
+    padding: 15px 16px 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--rule);
+  }
+  .conn { display: flex; align-items: center; gap: 9px; min-width: 0; }
+  .conn .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--sage); box-shadow: 0 0 0 3px var(--sage-soft); flex-shrink: 0;
+  }
+  .conn .name {
+    font-family: var(--serif); font-size: 15px; font-weight: 600;
+    color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .conn .host { font-family: var(--mono); font-size: 10.5px; color: var(--ink-faint); }
+  .mode-chip {
+    font-family: var(--sans); font-size: 9.5px; letter-spacing: .1em; text-transform: uppercase;
+    font-weight: 600; color: var(--ink-soft); background: var(--leaf-3);
+    padding: 3px 8px; border-radius: 20px; white-space: nowrap;
+  }
+  .tree-scroll { overflow-y: auto; padding: 10px 10px 16px; flex: 1; min-height: 0; }
+  .tree-group { margin-bottom: 4px; }
+  .tree-group > .label { padding: 8px 8px 6px; display: block; }
+  .tbl {
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 10px; border-radius: 8px;
+    cursor: pointer; color: var(--ink-soft);
+    font-family: var(--sans); font-size: 13px;
+    transition: background .12s, color .12s;
+  }
+  .tbl:hover { background: var(--leaf-2); color: var(--ink); }
+  .tbl.on { background: var(--clay-soft); color: var(--ink); }
+  .tbl.on .tbl-ico { color: var(--clay); }
+  .tbl-ico { width: 15px; height: 15px; color: var(--ink-faint); flex-shrink: 0; }
+  .tbl .rows { margin-left: auto; font-family: var(--mono); font-size: 10px; color: var(--ink-faint); }
+
+  /* ---------- main ---------- */
+  .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--paper); }
+
+  .topbar {
+    display: flex; align-items: stretch;
+    background: var(--leaf);
+    border-bottom: 1px solid var(--rule);
+    padding-right: 12px;
+  }
+  .tabs { display: flex; align-items: stretch; overflow-x: auto; scrollbar-width: none; }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tab {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 16px; height: 42px;
+    border: none; border-right: 1px solid var(--rule);
+    background: transparent; color: var(--ink-faint);
+    font-family: var(--sans); font-size: 12.5px; cursor: pointer;
+    white-space: nowrap; position: relative;
+    transition: color .14s, background .14s;
+  }
+  .tab:hover { color: var(--ink-soft); }
+  .tab.on { color: var(--ink); background: var(--paper); }
+  .tab.on::after {
+    content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; background: var(--clay);
+  }
+  .tab .k { width: 14px; height: 14px; color: currentColor; opacity: .75; }
+  .tab .x { color: var(--ink-faint); border-radius: 5px; width: 16px; height: 16px; display: grid; place-items: center; margin-left: 2px; }
+  .tab .x:hover { background: var(--leaf-3); color: var(--ink); }
+  .tab-add {
+    border: none; background: transparent; color: var(--ink-faint);
+    width: 40px; cursor: pointer; font-size: 17px;
+  }
+  .tab-add:hover { color: var(--ink); }
+  .win { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+  .icon-btn {
+    border: none; background: transparent; color: var(--ink-faint);
+    width: 32px; height: 32px; border-radius: 8px; cursor: pointer;
+    display: grid; place-items: center;
+  }
+  .icon-btn:hover { background: var(--leaf-2); color: var(--ink); }
+  .icon-btn svg { width: 16px; height: 16px; }
+  .stop {
+    font-family: var(--sans); font-size: 11px; letter-spacing: .02em;
+    color: var(--rose); border: 1px solid transparent; background: var(--rose-soft);
+    padding: 6px 11px; border-radius: 8px; cursor: pointer; margin-left: 6px;
+  }
+  .stop:hover { border-color: color-mix(in srgb, var(--rose) 40%, transparent); }
+
+  /* SQL syntax tokens */
+  .kw { color: var(--s-kw); font-weight: 600; }
+  .fn { color: var(--s-fn); }
+  .str { color: var(--s-str); }
+  .num { color: var(--s-num); }
+  .idn { color: var(--s-idn); }
+  .pun { color: var(--s-pun); }
+  .com { color: var(--ink-faint); font-style: italic; }
+
+  /* ---------- CHAT SURFACE ---------- */
+  .chat { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+  .chat-head {
+    display: flex; align-items: center; gap: 14px;
+    padding: 12px 22px; border-bottom: 1px solid var(--rule);
+    background: var(--leaf);
+  }
+  .chat-head .model {
+    display: inline-flex; align-items: baseline; gap: 8px;
+    font-family: var(--mono); font-size: 12px; color: var(--ink);
+  }
+  .chat-head .model .prov { color: var(--ink); font-weight: 600; }
+  .chat-head .model .sep { color: var(--ink-faint); }
+  .chat-head .model .mode { color: var(--sage); }
+  .chat-head .spacer { flex: 1; }
+  .privacy {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-family: var(--sans); font-size: 11.5px;
+    color: var(--sage); background: var(--sage-soft);
+    border: 1px solid color-mix(in srgb, var(--sage) 28%, transparent);
+    padding: 5px 12px 5px 9px; border-radius: 20px; cursor: default;
+  }
+  .privacy svg { width: 13px; height: 13px; }
+  .privacy b { font-weight: 700; }
+  .head-ghost {
+    border: 1px solid var(--rule-ink); background: var(--leaf);
+    color: var(--ink-soft); border-radius: 8px; padding: 6px 11px;
+    font-family: var(--sans); font-size: 11.5px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .head-ghost:hover { border-color: var(--ink-faint); color: var(--ink); }
+  .head-ghost svg { width: 13px; height: 13px; }
+
+  /* conversation scroll */
+  .thread { flex: 1; overflow-y: auto; min-height: 0; padding: 34px 0 12px; }
+  .turns { max-width: 720px; margin: 0 auto; padding: 0 28px; display: flex; flex-direction: column; gap: 34px; }
+
+  .msg { display: flex; flex-direction: column; gap: 12px; }
+  .msg .who {
+    display: flex; align-items: center; gap: 9px;
+    font-family: var(--sans); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+    font-weight: 600; color: var(--ink-faint);
+  }
+  .msg .who .av {
+    width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
+    font-family: var(--serif); font-weight: 700; font-size: 11px; font-style: italic;
+  }
+  .msg.user .who .av { background: var(--leaf-3); color: var(--ink-soft); }
+  .msg.assistant .who .av { background: var(--clay-soft); color: var(--clay); }
+
+  /* user turn — a quiet quoted line, not a chat bubble */
+  .user-bubble {
+    align-self: flex-start; max-width: 62ch;
+    border-left: 3px solid var(--clay-line);
+    background: transparent; padding: 2px 0 2px 16px;
+    font-family: var(--serif); font-size: 18px; font-style: italic;
+    line-height: 1.5; color: var(--ink);
+  }
+
+  /* ---------- REASONING CHANNEL — marginalia, no card ---------- */
+  .reasoning { margin-bottom: 18px; }
+  .reasoning summary {
+    list-style: none; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 2px 0; margin-bottom: 2px;
+    font-family: var(--sans); font-size: 11.5px; letter-spacing: .02em;
+    color: var(--ink-faint); user-select: none; transition: color .14s;
+  }
+  .reasoning summary:hover { color: var(--ink-soft); }
+  .reasoning summary::-webkit-details-marker { display: none; }
+  .reasoning summary .chev {
+    width: 11px; height: 11px; transition: transform .2s; flex-shrink: 0; color: var(--clay);
+  }
+  .reasoning[open] summary .chev { transform: rotate(90deg); }
+  .reasoning summary .r-live { display: none; }
+  .reasoning.thinking summary .r-live { display: inline; color: var(--clay); }
+  .reasoning.thinking summary .r-done { display: none; }
+
+  /* body: plain warm-grey prose, indented like a note in the margin */
+  .reasoning .steps {
+    padding: 6px 0 2px 18px; margin-left: 5px;
+    border-left: 1px solid var(--rule);
+    display: flex; flex-direction: column; gap: 5px; overflow: hidden;
+  }
+  .reasoning .step {
+    font-family: var(--serif); font-size: 14px; font-style: italic;
+    line-height: 1.65; color: var(--ink-faint);
+  }
+  .reasoning .step .hl { color: var(--ink-soft); font-style: normal; }
+  .reasoning .step .tbl-ref {
+    font-family: var(--mono); font-style: normal; font-size: 12px; color: var(--ink-soft);
+  }
+  .reasoning .step.privacy-note { color: color-mix(in srgb, var(--sage) 78%, var(--ink-faint)); }
+  /* live shimmer while thinking */
+  .reasoning.thinking .step { color: var(--ink-faint); animation: r-fade .6s ease both; }
+  .reasoning.thinking .step:nth-child(1) { animation-delay: 0s; }
+  .reasoning.thinking .step:nth-child(2) { animation-delay: .5s; }
+  .reasoning.thinking .step:nth-child(3) { animation-delay: 1s; }
+  .reasoning.thinking .step:nth-child(4) { animation-delay: 1.5s; }
+  .reasoning.thinking .step:nth-child(5) { animation-delay: 2s; }
+  .reasoning.thinking .step:nth-child(6) { animation-delay: 2.5s; }
+  .reasoning.thinking .step:nth-child(7) { animation-delay: 3s; }
+  .reasoning.thinking .step:nth-child(8) { animation-delay: 3.5s; }
+  @keyframes r-fade { from { opacity: 0; transform: translateY(1px); } to { opacity: 1; transform: none; } }
+
+  /* ---------- FINAL ANSWER — serif document, generous measure ---------- */
+  .answer {
+    font-family: var(--serif); font-size: 17px; line-height: 1.7; color: var(--ink);
+    max-width: 65ch;
+  }
+  .answer p { margin: 0 0 16px; }
+  .answer p:last-child { margin-bottom: 0; }
+  .answer strong { color: var(--ink); font-weight: 700; }
+  .answer .money { font-family: var(--mono); font-size: .9em; color: var(--clay); font-variant-numeric: tabular-nums; }
+
+  /* generated SQL block — the one place with mono + a soft frame */
+  .gen-sql {
+    margin: 8px 0 16px;
+    border: 1px solid var(--rule); border-radius: var(--radius);
+    background: var(--leaf); overflow: hidden; box-shadow: var(--shadow);
+  }
+  .gen-sql .sql-bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 13px; border-bottom: 1px solid var(--rule);
+    background: var(--leaf-2);
+  }
+  .gen-sql .sql-bar .tag {
+    font-family: var(--sans); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+    font-weight: 600; color: var(--ink-faint);
+  }
+  .gen-sql .sql-bar .grow { flex: 1; }
+  .gen-sql .sql-bar .mini {
+    border: none; background: transparent; color: var(--ink-faint);
+    font-family: var(--sans); font-size: 11px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 6px;
+  }
+  .gen-sql .sql-bar .mini:hover { color: var(--ink); background: var(--leaf-3); }
+  .gen-sql .sql-bar .mini svg { width: 12px; height: 12px; }
+  .gen-sql pre {
+    margin: 0; padding: 13px 16px; overflow-x: auto;
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.75; color: var(--ink); tab-size: 2;
+  }
+  .gen-sql .ln { color: var(--ink-faint); user-select: none; display: inline-block; width: 16px; text-align: right; margin-right: 16px; }
+
+  /* inline compact result — KPI + mini table */
+  .inline-result { margin: 0 0 16px; }
+  .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+  .kpi {
+    border: 1px solid var(--rule); border-radius: var(--radius); background: var(--leaf);
+    padding: 12px 16px; min-width: 138px; box-shadow: var(--shadow);
+  }
+  .kpi .k-label {
+    font-family: var(--sans); font-size: 9.5px; letter-spacing: .12em; text-transform: uppercase;
+    font-weight: 600; color: var(--ink-faint); margin-bottom: 6px;
+  }
+  .kpi .k-val {
+    font-family: var(--mono); font-size: 21px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--ink);
+  }
+  .kpi.money .k-val { color: var(--clay); }
+  .kpi.count .k-val { color: var(--ink); }
+
+  table.mini {
+    border-collapse: separate; border-spacing: 0; width: 100%;
+    font-family: var(--mono); font-size: 12px;
+    border: 1px solid var(--rule); border-radius: var(--radius); overflow: hidden;
+    box-shadow: var(--shadow);
+  }
+  table.mini thead th {
+    background: var(--leaf-2); border-bottom: 1px solid var(--rule-ink);
+    text-align: left; padding: 9px 14px; font-weight: 600; color: var(--ink-soft);
+    font-family: var(--sans); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap;
+  }
+  table.mini thead th.r { text-align: right; }
+  table.mini td {
+    padding: 8px 14px; border-bottom: 1px solid var(--rule); color: var(--ink); white-space: nowrap; background: var(--leaf);
+  }
+  table.mini tbody tr:last-child td { border-bottom: none; }
+  table.mini tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--leaf-2) 55%, var(--leaf)); }
+  table.mini td.num { color: var(--ink-soft); text-align: right; font-variant-numeric: tabular-nums; }
+  table.mini td.money { color: var(--clay); text-align: right; font-variant-numeric: tabular-nums; }
+  table.mini td .lead { color: var(--clay); font-weight: 600; }
+
+  /* execution gate note */
+  .gate {
+    display: flex; align-items: flex-start; gap: 11px;
+    border: 1px solid color-mix(in srgb, var(--amber) 24%, transparent);
+    border-left: 3px solid var(--amber);
+    background: var(--amber-soft); border-radius: var(--radius);
+    padding: 12px 15px; margin-top: 4px;
+  }
+  .gate svg { width: 15px; height: 15px; color: var(--amber); flex-shrink: 0; margin-top: 2px; }
+  .gate .g-txt { font-family: var(--sans); font-size: 12.5px; line-height: 1.55; color: var(--ink-soft); }
+  .gate .g-txt b { color: var(--amber); font-family: var(--mono); font-size: 11px; }
+  .gate .g-act {
+    margin-left: auto; align-self: center;
+    font-family: var(--sans); font-size: 11.5px; color: var(--ink-soft);
+    background: var(--leaf); border: 1px solid var(--rule-ink);
+    border-radius: 8px; padding: 6px 12px; cursor: pointer; white-space: nowrap;
+  }
+  .gate .g-act:hover { color: var(--ink); border-color: var(--ink-faint); }
+
+  /* streaming caret */
+  .caret {
+    display: inline-block; width: 3px; height: 18px;
+    background: var(--clay); margin-left: 2px; vertical-align: -3px;
+    animation: blink 1.05s steps(2, start) infinite; border-radius: 1px;
+  }
+  @keyframes blink { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
+  .stream-tag {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--sans); font-size: 10px; letter-spacing: .08em; text-transform: uppercase;
+    font-weight: 600; color: var(--clay); margin-left: auto;
+  }
+  .stream-tag .pdot { width: 5px; height: 5px; border-radius: 50%; background: var(--clay); animation: pulse 1.1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+
+  /* ---------- composer ---------- */
+  .composer-wrap { border-top: 1px solid var(--rule); background: var(--leaf); padding: 16px 28px 18px; }
+  .composer {
+    max-width: 720px; margin: 0 auto;
+    display: flex; align-items: flex-end; gap: 12px;
+    background: var(--paper); border: 1px solid var(--rule-ink); border-radius: 16px;
+    padding: 10px 10px 10px 18px; box-shadow: var(--shadow);
+    transition: border-color .14s, box-shadow .14s;
+  }
+  .composer:focus-within { border-color: var(--clay-line); box-shadow: 0 0 0 3px var(--clay-soft); }
+  .composer textarea {
+    flex: 1; resize: none; border: none; background: transparent; outline: none;
+    color: var(--ink); font-family: var(--serif); font-size: 15px; line-height: 1.55;
+    max-height: 120px; padding: 5px 0;
+  }
+  .composer textarea::placeholder { color: var(--ink-faint); font-style: italic; }
+  .send {
+    display: inline-flex; align-items: center; gap: 7px;
+    background: var(--clay); color: var(--clay-ink);
+    border: none; border-radius: 11px; padding: 10px 16px;
+    font-family: var(--sans); font-size: 12.5px; font-weight: 600; cursor: pointer;
+    transition: transform .06s, filter .14s; flex-shrink: 0;
+  }
+  .send:hover { filter: brightness(1.05); }
+  .send:active { transform: translateY(1px); }
+  .send svg { width: 14px; height: 14px; }
+  .composer-note {
+    max-width: 720px; margin: 9px auto 0; padding: 0 4px;
+    display: flex; align-items: center; gap: 9px;
+    font-family: var(--sans); font-size: 10.5px; color: var(--ink-faint);
+  }
+  .composer-note .schema-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--sage); flex-shrink: 0; }
+
+  /* status bar */
+  .statusbar {
+    display: flex; align-items: center; gap: 20px;
+    padding: 6px 16px; border-top: 1px solid var(--rule);
+    background: var(--leaf); font-family: var(--mono); font-size: 10.5px;
+    color: var(--ink-faint);
+  }
+  .statusbar .seg { display: inline-flex; align-items: center; gap: 6px; }
+  .statusbar .seg b { color: var(--ink-soft); font-weight: 500; }
+  .statusbar .dot-ok { width: 6px; height: 6px; border-radius: 50%; background: var(--sage); }
+  .statusbar .grow { flex: 1; }
+  .statusbar .ms { color: var(--clay); }
+
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-thumb { background: var(--rule-ink); border-radius: 7px; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--ink-faint); background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+
+  button:focus-visible, .tbl:focus-visible, input:focus-visible, textarea:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--clay); outline-offset: 2px; border-radius: 6px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .caret { opacity: 1; }
+    .stream-tag .pdot { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+  <!-- launcher rail -->
+  <nav class="rail" aria-label="Workspace tools">
+    <div class="mark" title="quick-studio">q</div>
+    <button title="Tables" aria-label="Tables">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M3 14.5h18M9 9v11M15 9v11"/></svg>
+    </button>
+    <button title="Query" aria-label="Query editor">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 8l4 4-4 4M12.5 16H18"/><rect x="2.5" y="4" width="19" height="16" rx="2"/></svg>
+    </button>
+    <button title="ERD" aria-label="Entity diagram">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="6" rx="1"/><rect x="14" y="15" width="7" height="6" rx="1"/><path d="M6.5 9v4a2 2 0 0 0 2 2h5.5"/></svg>
+    </button>
+    <button class="on" title="AI Chat" aria-label="AI chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-4 3.5V16H4z"/><path d="M9 10.5h.01M12.5 10.5h.01M16 10.5h.01"/></svg>
+    </button>
+    <button title="Report" aria-label="Report">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+    </button>
+    <div class="spacer"></div>
+    <button title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+    </button>
+  </nav>
+
+  <!-- schema tree -->
+  <aside class="tree">
+    <div class="tree-head">
+      <div class="conn">
+        <span class="dot" title="Connected"></span>
+        <div style="min-width:0">
+          <div class="name" id="db-name">shop_prod</div>
+          <div class="host">127.0.0.1:5432 · postgres</div>
+        </div>
+      </div>
+      <span class="mode-chip" title="Credentials stored encrypted">persistent</span>
+    </div>
+    <div class="tree-scroll">
+      <div class="tree-group">
+        <span class="label">public · 6 tables</span>
+        <div class="tbl" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          orders <span class="rows">142</span>
+        </div>
+        <div class="tbl" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          customers <span class="rows">89</span>
+        </div>
+        <div class="tbl" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          products <span class="rows">54</span>
+        </div>
+        <div class="tbl" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          order_items <span class="rows">318</span>
+        </div>
+        <div class="tbl" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          categories <span class="rows">12</span>
+        </div>
+        <div class="tbl" tabindex="0" role="button">
+          <svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          sessions <span class="rows">1.2k</span>
+        </div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- main -->
+  <section class="main">
+    <div class="topbar">
+      <div class="tabs" id="tabs">
+        <button class="tab on" data-tab="chat">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v11H9l-4 3.5V16H4z"/></svg>
+          ai chat
+          <span class="x" role="button" aria-label="Close">×</span>
+        </button>
+        <button class="tab" data-tab="orders">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          public.orders
+          <span class="x" role="button" aria-label="Close">×</span>
+        </button>
+      </div>
+      <button class="tab-add" title="New tab">+</button>
+      <div class="win">
+        <button class="icon-btn" id="theme" title="Toggle theme" aria-label="Toggle theme">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
+        </button>
+        <button class="stop" title="Stop the local server and exit">■ Stop</button>
+      </div>
+    </div>
+
+    <!-- CHAT -->
+    <div class="chat">
+      <!-- chat header: active provider/model + privacy signal -->
+      <div class="chat-head">
+        <span class="model">
+          <span class="prov">claude-opus-4-8</span>
+          <span class="sep">·</span>
+          <span class="mode">schema-only</span>
+        </span>
+        <span class="privacy" title="The Core sends the Provider your schema shape only — table & column names and types. Row data never leaves your machine.">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+          Provider sees <b>schema only</b> — no rows leave the Core
+        </span>
+        <span class="spacer"></span>
+        <button class="head-ghost" title="Exposure & provider controls">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="2.6"/><path d="M12 3v3M12 18v3M4.5 7.5l2 1.2M17.5 15.3l2 1.2M4.5 16.5l2-1.2M17.5 8.7l2-1.2"/></svg>
+          exposure
+        </button>
+      </div>
+
+      <!-- conversation -->
+      <div class="thread" id="thread">
+        <div class="turns">
+
+          <!-- user turn -->
+          <div class="msg user">
+            <div class="who"><span class="av">M</span> you</div>
+            <div class="user-bubble">¿cuánto facturamos esta semana y qué producto lideró?</div>
+          </div>
+
+          <!-- assistant turn -->
+          <div class="msg assistant">
+            <div class="who">
+              <span class="av">q</span> assistant
+              <span class="stream-tag"><span class="pdot"></span> streaming</span>
+            </div>
+
+            <!-- REASONING CHANNEL — marginalia thought stream, collapsed by default -->
+            <details class="reasoning">
+              <summary>
+                <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 6l6 6-6 6"/></svg>
+                <span class="r-live">Thinking…</span>
+                <span class="r-done">Thought for 1.4s</span>
+              </summary>
+              <div class="steps">
+                <div class="step">Let me read the request — they want the <span class="hl">last 7 days</span>: revenue plus the top product.</div>
+                <div class="step">Checking the schema for <span class="tbl-ref">public.orders</span> — there's a numeric total, a status, and a created_at timestamptz.</div>
+                <div class="step">And <span class="tbl-ref">public.order_items</span> joined to <span class="tbl-ref">public.products</span> should give me the leader.</div>
+                <div class="step">Only <span class="hl">paid</span> orders should count toward revenue, so I'll filter on status.</div>
+                <div class="step privacy-note">No data leaves the Core — I only see column names and types here, never the row values.</div>
+                <div class="step">Joining order_items → products and summing qty × unit_price per product.</div>
+                <div class="step">Composing the query — aggregating where created_at ≥ now() − interval '7 days'.</div>
+                <div class="step">It's <span class="hl">read-only</span> (a plain SELECT), so it's safe to propose for execution.</div>
+              </div>
+            </details>
+
+            <!-- FINAL ANSWER — serif document, clearly distinct from the reasoning -->
+            <div class="answer">
+              <p>Esta semana facturaste <span class="money">$4,218.40</span> en <strong>47 órdenes pagas</strong>. El producto que lideró fue el <strong>Buzo con capucha gris XL</strong> (SKU <span class="mono">HD-GRY-XL</span>), con 31 unidades vendidas.</p>
+
+              <p>Armé esta consulta para obtenerlo — corre solo lectura sobre <span class="mono">shop_prod</span>:</p>
+
+              <!-- generated SQL -->
+              <div class="gen-sql">
+                <div class="sql-bar">
+                  <span class="tag">generated query</span>
+                  <span class="grow"></span>
+                  <button class="mini" title="Open in Query tab">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+                    open in editor
+                  </button>
+                  <button class="mini" title="Copy">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>
+                    copy
+                  </button>
+                </div>
+                <pre><code><span class="ln">1</span><span class="kw">SELECT</span> p.name, <span class="fn">sum</span>(oi.qty) <span class="kw">AS</span> units, <span class="fn">sum</span>(oi.qty <span class="pun">*</span> oi.unit_price) <span class="kw">AS</span> revenue
+<span class="ln">2</span><span class="kw">FROM</span> <span class="idn">public.orders</span> o
+<span class="ln">3</span><span class="kw">JOIN</span> <span class="idn">public.order_items</span> oi <span class="kw">ON</span> oi.order_id <span class="pun">=</span> o.id
+<span class="ln">4</span><span class="kw">JOIN</span> <span class="idn">public.products</span> p <span class="kw">ON</span> p.id <span class="pun">=</span> oi.product_id
+<span class="ln">5</span><span class="kw">WHERE</span> o.status <span class="pun">=</span> <span class="str">'paid'</span>
+<span class="ln">6</span>  <span class="kw">AND</span> o.created_at <span class="pun">&gt;=</span> <span class="fn">now</span>() <span class="pun">-</span> <span class="kw">interval</span> <span class="str">'7 days'</span>
+<span class="ln">7</span><span class="kw">GROUP BY</span> p.name
+<span class="ln">8</span><span class="kw">ORDER BY</span> revenue <span class="kw">DESC</span><span class="pun">;</span></code></pre>
+              </div>
+
+              <!-- inline compact result: KPIs + mini table -->
+              <div class="inline-result">
+                <div class="kpis">
+                  <div class="kpi money">
+                    <div class="k-label">revenue · 7d</div>
+                    <div class="k-val">$4,218.40</div>
+                  </div>
+                  <div class="kpi count">
+                    <div class="k-label">paid orders</div>
+                    <div class="k-val">47</div>
+                  </div>
+                </div>
+                <table class="mini">
+                  <thead>
+                    <tr>
+                      <th>product</th>
+                      <th class="r">units</th>
+                      <th class="r">revenue</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td><span class="lead">Buzo con capucha gris XL</span></td>
+                      <td class="num">31</td>
+                      <td class="money">1,798.00</td>
+                    </tr>
+                    <tr>
+                      <td>Campera de jean M</td>
+                      <td class="num">14</td>
+                      <td class="money">1,344.00</td>
+                    </tr>
+                    <tr>
+                      <td>Camiseta lisa negra M</td>
+                      <td class="num">22</td>
+                      <td class="money">547.80</td>
+                    </tr>
+                    <tr>
+                      <td>Gorra navy</td>
+                      <td class="num">15</td>
+                      <td class="money">277.50</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <p>Estos números salieron de correr la consulta localmente sobre tus datos<span class="caret" aria-hidden="true"></span></p>
+
+              <!-- execution gate -->
+              <div class="gate">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/><path d="M9.5 12l1.8 1.8L15 10"/></svg>
+                <span class="g-txt">
+                  Esta consulta es <b>SELECT · read-only</b>, ya la ejecuté por vos. Cualquier query generada que <b>mute o altere</b> datos (UPDATE/DELETE/DDL) pide tu confirmación antes de correr — el Core es el gate real.
+                </span>
+                <button class="g-act">re-run</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- composer -->
+      <div class="composer-wrap">
+        <div class="composer">
+          <textarea rows="1" placeholder="ask about your schema…  ⏎ to send" aria-label="Message"></textarea>
+          <button class="send" title="Send">
+            Send
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
+          </button>
+        </div>
+        <div class="composer-note">
+          <span class="schema-dot"></span>
+          claude-opus-4-8 · schema-only exposure — the Provider receives table &amp; column shape, never row values
+        </div>
+      </div>
+    </div>
+
+    <!-- status bar -->
+    <div class="statusbar">
+      <span class="seg"><span class="dot-ok"></span> <b>shop_prod</b> connected</span>
+      <span class="seg">provider <span class="ms">claude-opus-4-8</span></span>
+      <span class="seg"><b>schema-only</b> exposure</span>
+      <span class="seg">UTF-8</span>
+      <span class="grow"></span>
+      <span class="seg">encrypted store · OS keychain</span>
+      <span class="seg">127.0.0.1 only</span>
+    </div>
+  </section>
+</div>
+
+<script>
+  "use strict";
+
+  // theme toggle — light-first; toggles between the two data-theme states
+  document.getElementById("theme").addEventListener("click", () => {
+    const root = document.documentElement;
+    const current = root.getAttribute("data-theme");
+    let dark;
+    if (current) { dark = current === "dark"; }
+    else { dark = window.matchMedia("(prefers-color-scheme: dark)").matches; }
+    root.setAttribute("data-theme", dark ? "light" : "dark");
+  });
+
+  // tabs (visual)
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", (e) => {
+      if (e.target.classList.contains("x")) { e.stopPropagation(); return; }
+      document.querySelectorAll(".tab.on").forEach((x) => x.classList.remove("on"));
+      tab.classList.add("on");
+    });
+  });
+
+  // composer: auto-grow + send appends the typed message (visual only)
+  const ta = document.querySelector(".composer textarea");
+  ta.addEventListener("input", () => {
+    ta.style.height = "auto";
+    ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+  });
+
+  const thread = document.getElementById("thread");
+  const turns = thread.querySelector(".turns");
+  function send() {
+    const v = ta.value.trim();
+    if (!v) return;
+    const msg = document.createElement("div");
+    msg.className = "msg user";
+    const who = document.createElement("div");
+    who.className = "who";
+    who.innerHTML = '<span class="av">M</span> you';
+    const bubble = document.createElement("div");
+    bubble.className = "user-bubble";
+    bubble.textContent = v;
+    msg.appendChild(who); msg.appendChild(bubble);
+    turns.appendChild(msg);
+    ta.value = ""; ta.style.height = "auto";
+    thread.scrollTop = thread.scrollHeight;
+  }
+  document.querySelector(".send").addEventListener("click", send);
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+
+  // scroll conversation to the latest streamed answer on load
+  thread.scrollTop = thread.scrollHeight;
+</script>
+
+</body>
+</html>

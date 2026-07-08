@@ -1,7 +1,7 @@
 # bmad-loop orchestration policy. All keys optional; defaults shown.
 
 [gates]
-mode = "per-epic"            # none | per-epic | per-story-spec-approval
+mode = "none"               # none | per-epic | per-story-spec-approval  (none = run all epics end-to-end, no boundary pauses)
 retrospective = "notify"     # never | notify | auto (auto unsupported in v1)
 
 [limits]
@@ -65,7 +65,7 @@ cleanup_session_on_finish = true  # kill the run's tmux session when it finishes
 
 [sweep]
 # Deferred-work sweep: triage + execute open deferred-work.md entries.
-auto = "never"               # never | per-epic | run-end (auto-triggered sweeps never prompt)
+auto = "run-end"             # never | per-epic | run-end (auto-triggered sweeps never prompt)
 max_bundles = 5              # bundles executed per sweep; triage excess is truncated
 max_triage_attempts = 2      # triage validation retries before escalating
 max_migration_attempts = 2   # legacy-ledger migration retries before escalating

@@ -1,0 +1,1224 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>quick-studio — report</title>
+<style>
+  /* ============================================================
+     OWN TOKENS — cloning ChatGPT dark: near-black, flat, neutral.
+     Dark-first. No coral. Color only where functional (SQL, KPIs,
+     privacy semantics in restrained green).
+     ============================================================ */
+  :root {
+    /* chat canvas — TRUE black, uniform, no gradients */
+    --bg:        #0a0a0a;   /* main chat column + active tab + panel (near pure black) */
+    --bg-deep:   #000000;   /* window / tab-strip / sub-sidebar — pure black, the darker tone the concave feet reveal */
+    --rail-bg:   #000000;   /* quick-studio icon rail (pure black) */
+    --topbar-bg: #050505;   /* workspace tabs bar */
+
+    --user-bubble: #2f2f2f; /* the grey user bubble */
+    --composer-bg: #2f2f2f; /* the input pill */
+    --surface:   #2a2a2a;   /* subtle raised chips / SQL block */
+    --surface-2: #303030;
+    --hover:     #2f2f2f;   /* sidebar item hover */
+    --active:    #2f2f2f;   /* active conversation row */
+
+    --border:    #ffffff12; /* very tenuous hairlines / horizontal rules — visible on black */
+    --border-2:  #ffffff24;
+
+    --text:      #ececec;   /* high-contrast body */
+    --text-dim:  #b4b4b4;   /* secondary */
+    --text-faint:#8f8f8f;   /* tertiary / action icons at rest */
+
+    /* neutral "accent" — ChatGPT's active is white/light, not colored */
+    --ink:       #ececec;
+    --ink-btn:   #ffffff;   /* filled send button */
+    --ink-btn-fg:#0d0d0d;
+
+    /* functional semantics only */
+    --ok:        #3fbf7f;   /* privacy / schema-only green, restrained */
+    --ok-soft:   rgba(63,191,127,0.12);
+    --money:     #6ec6a8;   /* KPI money */
+    --count:     #7fb3ff;   /* KPI count / ints */
+
+    /* SQL syntax highlighting (subtle, ChatGPT codeblock palette) */
+    --sql-kw:  #f0868a;     /* keywords — soft rose */
+    --sql-fn:  #c9a2f0;     /* functions — soft violet */
+    --sql-str: #8dd6a0;     /* strings — soft green */
+    --sql-num: #82aaff;     /* numbers — soft blue */
+    --sql-idn: #ececec;
+    --sql-pun: #8f8f8f;
+
+    /* ---- report-specific additions (new tokens; shell tokens above are unchanged) ---- */
+    --rpt-accent:      #f2705d;
+    --rpt-accent-ink:  #0a0a0a;
+    --rpt-accent-soft: rgba(242,112,93,0.14);
+    --rpt-accent-line: rgba(242,112,93,0.45);
+    --rpt-warn:        #e0a458;
+    --rpt-warn-soft:   rgba(224,164,88,0.14);
+    --rpt-err:         #f05a63;
+    --rpt-err-soft:    rgba(240,90,99,0.13);
+    --t-int:  #6ba5ff;
+    --t-time: #b18cff;
+    --t-num:  #3ec6b6;
+
+    --sans: "Söhne", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, system-ui, sans-serif;
+    --mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+
+    --rail: 52px;
+    --side: 260px;
+    --read: 760px;   /* narrow, centered reading column */
+
+    color-scheme: dark;
+  }
+
+  /* ---- LIGHT (ChatGPT light: pure white, light-grey bubbles) ---- */
+  :root[data-theme="light"] {
+    --bg:        #ffffff;
+    --bg-deep:   #f9f9f9;
+    --rail-bg:   #ececec;
+    --user-bubble: #e8e8e8;
+    --composer-bg: #f4f4f4;
+    --surface:   #f7f7f7;
+    --surface-2: #efefef;
+    --hover:     #ececec;
+    --active:    #e8e8e8;
+    --border:    #0000000f;
+    --border-2:  #00000020;
+    --text:      #0d0d0d;
+    --text-dim:  #4d4d4d;
+    --text-faint:#767676;
+    --ink:       #0d0d0d;
+    --ink-btn:   #0d0d0d;
+    --ink-btn-fg:#ffffff;
+    --ok:        #1a8a55;
+    --ok-soft:   rgba(26,138,85,0.10);
+    --money:     #157a56;
+    --count:     #2f6fd6;
+    --sql-kw:  #c2334a;
+    --sql-fn:  #7a3fb8;
+    --sql-str: #1f7a3f;
+    --sql-num: #2f6fd6;
+    --sql-idn: #0d0d0d;
+    --sql-pun: #767676;
+    --rpt-accent:      #dd5641;
+    --rpt-accent-ink:  #ffffff;
+    --rpt-accent-soft: rgba(221,86,65,0.10);
+    --rpt-accent-line: rgba(221,86,65,0.40);
+    --rpt-warn:        #b3781f;
+    --rpt-warn-soft:   rgba(179,120,31,0.12);
+    --rpt-err:         #d23b45;
+    --rpt-err-soft:    rgba(210,59,69,0.10);
+    --t-int:  #2f6fd6;
+    --t-time: #7d54cf;
+    --t-num:  #1a9b8c;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --bg:#ffffff; --bg-deep:#f9f9f9; --rail-bg:#ececec;
+      --user-bubble:#e8e8e8; --composer-bg:#f4f4f4;
+      --surface:#f7f7f7; --surface-2:#efefef; --hover:#ececec; --active:#e8e8e8;
+      --border:#0000000f; --border-2:#00000020;
+      --text:#0d0d0d; --text-dim:#4d4d4d; --text-faint:#767676;
+      --ink:#0d0d0d; --ink-btn:#0d0d0d; --ink-btn-fg:#ffffff;
+      --ok:#1a8a55; --ok-soft:rgba(26,138,85,0.10); --money:#157a56; --count:#2f6fd6;
+      --sql-kw:#c2334a; --sql-fn:#7a3fb8; --sql-str:#1f7a3f; --sql-num:#2f6fd6; --sql-idn:#0d0d0d; --sql-pun:#767676;
+      --rpt-accent:#dd5641; --rpt-accent-ink:#ffffff; --rpt-accent-soft:rgba(221,86,65,0.10); --rpt-accent-line:rgba(221,86,65,0.40);
+      --rpt-warn:#b3781f; --rpt-warn-soft:rgba(179,120,31,0.12); --rpt-err:#d23b45; --rpt-err-soft:rgba(210,59,69,0.10);
+      --t-int:#2f6fd6; --t-time:#7d54cf; --t-num:#1a9b8c;
+      color-scheme: light;
+    }
+  }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow: hidden;
+  }
+  /* data numerals/labels: clean financial sans with tabular figures */
+  .mono { font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; }
+
+  /* ============================================================ shell */
+  .app {
+    height: 100vh;
+    display: grid;
+    /* conversations sidebar COLLAPSED by default → column 0 */
+    grid-template-columns: var(--rail) 0px 1fr;
+    transition: grid-template-columns .22s ease;
+  }
+  .app.side-open { grid-template-columns: var(--rail) var(--side) 1fr; }
+  /* the sidebar itself clips when collapsed */
+  .side {
+    overflow: hidden;
+    opacity: 0;
+    transition: opacity .18s ease;
+  }
+  .app.side-open .side { opacity: 1; }
+  @media (max-width: 900px) {
+    .app, .app.side-open { grid-template-columns: var(--rail) 1fr; }
+    .side { display: none; }
+  }
+
+  /* ---------- quick-studio identity rail (icons) ---------- */
+  .rail {
+    background: var(--rail-bg);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 10px 0; gap: 3px;
+  }
+  .rail .mark {
+    width: 30px; height: 30px; border-radius: 8px;
+    background: var(--ink-btn); color: var(--ink-btn-fg);
+    display: grid; place-items: center;
+    font-family: var(--mono); font-weight: 700; font-size: 15px;
+    margin-bottom: 12px;
+  }
+  .rail button {
+    width: 36px; height: 36px; border: none; background: transparent;
+    color: var(--text-faint); border-radius: 8px; cursor: pointer;
+    display: grid; place-items: center; transition: color .12s, background .12s;
+  }
+  .rail button:hover { color: var(--text); background: #ffffff12; }
+  .rail button.on { color: var(--text); background: #ffffff1f; }
+  .rail button svg { width: 18px; height: 18px; }
+  .rail .spacer { flex: 1; }
+
+  /* rail status bar (bottom) — connection dot + provider */
+  .rail-status {
+    display: flex; flex-direction: column; align-items: center; gap: 9px;
+    padding-top: 8px; border-top: 1px solid var(--border); margin-top: 4px;
+  }
+  .rail-status .sdot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft);
+  }
+  .rail-status .vlabel {
+    writing-mode: vertical-rl; transform: rotate(180deg);
+    font-family: var(--mono); font-size: 9px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--text-faint);
+  }
+
+  /* ---------- ChatGPT-style conversations sub-sidebar ---------- */
+  .side {
+    background: var(--bg-deep);
+    display: flex; flex-direction: column; min-height: 0;
+    padding: 8px;
+  }
+  .side-top { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
+  .new-chat {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 10px; border-radius: 9px; cursor: pointer;
+    color: var(--text); font-size: 14px; font-weight: 500;
+    background: transparent; border: none; text-align: left; width: 100%;
+    transition: background .12s;
+  }
+  .new-chat:hover { background: var(--hover); }
+  .new-chat svg { width: 17px; height: 17px; color: var(--text-dim); }
+  .new-chat .plus { margin-left: auto; color: var(--text-faint); }
+  .side-search {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 10px; border-radius: 9px; cursor: pointer;
+    color: var(--text-dim); font-size: 14px; background: transparent; border: none;
+    text-align: left; width: 100%; transition: background .12s;
+  }
+  .side-search:hover { background: var(--hover); }
+  .side-search svg { width: 16px; height: 16px; }
+
+  .side-scroll { flex: 1; overflow-y: auto; min-height: 0; padding-top: 4px; }
+  .side-cap {
+    font-size: 12px; color: var(--text-faint); font-weight: 600;
+    padding: 8px 10px 4px; letter-spacing: .01em;
+  }
+  .conv {
+    display: block; width: 100%; text-align: left; border: none; cursor: pointer;
+    background: transparent; color: var(--text-dim);
+    padding: 8px 10px; border-radius: 9px; font-size: 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: background .1s, color .1s;
+  }
+  .conv:hover { background: var(--hover); color: var(--text); }
+  .conv.on { background: var(--active); color: var(--text); }
+
+  /* user footer of the sidebar */
+  .side-user {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 8px; margin-top: 6px; border-top: 1px solid var(--border);
+    cursor: pointer; border-radius: 9px;
+  }
+  .side-user:hover { background: var(--hover); }
+  .side-user .ua {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: linear-gradient(135deg,#5b6ee1,#9b59b6);
+    color: #fff; display: grid; place-items: center;
+    font-weight: 700; font-size: 12px; font-family: var(--mono);
+  }
+  .side-user .un { font-size: 14px; color: var(--text); font-weight: 500; }
+  .side-user .up { font-size: 11px; color: var(--text-faint); }
+
+  /* ============================================================ main
+     Chrome-like "window": .main is the deepest black behind everything.
+     The tab strip floats on it; the page content lives in a rounded,
+     slightly detached panel below — same color as the active tab, so
+     the active tab visually fuses into the panel. */
+  .main {
+    display: flex; flex-direction: column; min-width: 0; min-height: 0;
+    background: var(--bg-deep);
+  }
+
+  /* ---------- quick-studio workspace tab bar (the chat is ONE tab) ---------- */
+  /* tabs sit at the BOTTOM of the strip so the active one kisses the panel */
+  .topbar {
+    display: flex; align-items: flex-end; flex-shrink: 0;
+    background: transparent;
+    padding: 5px 8px 0 6px; gap: 2px;
+  }
+  /* sidebar toggle (ChatGPT-style panel/hamburguer) — shows/hides conversations */
+  .side-toggle {
+    border: none; background: transparent; color: var(--text-dim);
+    width: 38px; height: 34px; cursor: pointer; display: grid; place-items: center;
+    border-radius: 8px; flex-shrink: 0; margin-bottom: 3px;
+    transition: color .12s, background .12s;
+  }
+  .side-toggle:hover { color: var(--text); background: #ffffff0f; }
+  .app.side-open .side-toggle { color: var(--text); }
+  .side-toggle svg { width: 17px; height: 17px; }
+  /* overflow VISIBLE so the active tab's concave feet (which stick out to the
+     sides and below) are never clipped by a scroll box */
+  .tabs { display: flex; align-items: flex-end; gap: 3px; overflow: visible; }
+  .tabs::-webkit-scrollbar { display: none; }
+  /* FIXED box in every state (rest, hover, active) — same height, no margin/padding
+     jumps → the icon+label stay dead-centered and never jitter on hover. */
+  .tab {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 14px; height: 36px;
+    border: none;
+    /* Chrome tab: rounded top corners; concave feet carved at the bottom via ::before/::after
+       top radius == foot radius (12px) so the top curve mirrors the bottom flare */
+    border-radius: 12px 12px 0 0;
+    background: transparent; color: var(--text-faint);
+    font-family: var(--sans); font-size: 12px; letter-spacing: .01em; cursor: pointer;
+    white-space: nowrap; position: relative;
+    /* room for the carved concave feet outside the tab box */
+    margin: 0 8px; z-index: 1;
+    /* only color animates on the tab box itself — never geometry */
+    transition: color .12s;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .tab { transition: color .12s; }
+    .tab::before, .tab::after { transition: opacity .12s, background .12s; }
+  }
+  /* shared pseudo base: absolutely-positioned layers that do NOT participate in the
+     tab's layout (so they can never move the box). ::before doubles as the hover
+     pill (inactive) and the left concave foot (active); ::after is the right foot. */
+  .tab::before, .tab::after {
+    content: ""; position: absolute; pointer-events: none;
+    opacity: 0; transition: opacity .12s, background .12s;
+  }
+  /* INACTIVE hover: a floating grey pill drawn as a pure background LAYER via ::before,
+     inset inside the fixed tab box (gap top/right/left, a touch more at the bottom so it
+     lifts off the bar). Rounded on all four corners. Only opacity/background transition —
+     zero geometry change → no jitter, content stays centered. z-index:-1 keeps it behind
+     the icon/label but above the (transparent) topbar. */
+  .tab:hover:not(.on)::before {
+    inset: 4px 4px 4px 4px;   /* symmetric → pill center == content center, no vertical off-set */
+    border-radius: 10px;
+    background: #ffffff0a;
+    z-index: -1;
+    opacity: 1;
+  }
+  /* ACTIVE tab: same colour as the content panel below → they fuse into one piece.
+     Extra height + a tiny negative bottom margin let it overlap the panel seam. This
+     geometry is static (only on .on), so it never animates and never jitters. */
+  .tab.on {
+    color: var(--text); background: var(--bg);
+    /* 1px taller + 1px negative bottom margin: the tab bottom lands exactly on the
+       panel top (they share --bg) and overlaps it by 1px so there is never a seam. */
+    height: 37px; margin-bottom: -1px; z-index: 3;
+    /* no border/hairline — the tab silhouette reads from contrast alone */
+  }
+  /* concave "feet": a square the PANEL colour, with a transparent circle punched at the
+     inner-top corner via a radial-gradient mask → the leftover crescent flares OUT and
+     curves down into the panel, the classic Chrome curved base. Revealed against the
+     deeper topbar colour behind. width/radius matched to the 11px top corners. */
+  .tab.on::before, .tab.on::after {
+    bottom: 0; width: 12px; height: 12px;
+    background: var(--bg);
+    opacity: 1; z-index: 2;
+    /* No edge line: the concave foot reads from contrast alone — foot/panel var(--bg)
+       #0a0a0a against the strip var(--bg-deep) #000 revealed inside the notch. */
+  }
+  .tab.on::before {
+    left: -12px;
+    -webkit-mask: radial-gradient(circle at top left, transparent 11.5px, #000 12.1px);
+            mask: radial-gradient(circle at top left, transparent 11.5px, #000 12.1px);
+  }
+  .tab.on::after {
+    right: -12px;
+    -webkit-mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
+            mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
+  }
+  :root[data-theme="light"] .tab:hover:not(.on)::before { background: #00000008; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .tab:hover:not(.on)::before { background:#00000008; } }
+  .tab .k { width: 13px; height: 13px; color: currentColor; opacity: .85; }
+  .tab .x { color: var(--text-faint); border-radius: 4px; width: 15px; height: 15px; display: grid; place-items: center; margin-left: 2px; }
+  .tab .x:hover { background: #ffffff1a; color: var(--text); }
+  /* new-tab "+" — a real box aligned to the tab row (bottom-aligned via topbar's
+     flex-end), glyph centred with grid, and the same floating hover pill as tabs. */
+  .tab-add {
+    border: none; background: transparent; color: var(--text-faint);
+    width: 34px; height: 36px; align-self: flex-end;
+    display: grid; place-items: center; padding: 0; margin: 0 2px;
+    border-radius: 10px; cursor: pointer;
+    font-size: 19px; line-height: 1; font-weight: 400;
+    transition: color .12s, background .12s;
+  }
+  .tab-add:hover { color: var(--text); background: #ffffff0a; }
+  :root[data-theme="light"] .tab-add:hover { background: #00000008; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .tab-add:hover { background: #00000008; } }
+  .win { margin-left: auto; display: flex; align-items: center; gap: 4px; }
+  .icon-btn {
+    border: none; background: transparent; color: var(--text-faint);
+    width: 30px; height: 30px; border-radius: 6px; cursor: pointer;
+    display: grid; place-items: center; transition: background .12s, color .12s;
+  }
+  .icon-btn:hover { background: #ffffff12; color: var(--text); }
+  :root[data-theme="light"] .icon-btn:hover, :root[data-theme="light"] .side-toggle:hover, :root[data-theme="light"] .tab .x:hover { background: #00000010; }
+  .icon-btn svg { width: 15px; height: 15px; }
+  .stop {
+    font-family: var(--mono); font-size: 11px; letter-spacing: .04em;
+    color: #ef6a63; border: 1px solid transparent; background: rgba(239,106,99,0.12);
+    padding: 5px 10px; border-radius: 6px; cursor: pointer; margin-left: 6px;
+  }
+  .stop:hover { border-color: rgba(239,106,99,0.4); }
+
+  /* ---------- content panel — Chrome "page area" as a rounded floating card ----------
+     Detached from the window edges by a small gap; shares the active tab's color. */
+  .content-panel {
+    flex: 1; min-height: 0; min-width: 0;
+    display: flex; flex-direction: column;
+    background: var(--bg);
+    border-radius: 12px;
+    margin: 0 6px 6px 6px;
+    overflow: hidden;
+    box-shadow: 0 1px 0 var(--border-2);
+  }
+
+  /* top header: model ▾  ·  privacy chip  ·  share / more */
+  .chat-head {
+    display: flex; align-items: center; gap: 10px;
+    height: 52px; padding: 0 16px; flex-shrink: 0;
+  }
+  .model-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: transparent; border: none; cursor: pointer;
+    color: var(--text); font-size: 16px; font-weight: 600;
+    padding: 6px 8px; border-radius: 9px; transition: background .12s;
+  }
+  .model-btn:hover { background: var(--hover); }
+  .model-btn .prov { color: var(--text); }
+  .model-btn .mode { color: var(--text-faint); font-weight: 500; font-family: var(--mono); font-size: 12.5px; }
+  .model-btn .chev { width: 15px; height: 15px; color: var(--text-faint); }
+
+  .privacy {
+    display: inline-flex; align-items: center; gap: 7px;
+    font-size: 12.5px; color: var(--ok); background: var(--ok-soft);
+    border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent);
+    padding: 4px 10px 4px 8px; border-radius: 20px; cursor: default;
+  }
+  .privacy svg { width: 13px; height: 13px; }
+  .privacy b { font-weight: 600; }
+  .head-spacer { flex: 1; }
+  .head-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: transparent; border: 1px solid var(--border-2);
+    color: var(--text-dim); border-radius: 20px; padding: 6px 12px;
+    font-size: 13px; cursor: pointer; transition: background .12s, color .12s;
+  }
+  .head-btn:hover { background: var(--hover); color: var(--text); }
+  .head-btn svg { width: 14px; height: 14px; }
+  .head-icon {
+    width: 34px; height: 34px; border-radius: 50%; border: none;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    display: grid; place-items: center; transition: background .12s;
+  }
+  .head-icon:hover { background: var(--hover); color: var(--text); }
+  .head-icon svg { width: 18px; height: 18px; }
+
+  /* conversation scroll — narrow centered column, lots of vertical air */
+  .thread { flex: 1; overflow-y: auto; min-height: 0; }
+  .turns {
+    max-width: var(--read); margin: 0 auto; padding: 20px 20px 40px;
+    display: flex; flex-direction: column; gap: 30px;
+  }
+
+  /* ---- USER: grey rounded bubble, right aligned ---- */
+  .msg.user { display: flex; justify-content: flex-end; }
+  .user-bubble {
+    background: var(--user-bubble); color: var(--text);
+    border-radius: 22px; padding: 11px 18px;
+    font-size: 16px; line-height: 1.55; max-width: 75%;
+  }
+
+  /* ---- ASSISTANT ---- */
+  .msg.assistant { display: flex; flex-direction: column; }
+  .assistant-inner { display: flex; gap: 16px; }
+  .a-avatar {
+    width: 26px; height: 26px; border-radius: 50%; flex-shrink: 0; margin-top: 2px;
+    background: var(--ink-btn); color: var(--ink-btn-fg);
+    display: grid; place-items: center; font-family: var(--mono);
+    font-weight: 700; font-size: 13px;
+  }
+  .a-body { flex: 1; min-width: 0; }
+
+  /* ---------- REASONING CHANNEL — plain muted stream, no card ---------- */
+  .reasoning { margin-bottom: 14px; }
+  .reasoning summary {
+    list-style: none; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 0; color: var(--text-faint); user-select: none;
+    font-size: 14px; transition: color .12s;
+  }
+  .reasoning summary:hover { color: var(--text-dim); }
+  .reasoning summary::-webkit-details-marker { display: none; }
+  .reasoning summary .chev {
+    width: 14px; height: 14px; transition: transform .18s; flex-shrink: 0;
+    color: var(--text-faint);
+  }
+  .reasoning[open] summary .chev { transform: rotate(90deg); }
+  .reasoning summary .r-live { display: none; }
+  .reasoning.thinking summary .r-live { display: inline; color: var(--text-dim); }
+  .reasoning.thinking summary .r-done { display: none; }
+
+  /* body: plain muted prose, atten. left rule like ChatGPT thoughts */
+  .reasoning .steps {
+    padding: 6px 0 4px 18px; margin-left: 6px;
+    border-left: 2px solid var(--border);
+    display: flex; flex-direction: column; gap: 10px; overflow: hidden;
+  }
+  .reasoning .step {
+    font-size: 14.5px; line-height: 1.7; color: var(--text-dim);
+  }
+  .reasoning .step .tbl-ref { font-family: var(--mono); font-size: 13px; color: var(--text-dim); }
+  .reasoning .step.privacy-note { color: color-mix(in srgb, var(--ok) 65%, var(--text-dim)); }
+  /* live: lines fade in one by one (shimmer) */
+  .reasoning.thinking .step {
+    color: var(--text-faint); animation: r-fade .6s ease both;
+  }
+  .reasoning.thinking .step:nth-child(1){animation-delay:0s}
+  .reasoning.thinking .step:nth-child(2){animation-delay:.5s}
+  .reasoning.thinking .step:nth-child(3){animation-delay:1s}
+  .reasoning.thinking .step:nth-child(4){animation-delay:1.5s}
+  .reasoning.thinking .step:nth-child(5){animation-delay:2s}
+  .reasoning.thinking .step:nth-child(6){animation-delay:2.5s}
+  .reasoning.thinking .step:nth-child(7){animation-delay:3s}
+  .reasoning.thinking .step:nth-child(8){animation-delay:3.5s}
+  @keyframes r-fade { from{opacity:0;transform:translateY(1px)} to{opacity:1;transform:none} }
+
+  /* ---------- FINAL ANSWER — clean sans, ~16px, roomy line-height ---------- */
+  .answer { font-size: 16px; line-height: 1.75; color: var(--text); }
+  .answer p { margin: 0 0 18px; }
+  .answer p:last-child { margin-bottom: 0; }
+  .answer strong { font-weight: 650; color: var(--text); }
+  .answer .money { font-family: var(--sans); color: var(--money); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; font-weight: 600; }
+  /* section headers — bold, small leading emoji */
+  .answer h3 {
+    font-size: 16px; font-weight: 700; color: var(--text);
+    margin: 0 0 12px; display: flex; align-items: center; gap: 8px;
+  }
+  /* very subtle horizontal rules between big blocks */
+  .answer hr {
+    border: none; border-top: 1px solid var(--border);
+    margin: 24px 0;
+  }
+  /* well-spaced bulleted lists */
+  .answer ul { margin: 0 0 18px; padding-left: 22px; }
+  .answer li { margin-bottom: 9px; line-height: 1.7; }
+  .answer li::marker { color: var(--text-faint); }
+
+  /* generated SQL block — ChatGPT codeblock look */
+  .gen-sql {
+    margin: 4px 0 18px; border-radius: 12px;
+    background: #0d0d0d; overflow: hidden; border: 1px solid var(--border);
+  }
+  :root[data-theme="light"] .gen-sql { background: #f0f0f0; }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .gen-sql { background:#f0f0f0; } }
+  .gen-sql .sql-bar {
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 12px; background: #ffffff0a;
+    font-size: 12px; color: var(--text-faint);
+  }
+  :root[data-theme="light"] .gen-sql .sql-bar { background:#00000008; }
+  .gen-sql .sql-bar .tag { font-family: var(--mono); letter-spacing: .04em; }
+  .gen-sql .sql-bar .grow { flex: 1; }
+  .gen-sql .sql-bar .mini {
+    border: none; background: transparent; color: var(--text-faint);
+    font-size: 12px; cursor: pointer; display: inline-flex; align-items: center;
+    gap: 5px; padding: 3px 7px; border-radius: 6px;
+  }
+  .gen-sql .sql-bar .mini:hover { color: var(--text); background: #ffffff12; }
+  .gen-sql .sql-bar .mini svg { width: 12px; height: 12px; }
+  .gen-sql pre {
+    margin: 0; padding: 13px 15px; overflow-x: auto;
+    font-family: var(--mono); font-size: 13.5px; line-height: 1.7; color: var(--text); tab-size: 2;
+  }
+  .gen-sql .ln { color: var(--text-faint); user-select: none; display: inline-block; width: 16px; text-align: right; margin-right: 14px; }
+  .kw{color:var(--sql-kw);font-weight:600} .fn{color:var(--sql-fn)} .str{color:var(--sql-str)}
+  .num{color:var(--sql-num)} .idn{color:var(--sql-idn)} .pun{color:var(--sql-pun)} .com{color:var(--text-faint);font-style:italic}
+
+  /* inline result — KPIs + mini table */
+  .inline-result { margin: 0 0 18px; }
+  .kpis { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  .kpi {
+    border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+    padding: 11px 15px; min-width: 140px;
+  }
+  .kpi .k-label { font-family: var(--sans); font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-faint); margin-bottom: 5px; }
+  .kpi .k-val { font-family: var(--sans); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; color: var(--text); }
+  .kpi.money .k-val { color: var(--money); }
+  .kpi.count .k-val { color: var(--count); }
+
+  table.mini {
+    border-collapse: separate; border-spacing: 0; width: 100%;
+    font-family: var(--sans); font-size: 13.5px;
+    font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1;
+    border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  }
+  table.mini thead th {
+    background: var(--surface); border-bottom: 1px solid var(--border-2);
+    text-align: left; padding: 9px 14px; font-weight: 600; color: var(--text-dim);
+    font-size: 12.5px; white-space: nowrap;
+  }
+  table.mini thead th.r { text-align: right; }
+  table.mini td { padding: 9px 14px; border-bottom: 1px solid var(--border); color: var(--text); white-space: nowrap; }
+  table.mini tbody tr:last-child td { border-bottom: none; }
+  table.mini td.num { color: var(--count); text-align: right; font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; }
+  table.mini td.money { color: var(--money); text-align: right; font-family: var(--sans); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1, "cv01" 1; }
+  table.mini td .lead { font-weight: 600; }
+
+  /* streaming caret */
+  .caret {
+    display: inline-block; width: 9px; height: 17px;
+    background: var(--text); margin-left: 3px; vertical-align: -3px;
+    animation: blink 1s steps(2, start) infinite; border-radius: 1px;
+  }
+  @keyframes blink { 0%,50%{opacity:1} 50.01%,100%{opacity:0} }
+
+  /* ---- assistant action row (copy / up / down / share / regen / more) ---- */
+  .actions { display: flex; align-items: center; gap: 2px; margin-top: 14px; }
+  .act {
+    width: 32px; height: 32px; border-radius: 7px; border: none;
+    background: transparent; color: var(--text-faint); cursor: pointer;
+    display: grid; place-items: center; transition: background .12s, color .12s;
+  }
+  .act:hover { background: var(--hover); color: var(--text); }
+  .act svg { width: 17px; height: 17px; }
+
+  /* ============================================================ composer */
+  .composer-wrap { flex-shrink: 0; padding: 6px 20px 8px; }
+  .composer {
+    max-width: var(--read); margin: 0 auto;
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg); border-radius: 26px;
+    padding: 8px 8px 8px 8px;
+    border: 1px solid #ffffff1f; transition: border-color .12s, box-shadow .12s;
+  }
+  :root[data-theme="light"] .composer { border-color: var(--border-2); }
+  @media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) .composer { border-color: var(--border-2); } }
+  .composer:focus-within { border-color: #ffffff33; box-shadow: 0 0 0 3px #ffffff0f; }
+  .comp-plus, .comp-icon {
+    width: 36px; height: 36px; border-radius: 50%; border: none;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    display: grid; place-items: center; flex-shrink: 0; transition: background .12s;
+  }
+  .comp-plus:hover, .comp-icon:hover { background: #ffffff12; color: var(--text); }
+  :root[data-theme="light"] .comp-plus:hover, :root[data-theme="light"] .comp-icon:hover { background:#00000010; }
+  .comp-plus svg { width: 20px; height: 20px; }
+  .comp-icon svg { width: 20px; height: 20px; }
+  .composer textarea {
+    flex: 1; resize: none; border: none; background: transparent; outline: none;
+    color: var(--text); font-family: var(--sans); font-size: 16px; line-height: 1.5;
+    max-height: 160px; padding: 8px 4px;
+  }
+  .composer textarea::placeholder { color: var(--text-faint); }
+  .comp-send {
+    width: 36px; height: 36px; border-radius: 50%; border: none; cursor: pointer;
+    background: var(--ink-btn); color: var(--ink-btn-fg);
+    display: grid; place-items: center; flex-shrink: 0; transition: filter .12s, transform .06s;
+  }
+  .comp-send:hover { filter: brightness(1.08); }
+  .comp-send:active { transform: translateY(1px); }
+  .comp-send svg { width: 18px; height: 18px; }
+  .composer-note {
+    max-width: var(--read); margin: 8px auto 4px; text-align: center;
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-size: 12px; color: var(--text-faint);
+  }
+  .composer-note .schema-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+
+  ::-webkit-scrollbar { width: 12px; height: 12px; }
+  ::-webkit-scrollbar-thumb { background: #ffffff26; border-radius: 7px; border: 3px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-thumb:hover { background: #ffffff40; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  :root[data-theme="light"] ::-webkit-scrollbar-thumb { background:#00000026; background-clip:padding-box; }
+
+  /* discreet, monochrome focus — never the harsh white default rectangle */
+  :focus { outline: none; }
+  button:focus-visible, .conv:focus-visible, summary:focus-visible, .tab:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px #ffffff2e;
+    border-radius: 8px;
+  }
+  :root[data-theme="light"] button:focus-visible,
+  :root[data-theme="light"] .conv:focus-visible,
+  :root[data-theme="light"] summary:focus-visible,
+  :root[data-theme="light"] .tab:focus-visible {
+    box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px #0000002e;
+  }
+  /* composer: focus lives on the pill (focus-within above), textarea itself stays clean */
+  .composer textarea:focus-visible { outline: none; box-shadow: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+    .caret { opacity: 1; }
+  }
+
+  /* ============================================================
+     REPORT VIEW — additive only, does not modify any shell rule
+     above. New, namespaced classes for the report content panel.
+     ============================================================ */
+  .report-head { display: flex; align-items: flex-start; gap: 16px; padding: 16px 22px 14px; flex-shrink: 0; }
+  .report-head .grow { flex: 1; min-width: 0; }
+  .report-title {
+    font-family: var(--sans); font-size: 20px; font-weight: 650; letter-spacing: -0.01em;
+    color: var(--text); border: 1px solid transparent; border-radius: 7px;
+    padding: 2px 6px; margin: 0 0 0 -6px; outline: none; display: inline-block; min-width: 40px;
+  }
+  .report-title:hover { border-color: var(--border); }
+  .report-title:focus { border-color: var(--rpt-accent-line); background: var(--surface); }
+  .report-sub {
+    font-family: var(--mono); font-size: 11.5px; color: var(--text-dim);
+    margin-top: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .report-sub .sep { color: var(--text-faint); }
+  .report-sub .hl { color: var(--text-dim); }
+  .rpt-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); display: inline-block; margin-right: 2px; }
+  .report-target {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .05em;
+    color: var(--t-time); background: color-mix(in srgb, var(--t-time) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--t-time) 26%, transparent);
+    padding: 3px 9px; border-radius: 20px;
+  }
+  .report-target .arw { opacity: .8; }
+  .report-target b { font-weight: 600; }
+
+  .report-actions { flex-shrink: 0; }
+  .seg-control {
+    display: inline-flex; align-items: center; background: var(--surface);
+    border: 1px solid var(--border-2); border-radius: 9px; padding: 3px; gap: 2px;
+  }
+  .seg-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    border: none; background: transparent; color: var(--text-dim);
+    font-family: var(--sans); font-size: 12.5px; font-weight: 500;
+    padding: 7px 13px; border-radius: 7px; cursor: pointer;
+    transition: background .12s, color .12s;
+  }
+  .seg-btn svg { width: 13px; height: 13px; }
+  .seg-btn:hover { color: var(--text); }
+  .seg-btn.on { background: var(--rpt-accent); color: var(--rpt-accent-ink); }
+  .seg-btn.on:hover { color: var(--rpt-accent-ink); }
+
+  .report-scroll { flex: 1; overflow-y: auto; min-height: 0; }
+  .report-sheet { max-width: 1160px; margin: 0 auto; padding: 4px 22px 44px; }
+
+  .sec-row { display: flex; align-items: baseline; gap: 10px; margin: 26px 0 12px; }
+  .sec-row .sec-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: .11em; text-transform: uppercase; color: var(--text-faint); }
+  .sec-row .sec-hint { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+
+  /* KPI tiles */
+  .report-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .report-kpi { background: var(--surface); padding: 15px 17px 16px; display: flex; flex-direction: column; gap: 9px; }
+  .report-kpi .k-label { font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-faint); }
+  .report-kpi .k-val { font-family: var(--mono); font-variant-numeric: tabular-nums; font-feature-settings: "tnum" 1; font-size: 26px; font-weight: 600; letter-spacing: -0.02em; color: var(--text); line-height: 1; }
+  .report-kpi .k-val .cur { font-size: 15px; color: var(--text-dim); font-weight: 500; margin-right: 1px; }
+  .report-kpi .k-val .dec { color: var(--text-dim); }
+  .report-kpi.money .k-val { color: var(--t-num); }
+  .report-kpi.count .k-val { color: var(--t-int); }
+  .report-kpi .k-foot { display: flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 10.5px; }
+  .r-delta { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; }
+  .r-delta.up { color: var(--ok); }
+  .r-delta.down { color: var(--rpt-err); }
+  .k-foot .vs { color: var(--text-faint); }
+
+  /* charts */
+  .report-charts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .rcard { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px 14px; min-width: 0; }
+  .rcard-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+  .rcard-title { font-family: var(--sans); font-size: 13px; font-weight: 600; color: var(--text); }
+  .rcard-meta { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+  .rlegend { display: flex; gap: 14px; margin-top: 4px; }
+  .rlegend .li { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10px; color: var(--text-dim); }
+  .rlegend .sw { width: 9px; height: 3px; border-radius: 2px; }
+  .rchart-svg { width: 100%; height: auto; display: block; margin-top: 10px; overflow: visible; }
+  .rax { font-family: var(--mono); font-size: 8.5px; fill: var(--text-faint); }
+  .rgrid-line { stroke: var(--border); stroke-width: 1; }
+  .rbarlbl { font-family: var(--mono); font-size: 8px; fill: var(--text-faint); }
+
+  /* embedded results table */
+  .report-table-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  table.rgrid { border-collapse: separate; border-spacing: 0; width: 100%; font-family: var(--mono); font-size: 12.5px; }
+  table.rgrid thead th { background: var(--surface-2); border-bottom: 1px solid var(--border-2); text-align: left; padding: 0; font-weight: 500; white-space: nowrap; }
+  .rth-inner { padding: 9px 15px 8px; display: flex; flex-direction: column; gap: 3px; }
+  .rth-inner .col { color: var(--text); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+  .rth-inner .type { font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; }
+  .rtype-int  { color: var(--t-int); }
+  .rtype-pk   { color: var(--rpt-accent); }
+  .rtype-time { color: var(--t-time); }
+  .rtype-num  { color: var(--t-num); }
+  .rtype-text { color: var(--text-dim); }
+  table.rgrid td { padding: 8px 15px; border-bottom: 1px solid var(--border); white-space: nowrap; color: var(--text); vertical-align: middle; }
+  table.rgrid tbody tr:last-child td { border-bottom: none; }
+  table.rgrid tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--surface-2) 45%, transparent); }
+  table.rgrid tbody tr:hover td { background: var(--rpt-accent-soft); }
+  td.rpk-cell { color: var(--rpt-accent); }
+  td.rtime-cell { color: var(--t-time); }
+  td.rint-cell { color: var(--t-int); text-align: right; font-variant-numeric: tabular-nums; }
+  td.rnum-cell { color: var(--t-num); text-align: right; font-variant-numeric: tabular-nums; }
+  td.rtext-cell { color: var(--text-dim); }
+  .rpill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; padding: 2px 8px 2px 6px; border-radius: 20px; font-family: var(--mono); }
+  .rpill::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+  .rpill.ok   { color: var(--ok); background: var(--ok-soft); }
+  .rpill.warn { color: var(--rpt-warn); background: var(--rpt-warn-soft); }
+  .rpill.err  { color: var(--rpt-err); background: var(--rpt-err-soft); }
+
+  .add-block {
+    margin-top: 18px; border: 1px dashed var(--border-2); border-radius: 12px;
+    padding: 14px; display: flex; align-items: center; justify-content: center; gap: 8px;
+    font-family: var(--mono); font-size: 11px; color: var(--text-faint); cursor: pointer;
+    background: transparent; width: 100%;
+  }
+  .add-block:hover { border-color: var(--rpt-accent-line); color: var(--text-dim); background: var(--rpt-accent-soft); }
+  .add-block svg { width: 13px; height: 13px; }
+
+  .report-status {
+    display: flex; align-items: center; gap: 16px; flex-shrink: 0;
+    padding: 7px 20px; border-top: 1px solid var(--border);
+    font-family: var(--mono); font-size: 10.5px; color: var(--text-faint);
+  }
+  .report-status .seg { display: inline-flex; align-items: center; gap: 6px; }
+  .report-status .seg b { color: var(--text-dim); font-weight: 500; }
+  .report-status .grow { flex: 1; }
+  .report-status .ms { color: var(--rpt-accent); }
+
+  @media (max-width: 900px) {
+    .report-kpis { grid-template-columns: repeat(2, 1fr); }
+    .report-charts { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="app">
+
+  <!-- ============ quick-studio identity rail (NOT ChatGPT — the app) ============ -->
+  <nav class="rail" aria-label="Workspace tools">
+    <div class="mark" title="quick-studio">q</div>
+    <button title="Tables" aria-label="Tables">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M3 14.5h18M9 9v11M15 9v11"/></svg>
+    </button>
+    <button title="Query" aria-label="Query editor">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M6 8l4 4-4 4M12.5 16H18"/><rect x="2.5" y="4" width="19" height="16" rx="2"/></svg>
+    </button>
+    <button title="ERD" aria-label="Entity diagram">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="3" y="3" width="7" height="6" rx="1"/><rect x="14" y="15" width="7" height="6" rx="1"/><path d="M6.5 9v4a2 2 0 0 0 2 2h5.5"/></svg>
+    </button>
+    <button title="AI Chat" aria-label="AI chat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 5h16v11H9l-4 3.5V16H4z"/><path d="M9 10.5h.01M12.5 10.5h.01M16 10.5h.01"/></svg>
+    </button>
+    <button class="on" title="Report" aria-label="Report">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+    </button>
+    <div class="spacer"></div>
+    <button title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg>
+    </button>
+    <!-- rail status bar (bottom): connection + provider -->
+    <div class="rail-status" title="shop_prod connected · claude-opus-4-8 · schema-only · 127.0.0.1">
+      <span class="sdot"></span>
+      <span class="vlabel">127.0.0.1 · schema-only</span>
+    </div>
+  </nav>
+
+  <!-- ============ ChatGPT-style sub-sidebar — now lists saved reports ============ -->
+  <aside class="side" aria-label="Reportes guardados">
+    <div class="side-top">
+      <button class="new-chat">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v8m0 0v8m0-8h8m-8 0H4"/></svg>
+        Nuevo reporte
+        <span class="plus"></span>
+      </button>
+      <button class="side-search">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+        Buscar reportes
+      </button>
+    </div>
+    <div class="side-scroll">
+      <div class="side-cap">Hoy</div>
+      <button class="conv on">Weekly Revenue — shop_prod</button>
+      <button class="conv">Refunds by category</button>
+      <div class="side-cap">Anteriores</div>
+      <button class="conv">Top customers by LTV</button>
+      <button class="conv">Orders missing shipping</button>
+      <button class="conv">Category revenue split</button>
+      <button class="conv">Session funnel Q2</button>
+      <button class="conv">Slow query cost report</button>
+    </div>
+    <div class="side-user">
+      <span class="ua">M</span>
+      <div style="min-width:0">
+        <div class="un">Martín</div>
+        <div class="up">quick-studio · local</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ main: workspace tabs + report as the active tab ============ -->
+  <section class="main">
+
+    <!-- quick-studio workspace tab bar — the report is just one tab here -->
+    <div class="topbar">
+      <button class="side-toggle" id="side-toggle" title="Mostrar/ocultar reportes" aria-label="Alternar lista de reportes" aria-expanded="false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/></svg>
+      </button>
+      <div class="tabs" id="tabs">
+        <button class="tab" data-tab="orders">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>
+          public.orders
+          <span class="x" role="button" aria-label="Cerrar">×</span>
+        </button>
+        <button class="tab" data-tab="sql">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 8l4 4-4 4M12.5 16H18"/></svg>
+          revenue.sql
+          <span class="x" role="button" aria-label="Cerrar">×</span>
+        </button>
+        <button class="tab on" data-tab="report">
+          <svg class="k" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="5" y="3" width="14" height="18" rx="1.5"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+          revenue · report
+          <span class="x" role="button" aria-label="Cerrar">×</span>
+        </button>
+      </div>
+      <button class="tab-add" title="Nueva tab">+</button>
+      <div class="win">
+        <button class="icon-btn" id="theme" title="Cambiar tema" aria-label="Cambiar tema">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5 5l1.4 1.4M17.6 17.6L19 19M19 5l-1.4 1.4M6.4 17.6L5 19"/></svg>
+        </button>
+        <button class="stop" title="Detener el server local y salir">■ Stop</button>
+      </div>
+    </div>
+
+    <!-- content panel: rounded floating card holding the whole report (Chrome page area) -->
+    <div class="content-panel">
+
+      <!-- report header: title + timeframe + export segmented control -->
+      <div class="report-head">
+        <div class="grow">
+          <h1 class="report-title" contenteditable="true" spellcheck="false" title="Click para renombrar">Weekly Revenue — shop_prod</h1>
+          <div class="report-sub">
+            <span><span class="rpt-dot"></span> shop_prod · postgres</span>
+            <span class="sep">·</span>
+            <span>29 jun → 05 jul, 2026</span>
+            <span class="sep">·</span>
+            <span>armado desde <span class="hl">revenue.sql</span></span>
+            <span class="sep">·</span>
+            <span class="report-target" title="Test-to-production targeting">
+              <b>test</b><span class="arw">→</span><b>prod</b>
+            </span>
+          </div>
+        </div>
+        <div class="report-actions">
+          <div class="seg-control" role="tablist" aria-label="Modo de export">
+            <button class="seg-btn" data-seg="snapshot" role="tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+              Export snapshot
+            </button>
+            <button class="seg-btn on" data-seg="live" role="tab">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/><circle cx="12" cy="12" r="4"/></svg>
+              Export live
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="report-scroll">
+        <div class="report-sheet">
+
+          <!-- KPI tiles -->
+          <div class="sec-row"><span class="sec-label">Summary</span><span class="sec-hint">142 órdenes · ventana de 7 días</span></div>
+          <div class="report-kpis">
+            <div class="report-kpi money">
+              <span class="k-label">Revenue</span>
+              <span class="k-val"><span class="cur">$</span>18,420<span class="dec">.15</span></span>
+              <span class="k-foot"><span class="r-delta up">+12.4% ▲</span><span class="vs">vs semana ant.</span></span>
+            </div>
+            <div class="report-kpi count">
+              <span class="k-label">Orders</span>
+              <span class="k-val">142</span>
+              <span class="k-foot"><span class="r-delta up">+8.1% ▲</span><span class="vs">vs semana ant.</span></span>
+            </div>
+            <div class="report-kpi money">
+              <span class="k-label">Avg order</span>
+              <span class="k-val"><span class="cur">$</span>129<span class="dec">.72</span></span>
+              <span class="k-foot"><span class="r-delta up">+3.9% ▲</span><span class="vs">vs semana ant.</span></span>
+            </div>
+            <div class="report-kpi">
+              <span class="k-label">Refund rate</span>
+              <span class="k-val">4.2<span class="dec">%</span></span>
+              <span class="k-foot"><span class="r-delta down">+0.6pt ▼</span><span class="vs">vs semana ant.</span></span>
+            </div>
+          </div>
+
+          <!-- charts -->
+          <div class="sec-row"><span class="sec-label">Trend</span><span class="sec-hint">diario, UTC</span></div>
+          <div class="report-charts">
+
+            <!-- revenue over time: area + line, coral primary series -->
+            <div class="rcard">
+              <div class="rcard-head">
+                <span class="rcard-title">Revenue over time</span>
+                <span class="rcard-meta">Lun 29 – Dom 05 · $</span>
+              </div>
+              <div class="rlegend">
+                <span class="li"><span class="sw" style="background:var(--rpt-accent)"></span>revenue diario</span>
+              </div>
+              <svg class="rchart-svg" viewBox="0 0 590 190" role="img" aria-label="Revenue over time area chart">
+                <defs>
+                  <linearGradient id="revFill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="var(--rpt-accent)" stop-opacity="0.28"/>
+                    <stop offset="100%" stop-color="var(--rpt-accent)" stop-opacity="0.02"/>
+                  </linearGradient>
+                </defs>
+                <g>
+                  <line class="rgrid-line" x1="42" y1="18"  x2="548" y2="18"/>
+                  <line class="rgrid-line" x1="42" y1="53.5" x2="548" y2="53.5"/>
+                  <line class="rgrid-line" x1="42" y1="89"  x2="548" y2="89"/>
+                  <line class="rgrid-line" x1="42" y1="124.5" x2="548" y2="124.5"/>
+                  <line class="rgrid-line" x1="42" y1="160" x2="548" y2="160" stroke="var(--border-2)"/>
+                  <text class="rax" x="37" y="21"  text-anchor="end">4k</text>
+                  <text class="rax" x="37" y="56.5" text-anchor="end">3k</text>
+                  <text class="rax" x="37" y="92"  text-anchor="end">2k</text>
+                  <text class="rax" x="37" y="127.5" text-anchor="end">1k</text>
+                  <text class="rax" x="37" y="163" text-anchor="end">0</text>
+                </g>
+                <path id="revArea" fill="url(#revFill)" stroke="none"></path>
+                <path id="revLine" fill="none" stroke="var(--rpt-accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>
+                <g id="revDots"></g>
+                <g id="revXLabels"></g>
+              </svg>
+            </div>
+
+            <!-- orders per day: bar chart, same coral primary series -->
+            <div class="rcard">
+              <div class="rcard-head">
+                <span class="rcard-title">Orders by day</span>
+                <span class="rcard-meta">unidades por día</span>
+              </div>
+              <div class="rlegend">
+                <span class="li"><span class="sw" style="background:var(--rpt-accent)"></span>órdenes pagas</span>
+              </div>
+              <svg class="rchart-svg" viewBox="0 0 590 190" role="img" aria-label="Orders by day bar chart">
+                <g>
+                  <line class="rgrid-line" x1="42" y1="18"  x2="548" y2="18"/>
+                  <line class="rgrid-line" x1="42" y1="65.33" x2="548" y2="65.33"/>
+                  <line class="rgrid-line" x1="42" y1="112.67" x2="548" y2="112.67"/>
+                  <line class="rgrid-line" x1="42" y1="160" x2="548" y2="160" stroke="var(--border-2)"/>
+                  <text class="rax" x="37" y="21" text-anchor="end">30</text>
+                  <text class="rax" x="37" y="68.33" text-anchor="end">20</text>
+                  <text class="rax" x="37" y="115.67" text-anchor="end">10</text>
+                  <text class="rax" x="37" y="163" text-anchor="end">0</text>
+                </g>
+                <g id="ordBars"></g>
+              </svg>
+            </div>
+          </div>
+
+          <!-- embedded results table -->
+          <div class="sec-row"><span class="sec-label">Resultados</span><span class="sec-hint">public.orders · últimas 8 filas</span></div>
+          <div class="report-table-card">
+            <table class="rgrid">
+              <thead>
+                <tr>
+                  <th><div class="rth-inner"><span class="col">id</span><span class="type rtype-pk">pk</span></div></th>
+                  <th><div class="rth-inner"><span class="col">created_at</span><span class="type rtype-time">timestamptz</span></div></th>
+                  <th><div class="rth-inner"><span class="col">customer_id</span><span class="type rtype-int">int4</span></div></th>
+                  <th><div class="rth-inner"><span class="col">customer</span><span class="type rtype-text">text</span></div></th>
+                  <th><div class="rth-inner"><span class="col" style="justify-content:flex-end">amount</span><span class="type rtype-num">numeric</span></div></th>
+                  <th><div class="rth-inner"><span class="col">status</span><span class="type rtype-text">text</span></div></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="rpk-cell">1024</td><td class="rtime-cell">2026-07-05 14:22</td><td class="rint-cell">4821</td>
+                  <td class="rtext-cell">Lucía Fernández</td><td class="rnum-cell">$312.40</td>
+                  <td><span class="rpill ok">paid</span></td>
+                </tr>
+                <tr>
+                  <td class="rpk-cell">1023</td><td class="rtime-cell">2026-07-05 11:03</td><td class="rint-cell">1187</td>
+                  <td class="rtext-cell">Martín Ibáñez</td><td class="rnum-cell">$89.00</td>
+                  <td><span class="rpill ok">paid</span></td>
+                </tr>
+                <tr>
+                  <td class="rpk-cell">1022</td><td class="rtime-cell">2026-07-05 09:47</td><td class="rint-cell">3390</td>
+                  <td class="rtext-cell">Sofía Gómez</td><td class="rnum-cell">$145.20</td>
+                  <td><span class="rpill err">refunded</span></td>
+                </tr>
+                <tr>
+                  <td class="rpk-cell">1021</td><td class="rtime-cell">2026-07-04 22:15</td><td class="rint-cell">2264</td>
+                  <td class="rtext-cell">Nicolás Paz</td><td class="rnum-cell">$58.50</td>
+                  <td><span class="rpill ok">paid</span></td>
+                </tr>
+                <tr>
+                  <td class="rpk-cell">1020</td><td class="rtime-cell">2026-07-04 18:32</td><td class="rint-cell">991</td>
+                  <td class="rtext-cell">Camila Ruiz</td><td class="rnum-cell">$410.00</td>
+                  <td><span class="rpill ok">paid</span></td>
+                </tr>
+                <tr>
+                  <td class="rpk-cell">1019</td><td class="rtime-cell">2026-07-04 16:08</td><td class="rint-cell">5502</td>
+                  <td class="rtext-cell">Tomás Herrera</td><td class="rnum-cell">$76.30</td>
+                  <td><span class="rpill warn">pending</span></td>
+                </tr>
+                <tr>
+                  <td class="rpk-cell">1018</td><td class="rtime-cell">2026-07-04 10:55</td><td class="rint-cell">3765</td>
+                  <td class="rtext-cell">Valentina Cruz</td><td class="rnum-cell">$203.10</td>
+                  <td><span class="rpill ok">paid</span></td>
+                </tr>
+                <tr>
+                  <td class="rpk-cell">1017</td><td class="rtime-cell">2026-07-03 20:41</td><td class="rint-cell">1440</td>
+                  <td class="rtext-cell">Agustín Vega</td><td class="rnum-cell">$132.75</td>
+                  <td><span class="rpill ok">paid</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- add block slot -->
+          <button class="add-block">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg>
+            Agregar bloque — KPI · gráfico · resultado de query · texto
+          </button>
+
+        </div>
+      </div>
+
+      <!-- status bar -->
+      <div class="report-status">
+        <span class="seg"><span class="rpt-dot"></span> <b>shop_prod</b> conectado</span>
+        <span class="seg">reporte actualizado <span class="ms">9 ms</span></span>
+        <span class="seg"><b>4</b> bloques · <b>1</b> query</span>
+        <span class="seg">target <b>prod</b></span>
+        <span class="grow"></span>
+        <span class="seg">encrypted store · OS keychain</span>
+        <span class="seg">127.0.0.1 only</span>
+      </div>
+
+    </div><!-- /.content-panel -->
+
+  </section>
+</div>
+
+<script>
+  "use strict";
+
+  // theme toggle — flips data-theme, respecting current computed scheme
+  document.getElementById("theme").addEventListener("click", () => {
+    const root = document.documentElement;
+    const dark = getComputedStyle(root).getPropertyValue("color-scheme").trim().includes("dark");
+    root.setAttribute("data-theme", dark ? "light" : "dark");
+  });
+
+  // conversations sidebar toggle — collapsed by default, slides in/out
+  const app = document.querySelector(".app");
+  const sideToggle = document.getElementById("side-toggle");
+  sideToggle.addEventListener("click", () => {
+    const open = app.classList.toggle("side-open");
+    sideToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+
+  // workspace tabs (visual selection)
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", (e) => {
+      if (e.target.classList.contains("x")) { e.stopPropagation(); return; }
+      document.querySelectorAll(".tab.on").forEach((x) => x.classList.remove("on"));
+      tab.classList.add("on");
+    });
+  });
+
+  // sidebar report selection (visual)
+  document.querySelectorAll(".conv").forEach((c) => {
+    c.addEventListener("click", () => {
+      document.querySelectorAll(".conv.on").forEach((x) => x.classList.remove("on"));
+      c.classList.add("on");
+    });
+  });
+</script>
+
+<script>
+  "use strict";
+
+  // ---- report charts: revenue over time (area+line) + orders (bars) ----
+  const rDays    = ["Lun 29","Mar 30","Mié 01","Jue 02","Vie 03","Sáb 04","Dom 05"];
+  const rRevenue = [2140, 2680, 2320, 2980, 3510, 3180, 1610];
+  const rOrders  = [18, 22, 19, 24, 29, 21, 9];
+
+  (function drawRevenue() {
+    const ax0 = 42, ax1 = 548, ayTop = 18, ayBase = 160, max = 4000;
+    const xAt = (i) => ax0 + (ax1 - ax0) * (i / (rRevenue.length - 1));
+    const yAt = (v) => ayBase - (ayBase - ayTop) * (v / max);
+    let d = "", dots = "", xl = "";
+    rRevenue.forEach((v, i) => {
+      const x = xAt(i), y = yAt(v);
+      d += (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1) + " ";
+      dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8" fill="var(--bg)" stroke="var(--rpt-accent)" stroke-width="1.8"/>`;
+      xl += `<text class="rax" x="${x.toFixed(1)}" y="176" text-anchor="middle">${rDays[i].split(" ")[0]}</text>`;
+    });
+    document.getElementById("revLine").setAttribute("d", d.trim());
+    document.getElementById("revArea").setAttribute("d", d.trim() + ` L${xAt(rRevenue.length - 1).toFixed(1)} ${ayBase} L${ax0} ${ayBase} Z`);
+    document.getElementById("revDots").innerHTML = dots;
+    document.getElementById("revXLabels").innerHTML = xl;
+  })();
+
+  (function drawOrders() {
+    const ax0 = 42, ax1 = 548, ayTop = 18, ayBase = 160, max = 30;
+    const groupW = (ax1 - ax0) / rOrders.length;
+    const barW = 28;
+    let bh = "";
+    rOrders.forEach((v, i) => {
+      const gx = ax0 + i * groupW + groupW / 2;
+      const h = (ayBase - ayTop) * (v / max);
+      bh += `<rect x="${(gx - barW / 2).toFixed(1)}" y="${(ayBase - h).toFixed(1)}" width="${barW}" height="${h.toFixed(1)}" rx="3" fill="var(--rpt-accent)"/>`;
+      bh += `<text class="rbarlbl" x="${gx.toFixed(1)}" y="${(ayBase - h - 6).toFixed(1)}" text-anchor="middle">${v}</text>`;
+      bh += `<text class="rax" x="${gx.toFixed(1)}" y="176" text-anchor="middle">${rDays[i].split(" ")[0]}</text>`;
+    });
+    document.getElementById("ordBars").innerHTML = bh;
+  })();
+
+  // ---- export segmented control (snapshot / live) ----
+  document.querySelectorAll(".seg-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(".seg-btn.on").forEach((x) => x.classList.remove("on"));
+      btn.classList.add("on");
+    });
+  });
+</script>
+
+</body>
+</html>

@@ -1,6 +1,9 @@
 .bmad-loop/runs/
 .bmad-loop/cache/
 
+# Playwright MCP scratch
+.playwright-mcp/
+
 # Dependencies
 node_modules/
 
