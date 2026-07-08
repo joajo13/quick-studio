@@ -4,8 +4,13 @@
  * The two-Panel resizable layout: a launcher sidebar (buttons that open each of
  * the five Tab kinds) and a main area (Tab strip + active Tab body). Uses
  * `react-resizable-panels` — the primitive shadcn's `resizable` wraps — with a
- * draggable `PanelResizeHandle` so the Panels resize live (FR-24). Restore of
- * Panel sizes on launch is Epic 2; here the layout is Ephemeral.
+ * draggable `PanelResizeHandle` so the Panels resize live (FR-24). Panel-size
+ * restore-on-launch is Core-gated (Story 2.5): `App.tsx` gates this component's
+ * FIRST mount behind the initial `workspace.load` and passes the restored sizes
+ * in via `panelSizes` (read once as `defaultSize`, per `react-resizable-panels`);
+ * `onLayout` reports every subsequent drag back up for the debounced save. This
+ * component never touches `workspace.save`/`localStorage` itself — it is
+ * oblivious to run-mode, exactly like the rest of the UI ring.
  */
 
 import { useState } from "react";
@@ -107,6 +112,8 @@ export function Workspace({
   stopping,
   connectionIndicator,
   exposure,
+  panelSizes,
+  onLayout,
 }: {
   state: WorkspaceState;
   onOpen: (kind: TabKind) => void;
@@ -116,12 +123,17 @@ export function Workspace({
   stopping: boolean;
   connectionIndicator: React.ReactNode;
   exposure?: ExposureInfo;
+  /** `[rail size, main size]`, read once as each Panel's `defaultSize` at mount. */
+  panelSizes: ReadonlyArray<number>;
+  /** Fired by `PanelGroup` on every layout change (drag or programmatic). */
+  onLayout: (sizes: number[]) => void;
 }): React.JSX.Element {
   const activeTab =
     state.tabs.find((t) => t.id === state.activeTabId) ?? null;
 
-  // Settings surface open/closed lives in React memory only (Ephemeral — the
-  // story explicitly does NOT persist Settings open state; that is Story 2.5).
+  // Settings surface open/closed lives in React memory only — it is NOT part of
+  // the persisted Workspace snapshot (out of scope for Story 2.5's Panel-sizes +
+  // Tabs restore; see the spec's Block-If).
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   return (
@@ -146,8 +158,8 @@ export function Workspace({
 
       {exposure?.exposed ? <ExposureBanner exposure={exposure} /> : null}
 
-      <PanelGroup direction="horizontal" className="flex-1">
-        <Panel defaultSize={20} minSize={12} maxSize={40} className="bg-card">
+      <PanelGroup direction="horizontal" className="flex-1" onLayout={onLayout}>
+        <Panel defaultSize={panelSizes[0] ?? 20} minSize={12} maxSize={40} className="bg-card">
           <LauncherRail
             onOpen={onOpen}
             settingsOpen={settingsOpen}
@@ -157,7 +169,7 @@ export function Workspace({
 
         <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary data-[resize-handle-state=drag]:bg-primary" />
 
-        <Panel defaultSize={80} minSize={30}>
+        <Panel defaultSize={panelSizes[1] ?? 80} minSize={30}>
           {settingsOpen ? (
             <SettingsPanel onClose={() => setSettingsOpen(false)} />
           ) : (

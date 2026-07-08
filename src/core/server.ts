@@ -22,6 +22,7 @@ import type { DriverFactory } from "./driver.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
+import { createWorkspaceRegistry } from "./workspace-registry.ts";
 
 const TOKEN_HEADER = "x-qs-token";
 
@@ -183,6 +184,12 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // Ephemeral stays a hard no-write (its store open is a pure in-memory no-op).
   const connectionRegistry = createConnectionRegistry({ storeDeps: { mode } });
 
+  // Workspace-state registry (Story 2.5): the sole Workspace-store holder for
+  // `workspace.load`/`workspace.save`. Same lazy-open, mode-gated posture as
+  // `connectionRegistry` — Ephemeral stays a hard no-write (the store's open is a
+  // pure in-memory no-op, never touching the app dir).
+  const workspaceRegistry = createWorkspaceRegistry({ storeDeps: { mode } });
+
   const server = Bun.serve({
     hostname: bindHost,
     port,
@@ -198,6 +205,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         connect: () => connectionManager.connect(),
         // Manage-connections registry (lazily opens the store on first call).
         connections: connectionRegistry,
+        // Workspace-state registry (lazily opens the store on first call).
+        workspace: workspaceRegistry,
       };
 
       // --- Static UI assets ---------------------------------------------

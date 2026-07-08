@@ -71,7 +71,7 @@ development_status:
   2-2-encrypted-credential-store: done       # Story 2.2: Encrypted Credential Store at rest, key in OS keychain
   2-3-passphrase-fallback: done              # Story 2.3: Keychain-unavailable passphrase fallback
   2-4-manage-connections: done               # Story 2.4: Manage Connections (add, edit, remove)
-  2-5-persist-workspace-state: backlog          # Story 2.5: Persist and restore Workspace state
+  2-5-persist-workspace-state: done          # Story 2.5: Persist and restore Workspace state
   epic-2-retrospective: optional
 
   # Epic 3: Data & Schema Workspace

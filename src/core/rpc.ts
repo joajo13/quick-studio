@@ -17,6 +17,7 @@ import {
   type ShutdownResult,
 } from "../shared/contract.ts";
 import type { ConnectionRegistry, RegistryResult } from "./connection-registry.ts";
+import type { WorkspaceRegistry } from "./workspace-registry.ts";
 
 /**
  * Per-request capabilities threaded into every handler. `requestShutdown`
@@ -24,6 +25,8 @@ import type { ConnectionRegistry, RegistryResult } from "./connection-registry.t
  * see `server.ts`), so the RPC reply can flush before the socket closes.
  * `connect` opens (once) and introspects the Core-held database connection.
  * `connections` is the manage-connections registry (the sole store holder).
+ * `workspace` is the Workspace-state registry (Story 2.5): load/save the Panel
+ * sizes + open Tabs snapshot, mode-gated exactly like `connections`.
  */
 export type RpcContext = {
   readonly requestShutdown: () => void;
@@ -31,6 +34,8 @@ export type RpcContext = {
   readonly connect: () => Promise<ConnectResult>;
   /** Manage-connections registry: list/add/edit/remove over the credential store. */
   readonly connections: ConnectionRegistry;
+  /** Workspace-state registry: load/save the Panel-sizes + open-Tabs snapshot. */
+  readonly workspace: WorkspaceRegistry;
 };
 
 /**
@@ -142,6 +147,14 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     }
     return preformed(toReply(ctx.connections.remove({ id: p.id })));
   },
+  /**
+   * Workspace-state persistence (Story 2.5). No handler-level shape check here —
+   * unlike the connections handlers, ALL validation (including "is this even an
+   * object") lives in the registry (`workspace-registry.ts`) so there is exactly
+   * one place that names the offending field on a malformed snapshot.
+   */
+  "workspace.load": (_params, ctx): Preformed => preformed(toReply(ctx.workspace.load())),
+  "workspace.save": (params, ctx): Preformed => preformed(toReply(ctx.workspace.save(params))),
 };
 
 /**

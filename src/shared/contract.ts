@@ -325,6 +325,56 @@ export type RemoveConnectionResult = {
 };
 
 /* ------------------------------------------------------------------ *
+ * Workspace-state persistence contract (Story 2.5) — credential-free
+ * ------------------------------------------------------------------ */
+
+/**
+ * The five kinds of document Tab the Workspace can hold — the SINGLE source of
+ * truth (Core validation and the UI's `workspace-state.ts` both import this, so
+ * they can never drift). Order matches the launcher-rail order.
+ */
+export const WORKSPACE_TAB_KINDS = ["table", "query", "erd", "chat", "report"] as const;
+
+/** A Tab kind, derived from {@link WORKSPACE_TAB_KINDS} (not hand-duplicated). */
+export type WorkspaceTabKind = (typeof WORKSPACE_TAB_KINDS)[number];
+
+/** Version of the on-disk/wire {@link WorkspaceSnapshot} shape. */
+export const WORKSPACE_SNAPSHOT_VERSION = 1 as const;
+
+/** One persisted Tab: id, kind, and the human title shown in the Tab strip. */
+export type WorkspaceSnapshotTab = {
+  readonly id: number;
+  readonly kind: WorkspaceTabKind;
+  readonly title: string;
+};
+
+/**
+ * The persisted Workspace shape (FR-24 restore half, AR-9): Panel sizes + open
+ * Tabs + active Tab + the next-id counter. Deliberately credential-free and
+ * non-secret — never a connection url, row data, or query text.
+ */
+export type WorkspaceSnapshot = {
+  readonly version: 1;
+  readonly panelSizes: ReadonlyArray<number>;
+  readonly tabs: ReadonlyArray<WorkspaceSnapshotTab>;
+  readonly activeTabId: number | null;
+  readonly nextId: number;
+};
+
+/** Params for `workspace.save` — the snapshot to persist (or no-op in Ephemeral). */
+export type SaveWorkspaceParams = WorkspaceSnapshot;
+
+/** Result of `workspace.save`: `true` only when Persistent mode actually wrote. */
+export type SaveWorkspaceResult = {
+  readonly saved: boolean;
+};
+
+/** Result of `workspace.load`: `null` on first launch, Ephemeral mode, or any degrade. */
+export type LoadWorkspaceResult = {
+  readonly snapshot: WorkspaceSnapshot | null;
+};
+
+/* ------------------------------------------------------------------ *
  * RPC contract — request / reply / error envelope
  * ------------------------------------------------------------------ */
 

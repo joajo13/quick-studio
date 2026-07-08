@@ -5,11 +5,14 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import type { WorkspaceSnapshot } from "../../shared/contract.ts";
 import {
   activateTab,
   closeTab,
   emptyWorkspace,
   openTab,
+  restoreWorkspace,
+  toWorkspaceSnapshot,
   type WorkspaceState,
 } from "./workspace-state.ts";
 
@@ -141,5 +144,128 @@ describe("activateTab", () => {
   test("is a no-op when the id is already active", () => {
     const s = openMany("table", "query");
     expect(activateTab(s, 2)).toBe(s);
+  });
+});
+
+describe("restoreWorkspace", () => {
+  test("rebuilds tabs/activeTabId/nextId verbatim from a well-formed snapshot", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [25, 75],
+      tabs: [
+        { id: 1, kind: "table", title: "Table 1" },
+        { id: 2, kind: "query", title: "Query 2" },
+      ],
+      activeTabId: 2,
+      nextId: 3,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.tabs).toEqual([
+      { id: 1, kind: "table", title: "Table 1" },
+      { id: 2, kind: "query", title: "Query 2" },
+    ]);
+    expect(state.activeTabId).toBe(2);
+    expect(state.nextId).toBe(3);
+  });
+
+  test("an empty snapshot restores to an empty (but not necessarily identical) workspace", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [],
+      activeTabId: null,
+      nextId: 1,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.tabs).toEqual([]);
+    expect(state.activeTabId).toBeNull();
+    expect(state.nextId).toBe(1);
+  });
+
+  test("recomputes nextId when the stored value doesn't clear max(tab ids)+1", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [{ id: 5, kind: "table", title: "Table 5" }],
+      activeTabId: 5,
+      // Stale/malicious nextId that would collide with the existing tab id 5.
+      nextId: 1,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.nextId).toBe(6);
+    // The next openTab must never reuse an existing id.
+    const next = openTab(state, "query");
+    expect(next.tabs.some((t) => t.id === 5)).toBe(true);
+    expect(next.tabs.find((t) => t.kind === "query")?.id).toBe(6);
+  });
+
+  test("keeps a nextId that already clears max(tab ids)+1 untouched", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [{ id: 5, kind: "table", title: "Table 5" }],
+      activeTabId: 5,
+      nextId: 10,
+    };
+    expect(restoreWorkspace(snapshot).nextId).toBe(10);
+  });
+
+  test("a dangling activeTabId (not among the restored tabs) falls back to the first tab", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [
+        { id: 1, kind: "table", title: "Table 1" },
+        { id: 2, kind: "query", title: "Query 2" },
+      ],
+      activeTabId: 999,
+      nextId: 3,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.activeTabId).toBe(1);
+  });
+
+  test("a dangling activeTabId with no tabs at all falls back to null", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [],
+      activeTabId: 999,
+      nextId: 1,
+    };
+    expect(restoreWorkspace(snapshot).activeTabId).toBeNull();
+  });
+});
+
+describe("toWorkspaceSnapshot", () => {
+  test("captures tabs/activeTabId/nextId plus the supplied panelSizes", () => {
+    const state = openMany("table", "query");
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    expect(snapshot).toEqual({
+      version: 1,
+      panelSizes: [30, 70],
+      tabs: [
+        { id: 1, kind: "table", title: "Table 1" },
+        { id: 2, kind: "query", title: "Query 2" },
+      ],
+      activeTabId: 2,
+      nextId: 3,
+    });
+  });
+
+  test("round-trips through restoreWorkspace back to an equivalent WorkspaceState", () => {
+    let state: WorkspaceState = openMany("table", "query", "erd");
+    state = activateTab(state, 2);
+    const snapshot = toWorkspaceSnapshot(state, [25, 75]);
+    const restored = restoreWorkspace(snapshot);
+    expect(restored).toEqual(state);
+  });
+
+  test("does not mutate the input panelSizes array (defensive copy)", () => {
+    const state = openTab(emptyWorkspace(), "table");
+    const sizes = [20, 80];
+    const snapshot = toWorkspaceSnapshot(state, sizes);
+    expect(snapshot.panelSizes).not.toBe(sizes);
+    expect(snapshot.panelSizes).toEqual(sizes);
   });
 });

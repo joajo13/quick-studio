@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import type { ConnectResult, ConnectionSummary } from "../shared/contract.ts";
+import type { ConnectResult, ConnectionSummary, WorkspaceSnapshot } from "../shared/contract.ts";
 import type { ConnectionRegistry } from "./connection-registry.ts";
 import { dispatch, methodNames, type RpcContext } from "./rpc.ts";
+import type { WorkspaceRegistry } from "./workspace-registry.ts";
 
 /**
  * An in-memory fake registry so dispatch tests exercise the connections handlers
@@ -43,9 +44,35 @@ function fakeRegistry(): ConnectionRegistry {
 }
 
 /**
+ * A minimal in-memory fake workspace registry so dispatch tests exercise the
+ * `workspace.*` handlers without a real store. Reproduces the registry's
+ * error contract just enough for wiring assertions: a params object missing the
+ * `version`/`panelSizes`/`tabs`/`nextId` fields is `bad_request`; a valid-shaped
+ * snapshot is accepted and echoed back by a subsequent `load`.
+ */
+function fakeWorkspaceRegistry(): WorkspaceRegistry {
+  let stored: WorkspaceSnapshot | null = null;
+  return {
+    load: () => ({ ok: true, value: { snapshot: stored } }),
+    save: (params) => {
+      if (typeof params !== "object" || params === null) {
+        return { ok: false, code: "bad_request", message: "invalid snapshot" };
+      }
+      const p = params as Record<string, unknown>;
+      if (p.version !== 1 || !Array.isArray(p.panelSizes) || !Array.isArray(p.tabs) || typeof p.nextId !== "number") {
+        return { ok: false, code: "bad_request", message: "invalid snapshot shape" };
+      }
+      stored = params as WorkspaceSnapshot;
+      return { ok: true, value: { saved: true } };
+    },
+  };
+}
+
+/**
  * Stub context for dispatch tests. Counts `requestShutdown` calls and records the
  * `ConnectResult` a `connect` handler should resolve to (Story 1.3 threaded a
- * `connect` capability onto every context); Story 2.4 threads a `connections` registry.
+ * `connect` capability onto every context); Story 2.4 threads a `connections`
+ * registry; Story 2.5 threads a `workspace` registry.
  */
 function stubCtx(
   connectResult: ConnectResult = {
@@ -58,6 +85,7 @@ function stubCtx(
     calls: 0,
     connectCalls: 0,
     connections: fakeRegistry(),
+    workspace: fakeWorkspaceRegistry(),
     requestShutdown() {
       ctx.calls++;
     },
@@ -103,6 +131,8 @@ describe("rpc dispatch", () => {
       "connections.add",
       "connections.edit",
       "connections.remove",
+      "workspace.load",
+      "workspace.save",
     ]);
   });
 
@@ -213,5 +243,40 @@ describe("rpc dispatch — connections CRUD", () => {
     const reply = await dispatch({ method: "connections.remove", params: {} }, stubCtx());
     expect(reply.ok).toBe(false);
     if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+  });
+});
+
+describe("rpc dispatch — workspace.load / workspace.save", () => {
+  const SAMPLE_SNAPSHOT: WorkspaceSnapshot = {
+    version: 1,
+    panelSizes: [25, 75],
+    tabs: [{ id: 1, kind: "table", title: "Table 1" }],
+    activeTabId: 1,
+    nextId: 2,
+  };
+
+  test("workspace.load with no prior save resolves { snapshot: null }", async () => {
+    const reply = await dispatch({ method: "workspace.load" }, stubCtx());
+    expect(reply).toEqual({ ok: true, result: { snapshot: null } });
+  });
+
+  test("workspace.save with a valid snapshot returns saved:true and workspace.load echoes it back", async () => {
+    const ctx = stubCtx();
+    const saveReply = await dispatch(
+      { method: "workspace.save", params: SAMPLE_SNAPSHOT },
+      ctx,
+    );
+    expect(saveReply).toEqual({ ok: true, result: { saved: true } });
+
+    const loadReply = await dispatch({ method: "workspace.load" }, ctx);
+    expect(loadReply).toEqual({ ok: true, result: { snapshot: SAMPLE_SNAPSHOT } });
+  });
+
+  test("workspace.save with malformed params → bad_request (delegated entirely to the registry)", async () => {
+    for (const params of [undefined, {}, { version: 1 }, { version: 2, panelSizes: [], tabs: [], nextId: 1 }]) {
+      const reply = await dispatch({ method: "workspace.save", params }, stubCtx());
+      expect(reply.ok).toBe(false);
+      if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+    }
   });
 });

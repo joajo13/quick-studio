@@ -6,16 +6,32 @@
  * unit-testable with no DOM and no React harness (FR-23). React holds a single
  * {@link WorkspaceState} value and calls these helpers to derive the next one.
  *
- * Ephemeral: this module never persists anything. State lives in React memory
- * only and is gone at exit.
+ * This module itself still never persists anything — it stays a pure, DOM-free
+ * model. Persistence lives ONLY in Core (Story 2.5, `src/core/workspace-*.ts`);
+ * this module is the SERIALIZATION BRIDGE between the wire `WorkspaceSnapshot`
+ * and this reducer state: {@link restoreWorkspace} turns a loaded snapshot into
+ * a `WorkspaceState` (recomputing `nextId`/`activeTabId` defensively, since a
+ * snapshot may be stale or partially invalid even after Core's own validation),
+ * and {@link toWorkspaceSnapshot} is its inverse for `workspace.save`.
  *
  * Ids are a monotonically increasing counter carried in {@link WorkspaceState}
  * (`nextId`) rather than `Math.random`/`Date.now`, so every transition is
  * deterministic and tests are stable.
  */
 
-/** The five kinds of document Tab the Workspace can hold. */
-export type TabKind = "table" | "query" | "erd" | "chat" | "report";
+import {
+  WORKSPACE_SNAPSHOT_VERSION,
+  WORKSPACE_TAB_KINDS,
+  type WorkspaceSnapshot,
+  type WorkspaceTabKind,
+} from "../../shared/contract.ts";
+
+/**
+ * The five kinds of document Tab the Workspace can hold. Alias of the shared
+ * contract's {@link WorkspaceTabKind} — kept as `TabKind` so every existing UI
+ * importer keeps working unchanged; `contract.ts` is the single source of truth.
+ */
+export type TabKind = WorkspaceTabKind;
 
 /** A single open document Tab. Ids are unique within a {@link WorkspaceState}. */
 export type WorkspaceTab = {
@@ -44,7 +60,7 @@ const KIND_LABEL: Readonly<Record<TabKind, string>> = {
 };
 
 /** All Tab kinds in launcher order — handy for the sidebar rail. */
-export const TAB_KINDS: ReadonlyArray<TabKind> = ["table", "query", "erd", "chat", "report"];
+export const TAB_KINDS: ReadonlyArray<TabKind> = WORKSPACE_TAB_KINDS;
 
 /** An empty Workspace: no Tabs, nothing active, ids start at 1. */
 export function emptyWorkspace(): WorkspaceState {
@@ -114,4 +130,44 @@ export function activateTab(state: WorkspaceState, id: number): WorkspaceState {
     return state;
   }
   return { ...state, activeTabId: id };
+}
+
+/* ------------------------------------------------------------------ *
+ * Snapshot bridge (Story 2.5) — wire WorkspaceSnapshot <-> WorkspaceState
+ * ------------------------------------------------------------------ */
+
+/**
+ * Rebuild a {@link WorkspaceState} from a loaded {@link WorkspaceSnapshot}. Pure
+ * and total, and defensive even though Core already validated the snapshot on
+ * the way in: `nextId` is recomputed as `max(tab ids) + 1` whenever the stored
+ * value doesn't already clear that bar (so a future `openTab` can never mint a
+ * colliding id), and a dangling `activeTabId` (not among the restored tabs)
+ * falls back to the first tab, or `null` when there are no tabs at all.
+ */
+export function restoreWorkspace(snapshot: WorkspaceSnapshot): WorkspaceState {
+  const tabs: WorkspaceTab[] = snapshot.tabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title }));
+  const maxId = tabs.reduce((max, t) => Math.max(max, t.id), 0);
+  const nextId = Math.max(snapshot.nextId, maxId + 1);
+  const activeTabId = tabs.some((t) => t.id === snapshot.activeTabId)
+    ? snapshot.activeTabId
+    : (tabs[0]?.id ?? null);
+  return { tabs, activeTabId, nextId };
+}
+
+/**
+ * Derive the wire {@link WorkspaceSnapshot} to persist via `workspace.save`.
+ * Pure — `panelSizes` is supplied separately since it is React-held layout
+ * state, not part of {@link WorkspaceState}.
+ */
+export function toWorkspaceSnapshot(
+  state: WorkspaceState,
+  panelSizes: ReadonlyArray<number>,
+): WorkspaceSnapshot {
+  return {
+    version: WORKSPACE_SNAPSHOT_VERSION,
+    panelSizes: [...panelSizes],
+    tabs: state.tabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title })),
+    activeTabId: state.activeTabId,
+    nextId: state.nextId,
+  };
 }
