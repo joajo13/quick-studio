@@ -8,8 +8,10 @@
  * Panel sizes on launch is Epic 2; here the layout is Ephemeral.
  */
 
+import { useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { ExposureInfo } from "../../shared/contract.ts";
+import { SettingsPanel } from "../settings/SettingsPanel.tsx";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
 import { TAB_KINDS, type TabKind, type WorkspaceState } from "./workspace-state.ts";
@@ -23,9 +25,22 @@ const LAUNCH_LABEL: Readonly<Record<TabKind, string>> = {
   report: "New report",
 };
 
-function LauncherRail({ onOpen }: { onOpen: (kind: TabKind) => void }): React.JSX.Element {
+/**
+ * The launcher rail: new-Tab buttons at the top and a bottom-PINNED Settings
+ * toggle (a rail control, NOT a `TabKind`). The Settings control opens the
+ * Settings surface that hosts Connections management (Story 2.4).
+ */
+function LauncherRail({
+  onOpen,
+  settingsOpen,
+  onToggleSettings,
+}: {
+  onOpen: (kind: TabKind) => void;
+  settingsOpen: boolean;
+  onToggleSettings: () => void;
+}): React.JSX.Element {
   return (
-    <nav aria-label="Open a new tab" className="flex flex-col gap-1 p-2">
+    <nav aria-label="Open a new tab" className="flex h-full flex-col gap-1 p-2">
       <div className="px-2 pb-1 pt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
         Launcher
       </div>
@@ -39,6 +54,21 @@ function LauncherRail({ onOpen }: { onOpen: (kind: TabKind) => void }): React.JS
           {LAUNCH_LABEL[kind]}
         </button>
       ))}
+
+      {/* Bottom-pinned Settings control (mt-auto pushes it to the rail bottom). */}
+      <button
+        type="button"
+        aria-label="Settings"
+        aria-pressed={settingsOpen}
+        data-testid="settings-toggle"
+        onClick={onToggleSettings}
+        className={`mt-auto flex items-center gap-2 rounded-[var(--radius)] px-3 py-2 text-left font-mono text-xs lowercase transition-colors hover:bg-accent hover:text-accent-foreground ${
+          settingsOpen ? "bg-accent text-accent-foreground" : "text-muted-foreground"
+        }`}
+      >
+        <span aria-hidden>⚙</span>
+        <span>settings</span>
+      </button>
     </nav>
   );
 }
@@ -90,6 +120,10 @@ export function Workspace({
   const activeTab =
     state.tabs.find((t) => t.id === state.activeTabId) ?? null;
 
+  // Settings surface open/closed lives in React memory only (Ephemeral — the
+  // story explicitly does NOT persist Settings open state; that is Story 2.5).
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
       <header className="flex shrink-0 items-center justify-between border-b border-border bg-card px-4 py-2">
@@ -114,18 +148,26 @@ export function Workspace({
 
       <PanelGroup direction="horizontal" className="flex-1">
         <Panel defaultSize={20} minSize={12} maxSize={40} className="bg-card">
-          <LauncherRail onOpen={onOpen} />
+          <LauncherRail
+            onOpen={onOpen}
+            settingsOpen={settingsOpen}
+            onToggleSettings={() => setSettingsOpen((v) => !v)}
+          />
         </Panel>
 
         <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary data-[resize-handle-state=drag]:bg-primary" />
 
         <Panel defaultSize={80} minSize={30}>
-          <div className="flex h-full flex-col">
-            <TabBar state={state} onActivate={onActivate} onClose={onClose} />
-            <div className="min-h-0 flex-1 overflow-auto">
-              <TabContent tab={activeTab} />
+          {settingsOpen ? (
+            <SettingsPanel onClose={() => setSettingsOpen(false)} />
+          ) : (
+            <div className="flex h-full flex-col">
+              <TabBar state={state} onActivate={onActivate} onClose={onClose} />
+              <div className="min-h-0 flex-1 overflow-auto">
+                <TabContent tab={activeTab} />
+              </div>
             </div>
-          </div>
+          )}
         </Panel>
       </PanelGroup>
     </div>

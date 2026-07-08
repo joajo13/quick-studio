@@ -1,11 +1,51 @@
 import { describe, expect, test } from "bun:test";
-import type { ConnectResult } from "../shared/contract.ts";
+import type { ConnectResult, ConnectionSummary } from "../shared/contract.ts";
+import type { ConnectionRegistry } from "./connection-registry.ts";
 import { dispatch, methodNames, type RpcContext } from "./rpc.ts";
+
+/**
+ * An in-memory fake registry so dispatch tests exercise the connections handlers
+ * without a real store/keychain. Records connections by id and reproduces the
+ * registry's error contract (bad params → bad_request, unknown edit → not_found).
+ */
+function fakeRegistry(): ConnectionRegistry {
+  const byId = new Map<string, { name: string; url: string }>();
+  let counter = 0;
+  const summary = (id: string): ConnectionSummary => {
+    const rec = byId.get(id)!;
+    const u = new URL(rec.url);
+    return { id, name: rec.name, host: u.host, engine: u.protocol.replace(/:$/, "") };
+  };
+  return {
+    list: () => ({ ok: true, value: [...byId.keys()].map(summary) }),
+    add: (params) => {
+      if (params.name.trim().length === 0) {
+        return { ok: false, code: "bad_request", message: "name empty", detail: "field=name" };
+      }
+      const id = `id-${++counter}`;
+      byId.set(id, { name: params.name.trim(), url: params.url });
+      return { ok: true, value: summary(id) };
+    },
+    edit: (params) => {
+      const rec = byId.get(params.id);
+      if (rec === undefined) {
+        return { ok: false, code: "not_found", message: "unknown id" };
+      }
+      if (params.name !== undefined) rec.name = params.name;
+      if (params.url !== undefined) rec.url = params.url;
+      return { ok: true, value: summary(params.id) };
+    },
+    remove: (params) => {
+      byId.delete(params.id);
+      return { ok: true, value: { removed: true } };
+    },
+  };
+}
 
 /**
  * Stub context for dispatch tests. Counts `requestShutdown` calls and records the
  * `ConnectResult` a `connect` handler should resolve to (Story 1.3 threaded a
- * `connect` capability onto every context).
+ * `connect` capability onto every context); Story 2.4 threads a `connections` registry.
  */
 function stubCtx(
   connectResult: ConnectResult = {
@@ -17,6 +57,7 @@ function stubCtx(
   const ctx = {
     calls: 0,
     connectCalls: 0,
+    connections: fakeRegistry(),
     requestShutdown() {
       ctx.calls++;
     },
@@ -54,7 +95,15 @@ describe("rpc dispatch", () => {
   });
 
   test("methodNames lists only own registered methods", () => {
-    expect(methodNames()).toEqual(["health", "shutdown", "connect"]);
+    expect(methodNames()).toEqual([
+      "health",
+      "shutdown",
+      "connect",
+      "connections.list",
+      "connections.add",
+      "connections.edit",
+      "connections.remove",
+    ]);
   });
 
   test("shutdown returns {stopping:true} and calls ctx.requestShutdown exactly once", async () => {
@@ -91,5 +140,78 @@ describe("rpc dispatch", () => {
         message: "the database rejected the provided credentials",
       });
     }
+  });
+});
+
+describe("rpc dispatch — connections CRUD", () => {
+  test("connections.add with valid params returns an okReply carrying a credential-free summary", async () => {
+    const reply = await dispatch(
+      { method: "connections.add", params: { name: "prod", url: "postgres://u:sekret@h:5432/db" } },
+      stubCtx(),
+    );
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      const summary = reply.result as { id: string; name: string; host: string; engine: string };
+      expect(summary.name).toBe("prod");
+      expect(summary.host).toBe("h:5432");
+      expect(summary.engine).toBe("postgres");
+      // No credentials in the wire result.
+      expect(JSON.stringify(reply.result)).not.toContain("sekret");
+    }
+  });
+
+  test("connections.add with missing/ill-typed params → bad_request (shape check)", async () => {
+    for (const params of [undefined, {}, { name: "x" }, { url: "postgres://h/db" }, { name: 1, url: 2 }, [1, 2]]) {
+      const reply = await dispatch({ method: "connections.add", params }, stubCtx());
+      expect(reply.ok).toBe(false);
+      if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+    }
+  });
+
+  test("connections.add with an empty name → bad_request (registry semantic check)", async () => {
+    const reply = await dispatch(
+      { method: "connections.add", params: { name: "   ", url: "postgres://h/db" } },
+      stubCtx(),
+    );
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+  });
+
+  test("connections.list returns the current summaries", async () => {
+    const ctx = stubCtx();
+    await dispatch({ method: "connections.add", params: { name: "a", url: "postgres://h/a" } }, ctx);
+    const reply = await dispatch({ method: "connections.list" }, ctx);
+    expect(reply.ok).toBe(true);
+    if (reply.ok) expect((reply.result as unknown[]).length).toBe(1);
+  });
+
+  test("connections.edit on an unknown id → not_found", async () => {
+    const reply = await dispatch(
+      { method: "connections.edit", params: { id: "nope", name: "x" } },
+      stubCtx(),
+    );
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("not_found");
+  });
+
+  test("connections.edit without an id → bad_request", async () => {
+    const reply = await dispatch({ method: "connections.edit", params: { name: "x" } }, stubCtx());
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+  });
+
+  test("connections.remove is an okReply {removed:true}", async () => {
+    const reply = await dispatch(
+      { method: "connections.remove", params: { id: "whatever" } },
+      stubCtx(),
+    );
+    expect(reply.ok).toBe(true);
+    if (reply.ok) expect(reply.result).toEqual({ removed: true });
+  });
+
+  test("connections.remove without an id → bad_request", async () => {
+    const reply = await dispatch({ method: "connections.remove", params: {} }, stubCtx());
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
   });
 });

@@ -274,6 +274,57 @@ export type ConnectResult =
     };
 
 /* ------------------------------------------------------------------ *
+ * Manage-connections contract (Story 2.4) — credential-free by design
+ * ------------------------------------------------------------------ */
+
+/**
+ * A credential-free view of a saved Connection sent Core→UI. It carries ONLY the
+ * fields the UI is allowed to see: the id, the user-chosen `name`, and the `host`
+ * + `engine` DERIVED in Core from the (secret-bearing) url. It never carries the
+ * url, user, or password — the trust boundary is credential-flow-directional
+ * (credentials travel UI→Core on submit only). `engine` is the url protocol with
+ * the trailing colon stripped (e.g. `postgres`), `host` is `URL.host` (host[:port]).
+ */
+export type ConnectionSummary = {
+  readonly id: string;
+  readonly name: string;
+  readonly host: string;
+  readonly engine: string;
+};
+
+/** Params for `connections.add`. The url carries the credentials (UI→Core only). */
+export type AddConnectionParams = {
+  readonly name: string;
+  readonly url: string;
+};
+
+/**
+ * Params for `connections.edit`. Partial by design: a rename sends `name` only
+ * (Core keeps the stored url the UI never held); a repoint sends the new `url`.
+ */
+export type EditConnectionParams = {
+  readonly id: string;
+  readonly name?: string;
+  readonly url?: string;
+};
+
+/** Params for `connections.remove`. */
+export type RemoveConnectionParams = {
+  readonly id: string;
+};
+
+/** Result of `connections.list`: N credential-free summaries. */
+export type ListConnectionsResult = ReadonlyArray<ConnectionSummary>;
+
+/** Result of `connections.add`/`connections.edit`: the credential-free summary. */
+export type ConnectionMutationResult = ConnectionSummary;
+
+/** Result of `connections.remove`: idempotent success. */
+export type RemoveConnectionResult = {
+  readonly removed: true;
+};
+
+/* ------------------------------------------------------------------ *
  * RPC contract — request / reply / error envelope
  * ------------------------------------------------------------------ */
 

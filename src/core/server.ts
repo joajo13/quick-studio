@@ -17,6 +17,7 @@ import { errorReply } from "../shared/contract.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
 import { createConnectionManager } from "./connection.ts";
+import { createConnectionRegistry } from "./connection-registry.ts";
 import type { DriverFactory } from "./driver.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
@@ -176,6 +177,12 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     createDriver: options.createDriver,
   });
 
+  // Manage-connections registry (Story 2.4): the sole credential-store holder for
+  // the Settings surface. Constructed once and gated by the run mode — the store
+  // is NOT opened at boot; the registry opens it lazily on the first RPC call so
+  // Ephemeral stays a hard no-write (its store open is a pure in-memory no-op).
+  const connectionRegistry = createConnectionRegistry({ storeDeps: { mode } });
+
   const server = Bun.serve({
     hostname: bindHost,
     port,
@@ -189,6 +196,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         requestShutdown: () => setTimeout(onShutdownRequested, 0),
         // Idempotent open+introspect; a live connection is reused across calls.
         connect: () => connectionManager.connect(),
+        // Manage-connections registry (lazily opens the store on first call).
+        connections: connectionRegistry,
       };
 
       // --- Static UI assets ---------------------------------------------
@@ -262,9 +271,15 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         if (reply.ok) {
           return jsonResponse(reply, 200);
         }
-        // Map error codes to HTTP status: unknown_method/bad_request → 400,
-        // internal_error → 500 (unauthorized/forbidden_origin handled above).
-        const status = reply.error.code === "internal_error" ? 500 : 400;
+        // Map error codes to HTTP status: internal_error → 500, not_found → 404,
+        // everything else (unknown_method/bad_request/…) → 400 (unauthorized/
+        // forbidden_origin/method_not_allowed handled above).
+        const status =
+          reply.error.code === "internal_error"
+            ? 500
+            : reply.error.code === "not_found"
+              ? 404
+              : 400;
         return jsonResponse(reply, status);
       }
 
