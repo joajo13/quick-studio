@@ -17,6 +17,7 @@ import {
   assembleSchema,
   toDriverConnectionError,
   type Driver,
+  type DriverQueryResult,
   type IntrospectedColumn,
 } from "./driver.ts";
 
@@ -28,6 +29,18 @@ type MysqlColumnRow = {
   readonly data_type: string;
   readonly is_nullable: string;
 };
+
+/** One row of the MySQL primary-key introspection query. */
+type MysqlPkRow = {
+  readonly table_schema: string;
+  readonly table_name: string;
+  readonly column_name: string;
+};
+
+/** Set-membership key for a PK column: `schema table column`. */
+function pkKey(schema: string, table: string, column: string): string {
+  return `${schema} ${table} ${column}`;
+}
 
 /**
  * Bound on graceful teardown (ms). Mirrors the postgres adapter's
@@ -96,6 +109,25 @@ export function createMysqlDriver(url: string): Driver {
         params,
       );
 
+      // Primary-key columns from KEY_COLUMN_USAGE (`constraint_name = 'PRIMARY'` is
+      // MySQL's fixed PK constraint name), scoped the same way as the columns query.
+      const pkWhere =
+        database !== null
+          ? "table_schema = ?"
+          : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
+      const pkParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
+      const [pkRows] = await connection.query(
+        `SELECT table_schema, table_name, column_name
+         FROM information_schema.key_column_usage
+         WHERE constraint_name = 'PRIMARY' AND ${pkWhere}`,
+        pkParams,
+      );
+      const pkSet = new Set(
+        (pkRows as unknown as readonly MysqlPkRow[]).map((r) =>
+          pkKey(r.table_schema, r.table_name, r.column_name),
+        ),
+      );
+
       const columns: IntrospectedColumn[] = (rows as unknown as readonly MysqlColumnRow[]).map(
         (r) => ({
           schema: r.table_schema,
@@ -103,9 +135,33 @@ export function createMysqlDriver(url: string): Driver {
           column: r.column_name,
           dataType: r.data_type,
           nullable: r.is_nullable === "YES",
+          isPrimaryKey: pkSet.has(pkKey(r.table_schema, r.table_name, r.column_name)),
         }),
       );
       return assembleSchema("mysql", columns);
+    },
+
+    async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {
+      if (connection === null) {
+        throw new Error("query called before connect");
+      }
+      // `rowsAsArray` returns rows as position-aligned arrays; `fields` carry the
+      // ordered column names. The browse SELECT passes no params (only quoted
+      // identifiers + integer literals); positional `?` binds are forwarded when a
+      // caller supplies them — mysql2's placeholder syntax never leaks above here.
+      const [rows, fields] = await connection.query(
+        { sql: text, rowsAsArray: true },
+        params !== undefined ? [...params] : [],
+      );
+      const columns = ((fields as ReadonlyArray<{ name: string }> | undefined) ?? []).map((f) => ({
+        name: f.name,
+      }));
+      return { columns, rows: rows as unknown as ReadonlyArray<ReadonlyArray<unknown>> };
+    },
+
+    quoteIdent(ident: string): string {
+      // MySQL back-tick-quotes identifiers; an embedded backtick is escaped by doubling.
+      return `\`${ident.replace(/`/g, "``")}\``;
     },
 
     async close(): Promise<void> {

@@ -33,12 +33,29 @@ import {
  */
 export type TabKind = WorkspaceTabKind;
 
+/**
+ * A reference to a live table bound to a `table` Tab (Story 3.2). It carries ONLY
+ * the schema-qualified name needed to (re)request `table.rows`; it is deliberately
+ * NOT part of the persisted snapshot (the open-table binding does not survive an app
+ * restart — see the story's Block-If), so `toWorkspaceSnapshot` drops it.
+ */
+export type TableRef = {
+  readonly schema: string;
+  readonly name: string;
+};
+
 /** A single open document Tab. Ids are unique within a {@link WorkspaceState}. */
 export type WorkspaceTab = {
   readonly id: number;
   readonly kind: TabKind;
   /** Human label shown in the Tab strip (e.g. "table 1"). */
   readonly title: string;
+  /**
+   * For a `table` Tab: the bound live table, or absent when the Tab is unbound
+   * (a fresh "New table" or a restored table Tab) — the UI shows a "select a
+   * table" empty state until a tree table is activated into it.
+   */
+  readonly table?: TableRef;
 };
 
 /** The complete in-memory Workspace Tab state. Immutable — helpers return new values. */
@@ -130,6 +147,31 @@ export function activateTab(state: WorkspaceState, id: number): WorkspaceState {
     return state;
   }
   return { ...state, activeTabId: id };
+}
+
+/**
+ * Bind a live table to the active data Tab (Story 3.2). If the active Tab is a
+ * `table` Tab, it is REUSED — rebound to `ref` and renamed to the table name (so
+ * clicking table after table in the tree reuses one grid Tab). Otherwise a new,
+ * active `table` Tab is opened for it. The Tab title is the table name verbatim
+ * (AR-19 — never re-cased). Pure — returns a new state.
+ */
+export function bindTableToActiveTab(state: WorkspaceState, ref: TableRef): WorkspaceState {
+  const active = state.tabs.find((t) => t.id === state.activeTabId) ?? null;
+  const title = ref.name;
+  if (active !== null && active.kind === "table") {
+    const tabs = state.tabs.map((t) =>
+      t.id === active.id ? { ...t, table: ref, title } : t,
+    );
+    return { ...state, tabs };
+  }
+  const id = state.nextId;
+  const tab: WorkspaceTab = { id, kind: "table", title, table: ref };
+  return {
+    tabs: [...state.tabs, tab],
+    activeTabId: id,
+    nextId: id + 1,
+  };
 }
 
 /* ------------------------------------------------------------------ *

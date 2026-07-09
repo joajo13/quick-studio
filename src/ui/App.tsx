@@ -16,7 +16,7 @@
  * every `workspace`/`panelSizes` change so a drag doesn't spray writes.
  */
 
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
   ExposureInfo,
   HealthResult,
@@ -24,6 +24,7 @@ import type {
   RpcErrorEnvelope,
   RpcReply,
   SaveWorkspaceResult,
+  SchemaTableInfo,
   ShutdownResult,
   WorkspaceSnapshot,
 } from "../shared/contract.ts";
@@ -31,11 +32,13 @@ import { rpc } from "./rpc/client.ts";
 import { Workspace } from "./workspace/Workspace.tsx";
 import {
   activateTab,
+  bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
   openTab,
   restoreWorkspace,
   toWorkspaceSnapshot,
+  type TableRef,
   type TabKind,
   type WorkspaceState,
 } from "./workspace/workspace-state.ts";
@@ -61,6 +64,7 @@ type WorkspaceAction =
   | { type: "open"; kind: TabKind }
   | { type: "close"; id: number }
   | { type: "activate"; id: number }
+  | { type: "bindTable"; ref: TableRef }
   | { type: "restore"; snapshot: WorkspaceSnapshot };
 
 function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
@@ -71,6 +75,8 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       return closeTab(state, action.id);
     case "activate":
       return activateTab(state, action.id);
+    case "bindTable":
+      return bindTableToActiveTab(state, action.ref);
     case "restore":
       return restoreWorkspace(action.snapshot);
   }
@@ -209,6 +215,18 @@ export function App(): React.JSX.Element {
   const lastPersistedRef = useRef<string | null>(null);
   const [status, setStatus] = useState<Status>({ phase: "loading" });
   const [stopping, setStopping] = useState(false);
+  // The live introspected tables (from the schema tree's `connect`), kept so the
+  // grid of the active table tab can look up its PK columns (for the key icon).
+  const [schemaTables, setSchemaTables] = useState<ReadonlyArray<SchemaTableInfo>>([]);
+
+  // PK column names of the active table tab's bound table, or empty otherwise.
+  const primaryKeys = useMemo<ReadonlyArray<string>>(() => {
+    const active = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? null;
+    if (active === null || active.kind !== "table" || active.table === undefined) return [];
+    const ref = active.table;
+    const match = schemaTables.find((t) => t.schema === ref.schema && t.name === ref.name);
+    return match?.primaryKey ?? [];
+  }, [workspace, schemaTables]);
 
   useEffect(() => {
     let alive = true;
@@ -306,6 +324,11 @@ export function App(): React.JSX.Element {
         onOpen={(kind) => dispatch({ type: "open", kind })}
         onActivate={(id) => dispatch({ type: "activate", id })}
         onClose={(id) => dispatch({ type: "close", id })}
+        onActivateTable={(table) =>
+          dispatch({ type: "bindTable", ref: { schema: table.schema, name: table.name } })
+        }
+        onSchemaLoaded={setSchemaTables}
+        primaryKeys={primaryKeys}
         onStop={onStop}
         stopping={stopping}
         connectionIndicator={<ConnectionIndicator status={status} />}

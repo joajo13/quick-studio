@@ -229,11 +229,15 @@ export type SchemaColumnInfo = {
  * One table (or view) of the introspected schema. `schema` is the owning
  * namespace/database as the engine reports it; `name` and `columns` mirror the
  * live database verbatim, ordered as introspected (schema/table/ordinal).
+ * `primaryKey` lists the primary-key column names in column order (empty when
+ * the table has none) — the deterministic browse ORDER-BY key and the source of
+ * the grid's PK key-icon (Story 3.2). It is the ONLY constraint info introspected.
  */
 export type SchemaTableInfo = {
   readonly schema: string;
   readonly name: string;
   readonly columns: ReadonlyArray<SchemaColumnInfo>;
+  readonly primaryKey: ReadonlyArray<string>;
 };
 
 /**
@@ -272,6 +276,38 @@ export type ConnectResult =
       readonly failure: ConnectionFailureKind;
       readonly message: string;
     };
+
+/* ------------------------------------------------------------------ *
+ * Browse-rows contract (Story 3.2) — Core-paginated, read-only SELECT
+ * ------------------------------------------------------------------ */
+
+/**
+ * Params for `table.rows`. `table` is required; `schema` disambiguates a table
+ * name that exists in more than one schema (omit it when the name is unique).
+ * `page` is 1-based; `pageSize` is the requested rows-per-page (Core clamps it to
+ * `MAX_PAGE_SIZE` and defaults it when absent). No user value is ever spliced into
+ * SQL — identifiers are schema-validated + engine-quoted and LIMIT/OFFSET are
+ * Core-computed integer literals.
+ */
+export type TableRowsRequest = {
+  readonly schema?: string;
+  readonly table: string;
+  readonly page?: number;
+  readonly pageSize?: number;
+};
+
+/**
+ * Result of `table.rows`: exactly ONE page of the table as {@link FrozenData}
+ * (columns always present, even for an empty page), the effective `page` and
+ * `pageSize` (the latter reflecting any clamp to `MAX_PAGE_SIZE`), and the table's
+ * `total` row count for the pager. The whole result set is never shipped.
+ */
+export type TableRowsResult = {
+  readonly data: FrozenData;
+  readonly page: number;
+  readonly pageSize: number;
+  readonly total: number;
+};
 
 /* ------------------------------------------------------------------ *
  * Manage-connections contract (Story 2.4) — credential-free by design

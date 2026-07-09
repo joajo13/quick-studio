@@ -18,6 +18,7 @@ const SAMPLE_SCHEMA: DatabaseSchema = {
       schema: "public",
       name: "users",
       columns: [{ name: "id", dataType: "integer", nullable: false }],
+      primaryKey: ["id"],
     },
   ],
 };
@@ -39,6 +40,12 @@ function fakeDriver(behavior: {
     async listSchema() {
       counts.listSchema++;
       return behavior.schema ?? SAMPLE_SCHEMA;
+    },
+    async query() {
+      return { columns: [], rows: [] };
+    },
+    quoteIdent(ident: string) {
+      return `"${ident}"`;
     },
     async close() {
       counts.close++;
@@ -144,6 +151,12 @@ describe("connection manager", () => {
         async listSchema() {
           return SAMPLE_SCHEMA;
         },
+        async query() {
+          return { columns: [], rows: [] };
+        },
+        quoteIdent(ident: string) {
+          return `"${ident}"`;
+        },
         async close() {},
       };
     };
@@ -175,6 +188,12 @@ describe("connection manager", () => {
       async connect() {},
       async listSchema(): Promise<DatabaseSchema> {
         throw new Error("permission denied for information_schema");
+      },
+      async query() {
+        return { columns: [], rows: [] };
+      },
+      quoteIdent(ident: string) {
+        return `"${ident}"`;
       },
       async close() {
         counts.close++;
@@ -222,6 +241,12 @@ describe("connection manager", () => {
       async connect() {},
       async listSchema() {
         return SAMPLE_SCHEMA;
+      },
+      async query() {
+        return { columns: [], rows: [] };
+      },
+      quoteIdent(ident: string) {
+        return `"${ident}"`;
       },
       async close() {
         throw new Error("socket wedged");

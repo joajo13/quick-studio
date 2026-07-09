@@ -15,6 +15,7 @@ import {
   type RpcReply,
   type RpcRequest,
   type ShutdownResult,
+  type TableRowsResult,
 } from "../shared/contract.ts";
 import type { ConnectionRegistry, RegistryResult } from "./connection-registry.ts";
 import type { WorkspaceRegistry } from "./workspace-registry.ts";
@@ -36,6 +37,14 @@ export type RpcContext = {
   readonly connections: ConnectionRegistry;
   /** Workspace-state registry: load/save the Panel-sizes + open-Tabs snapshot. */
   readonly workspace: WorkspaceRegistry;
+  /**
+   * Browse a table's rows (Story 3.2): validate the request against the live
+   * schema, compose the Core-owned read-only SELECT/COUNT, and return exactly one
+   * page as {@link TableRowsResult}. Returns an ALREADY-formed {@link RpcReply} so
+   * it can signal `bad_request`/`not_found` (bad params, unknown table) itself; a
+   * driver/connection failure rejects → `internal_error` at dispatch.
+   */
+  readonly tableRows: (params: unknown) => Promise<RpcReply<TableRowsResult>>;
 };
 
 /**
@@ -155,6 +164,13 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
    */
   "workspace.load": (_params, ctx): Preformed => preformed(toReply(ctx.workspace.load())),
   "workspace.save": (params, ctx): Preformed => preformed(toReply(ctx.workspace.save(params))),
+  /**
+   * Browse rows (Story 3.2). The capability itself validates against the live
+   * schema and composes the read-only SELECT, returning a fully-formed reply
+   * (`bad_request`/`not_found` on bad params/unknown table); we tag it `preformed`.
+   * A driver/connection throw propagates → `internal_error` (engine-neutral).
+   */
+  "table.rows": async (params, ctx): Promise<Preformed> => preformed(await ctx.tableRows(params)),
 };
 
 /**

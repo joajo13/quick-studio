@@ -1,16 +1,34 @@
 /**
  * quick-studio UI (Ring 2) — TabContent.
  *
- * Renders the body of the active Tab as a labelled shell PLACEHOLDER per kind.
- * No real data: table rows (Epic 3), ERD rendering (Epic 4), chat/report
- * (Epic 5/6) are out of scope. When no Tab is active it renders the empty state.
+ * Renders the body of the active Tab. A bound `table` Tab (Story 3.2) fetches one
+ * page via `table.rows`, manages page state, and renders the {@link DataGrid} plus
+ * a Prev/Next pager and a "rows X–Y of N" summary — one table shown at a time. An
+ * unbound `table` Tab shows a "select a table" empty state. The other kinds (query
+ * / erd / chat / report) remain labelled shell placeholders for later epics.
  */
 
-import type { TabKind, WorkspaceTab } from "./workspace-state.ts";
+import { useEffect, useState } from "react";
+import type { TableRowsResult } from "../../shared/contract.ts";
+import { DataGrid } from "../data/DataGrid.tsx";
+import {
+  applyPage,
+  canNext,
+  canPrev,
+  createDataGridState,
+  nextPage,
+  prevPage,
+  rowRangeSummary,
+  selectRow,
+  type DataGridState,
+} from "../data/data-grid-state.ts";
+import { rpc } from "../rpc/client.ts";
+import { envelopeText } from "../rpc/envelope-text.ts";
+import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
 
-/** Short human blurb per Tab kind for the placeholder body. */
+/** Short human blurb per Tab kind for the (non-table) placeholder body. */
 const KIND_BLURB: Readonly<Record<TabKind, string>> = {
-  table: "Browse rows and columns of a table. (Data lands in Epic 3.)",
+  table: "Browse rows and columns of a table.",
   query: "Compose and run SQL against the connection. (Epic 3.)",
   erd: "Visualize the schema as an entity-relationship diagram. (Epic 4.)",
   chat: "Ask questions about your data in natural language. (Epic 5.)",
@@ -29,9 +47,163 @@ function EmptyState(): React.JSX.Element {
   );
 }
 
-export function TabContent({ tab }: { tab: WorkspaceTab | null }): React.JSX.Element {
+/** A bound table Tab: fetches + paginates `table.rows` and renders the grid + pager. */
+function TableTabView({
+  table,
+  primaryKeys,
+}: {
+  table: TableRef;
+  primaryKeys: ReadonlyArray<string>;
+}): React.JSX.Element {
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<TableRowsResult["data"] | null>(null);
+  const [grid, setGrid] = useState<DataGridState>(() => createDataGridState());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  // Bumped by the error banner's "retry" so the fetch effect re-fires for the
+  // CURRENT page — a failed page-N fetch would otherwise leave the pager frozen
+  // (Next is a no-op when it targets the already-set page) with no in-tab recovery.
+  const [reloadNonce, setReloadNonce] = useState(0);
+
+  // NOTE: per-table state (page/data/grid/error/loading) is reset by REMOUNTING —
+  // the parent keys this component by the bound table identity, so a table switch
+  // gives fresh state and fires exactly one fetch (no stale error/pager, no
+  // redundant fetch with the previous page). See `TabContent`'s `key` below.
+
+  // Fetch the requested page whenever the page changes (the table is fixed for the
+  // lifetime of this mount — a table switch remounts fresh instead).
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    void rpc<TableRowsResult>("table.rows", { schema: table.schema, table: table.name, page }).then((reply) => {
+      if (!alive) return;
+      if (!reply.ok) {
+        setError(envelopeText(reply.error));
+        setData(null);
+      } else {
+        setError(null);
+        setData(reply.result.data);
+        setGrid((g) =>
+          applyPage(g, {
+            page: reply.result.page,
+            pageSize: reply.result.pageSize,
+            total: reply.result.total,
+            rowCount: reply.result.data.rows.length,
+          }),
+        );
+      }
+      setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [table.schema, table.name, page, reloadNonce]);
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Result bar: table name + pager + summary (mono, terse). */}
+      <div
+        className="flex shrink-0 items-center gap-3 border-b border-[var(--border)] bg-[var(--card)] px-3 py-1.5"
+        style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
+      >
+        <span className="text-[var(--foreground)]">
+          {table.schema}.{table.name}
+        </span>
+        <span className="ml-auto lowercase text-[var(--muted-foreground)]">
+          {loading ? "loading…" : rowRangeSummary(grid)}
+        </span>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={!canPrev(grid) || loading || error !== null}
+            onClick={() => setPage(prevPage(grid))}
+            className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            prev
+          </button>
+          <button
+            type="button"
+            disabled={!canNext(grid) || loading || error !== null}
+            onClick={() => setPage(nextPage(grid))}
+            className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            next
+          </button>
+        </div>
+      </div>
+
+      {error !== null ? (
+        <div className="flex items-center gap-3 border-b border-red-700 bg-red-950/40 px-3 py-2">
+          <p role="alert" className="font-mono text-xs lowercase text-red-400">
+            {error}
+          </p>
+          <button
+            type="button"
+            disabled={loading}
+            onClick={() => setReloadNonce((n) => n + 1)}
+            className="ml-auto rounded-[var(--radius)] border border-red-700 px-2 py-0.5 font-mono text-xs lowercase text-red-300 transition-colors hover:bg-red-900/40 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            retry
+          </button>
+        </div>
+      ) : null}
+
+      {data !== null ? (
+        <DataGrid
+          data={data}
+          primaryKeys={primaryKeys}
+          selectedRow={grid.selectedRow}
+          onSelectRow={(index) => setGrid((g) => selectRow(g, index))}
+        />
+      ) : (
+        <div
+          className="flex min-h-0 flex-1 items-center justify-center lowercase text-[var(--muted-foreground)]"
+          style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
+        >
+          {loading ? "loading…" : error !== null ? "could not load rows" : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** The unbound table Tab prompt (no table selected yet). */
+function SelectTablePrompt(): React.JSX.Element {
+  return (
+    <div
+      className="flex h-full flex-col items-center justify-center gap-2 p-8 text-center lowercase text-[var(--muted-foreground)]"
+      style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
+    >
+      <div>select a table</div>
+      <p className="max-w-sm text-[11px]">pick a table from the schema tree on the left to browse its rows.</p>
+    </div>
+  );
+}
+
+export function TabContent({
+  tab,
+  primaryKeys,
+}: {
+  tab: WorkspaceTab | null;
+  /** PK column names of the active table tab's bound table (for the grid key icon). */
+  primaryKeys?: ReadonlyArray<string>;
+}): React.JSX.Element {
   if (tab === null) {
     return <EmptyState />;
+  }
+
+  if (tab.kind === "table") {
+    return tab.table !== undefined ? (
+      // Key by the bound table identity so a table switch REMOUNTS with fresh
+      // per-table state (page/data/grid/error) and fires a single fetch.
+      <TableTabView
+        key={`${tab.table.schema}.${tab.table.name}`}
+        table={tab.table}
+        primaryKeys={primaryKeys ?? []}
+      />
+    ) : (
+      <SelectTablePrompt />
+    );
   }
 
   return (

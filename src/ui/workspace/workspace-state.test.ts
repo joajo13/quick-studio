@@ -8,6 +8,7 @@ import { describe, expect, test } from "bun:test";
 import type { WorkspaceSnapshot } from "../../shared/contract.ts";
 import {
   activateTab,
+  bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
   openTab,
@@ -267,5 +268,53 @@ describe("toWorkspaceSnapshot", () => {
     const snapshot = toWorkspaceSnapshot(state, sizes);
     expect(snapshot.panelSizes).not.toBe(sizes);
     expect(snapshot.panelSizes).toEqual(sizes);
+  });
+});
+
+describe("bindTableToActiveTab (Story 3.2)", () => {
+  const REF = { schema: "public", name: "orders" };
+
+  test("opens a new active table tab when no tab is active", () => {
+    const s = bindTableToActiveTab(emptyWorkspace(), REF);
+    expect(s.tabs).toHaveLength(1);
+    expect(s.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders", table: REF });
+    expect(s.activeTabId).toBe(1);
+    expect(s.nextId).toBe(2);
+  });
+
+  test("reuses the active table tab: rebinds ref + renames to the table name", () => {
+    let s = openTab(emptyWorkspace(), "table"); // "Table 1", active, unbound
+    s = bindTableToActiveTab(s, REF);
+    expect(s.tabs).toHaveLength(1); // reused, not appended
+    expect(s.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders", table: REF });
+    // Rebind to another table reuses the same tab and renames again.
+    const REF2 = { schema: "public", name: "users" };
+    s = bindTableToActiveTab(s, REF2);
+    expect(s.tabs).toHaveLength(1);
+    expect(s.tabs[0]?.title).toBe("users");
+    expect(s.tabs[0]?.table).toEqual(REF2);
+  });
+
+  test("opens a new table tab when the active tab is a non-table kind", () => {
+    let s = openTab(emptyWorkspace(), "query"); // active is a query tab
+    s = bindTableToActiveTab(s, REF);
+    expect(s.tabs).toHaveLength(2);
+    expect(s.tabs[1]).toEqual({ id: 2, kind: "table", title: "orders", table: REF });
+    expect(s.activeTabId).toBe(2);
+  });
+
+  test("does not mutate the input state (immutability)", () => {
+    const before = openTab(emptyWorkspace(), "table");
+    const snapshotBefore = JSON.stringify(before);
+    bindTableToActiveTab(before, REF);
+    expect(JSON.stringify(before)).toBe(snapshotBefore);
+  });
+
+  test("the table binding is NOT persisted in a snapshot (drops on restore)", () => {
+    const s = bindTableToActiveTab(emptyWorkspace(), REF);
+    const snap = toWorkspaceSnapshot(s, [20, 80]);
+    expect(snap.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders" });
+    const restored = restoreWorkspace(snap);
+    expect(restored.tabs[0]?.table).toBeUndefined();
   });
 });

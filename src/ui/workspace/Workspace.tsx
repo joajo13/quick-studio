@@ -15,7 +15,8 @@
 
 import { useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import type { ExposureInfo } from "../../shared/contract.ts";
+import type { ExposureInfo, SchemaTableInfo } from "../../shared/contract.ts";
+import { SchemaTree } from "../schema/SchemaTree.tsx";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
@@ -108,6 +109,9 @@ export function Workspace({
   onOpen,
   onActivate,
   onClose,
+  onActivateTable,
+  onSchemaLoaded,
+  primaryKeys,
   onStop,
   stopping,
   connectionIndicator,
@@ -119,6 +123,12 @@ export function Workspace({
   onOpen: (kind: TabKind) => void;
   onActivate: (id: number) => void;
   onClose: (id: number) => void;
+  /** Route a schema-tree table activation into the workspace reducer (Story 3.2). */
+  onActivateTable: (table: SchemaTableInfo) => void;
+  /** Fired once when the schema tree resolves the live schema. */
+  onSchemaLoaded: (tables: ReadonlyArray<SchemaTableInfo>) => void;
+  /** PK column names of the active table tab's bound table (grid key-icon). */
+  primaryKeys: ReadonlyArray<string>;
   onStop: () => void;
   stopping: boolean;
   connectionIndicator: React.ReactNode;
@@ -130,6 +140,8 @@ export function Workspace({
 }): React.JSX.Element {
   const activeTab =
     state.tabs.find((t) => t.id === state.activeTabId) ?? null;
+  const activeTable =
+    activeTab !== null && activeTab.kind === "table" ? (activeTab.table ?? null) : null;
 
   // Settings surface open/closed lives in React memory only — it is NOT part of
   // the persisted Workspace snapshot (out of scope for Story 2.5's Panel-sizes +
@@ -160,11 +172,23 @@ export function Workspace({
 
       <PanelGroup direction="horizontal" className="flex-1" onLayout={onLayout}>
         <Panel defaultSize={panelSizes[0] ?? 20} minSize={12} maxSize={40} className="bg-card">
-          <LauncherRail
-            onOpen={onOpen}
-            settingsOpen={settingsOpen}
-            onToggleSettings={() => setSettingsOpen((v) => !v)}
-          />
+          {/* Left region: fixed launcher rail + the resizable schema tree. */}
+          <div className="flex h-full">
+            <div className="shrink-0" style={{ width: "52px" }}>
+              <LauncherRail
+                onOpen={onOpen}
+                settingsOpen={settingsOpen}
+                onToggleSettings={() => setSettingsOpen((v) => !v)}
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <SchemaTree
+                activeTable={activeTable}
+                onActivate={onActivateTable}
+                onSchemaLoaded={onSchemaLoaded}
+              />
+            </div>
+          </div>
         </Panel>
 
         <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary data-[resize-handle-state=drag]:bg-primary" />
@@ -176,7 +200,7 @@ export function Workspace({
             <div className="flex h-full flex-col">
               <TabBar state={state} onActivate={onActivate} onClose={onClose} />
               <div className="min-h-0 flex-1 overflow-auto">
-                <TabContent tab={activeTab} />
+                <TabContent tab={activeTab} primaryKeys={primaryKeys} />
               </div>
             </div>
           )}

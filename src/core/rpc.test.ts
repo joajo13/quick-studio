@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { ConnectResult, ConnectionSummary, WorkspaceSnapshot } from "../shared/contract.ts";
+import type {
+  ConnectResult,
+  ConnectionSummary,
+  RpcReply,
+  TableRowsResult,
+  WorkspaceSnapshot,
+} from "../shared/contract.ts";
 import type { ConnectionRegistry } from "./connection-registry.ts";
 import { dispatch, methodNames, type RpcContext } from "./rpc.ts";
 import type { WorkspaceRegistry } from "./workspace-registry.ts";
@@ -80,10 +86,15 @@ function stubCtx(
     failure: "unsupported_scheme",
     message: "no connection target configured",
   },
-): RpcContext & { calls: number; connectCalls: number } {
+  tableRowsReply: RpcReply<TableRowsResult> = {
+    ok: false,
+    error: { code: "bad_request", message: "stub tableRows" },
+  },
+): RpcContext & { calls: number; connectCalls: number; tableRowsCalls: number } {
   const ctx = {
     calls: 0,
     connectCalls: 0,
+    tableRowsCalls: 0,
     connections: fakeRegistry(),
     workspace: fakeWorkspaceRegistry(),
     requestShutdown() {
@@ -92,6 +103,10 @@ function stubCtx(
     async connect(): Promise<ConnectResult> {
       ctx.connectCalls++;
       return connectResult;
+    },
+    async tableRows(): Promise<RpcReply<TableRowsResult>> {
+      ctx.tableRowsCalls++;
+      return tableRowsReply;
     },
   };
   return ctx;
@@ -133,6 +148,7 @@ describe("rpc dispatch", () => {
       "connections.remove",
       "workspace.load",
       "workspace.save",
+      "table.rows",
     ]);
   });
 
@@ -278,5 +294,45 @@ describe("rpc dispatch — workspace.load / workspace.save", () => {
       expect(reply.ok).toBe(false);
       if (!reply.ok) expect(reply.error.code).toBe("bad_request");
     }
+  });
+});
+
+describe("rpc dispatch — table.rows", () => {
+  const OK_RESULT: TableRowsResult = {
+    data: { schemaVersion: 1, columns: [{ name: "id", type: "number" }], rows: [[{ kind: "number", value: 1 }]] },
+    page: 1,
+    pageSize: 100,
+    total: 1,
+  };
+
+  test("dispatches to ctx.tableRows and returns its formed reply verbatim (OK)", async () => {
+    const ctx = stubCtx(undefined, { ok: true, result: OK_RESULT });
+    const reply = await dispatch(
+      { method: "table.rows", params: { table: "users", page: 1 } },
+      ctx,
+    );
+    expect(ctx.tableRowsCalls).toBe(1);
+    expect(reply).toEqual({ ok: true, result: OK_RESULT });
+  });
+
+  test("carries the capability's error envelope through (bad_request/not_found)", async () => {
+    for (const code of ["bad_request", "not_found"] as const) {
+      const ctx = stubCtx(undefined, { ok: false, error: { code, message: `x ${code}` } });
+      const reply = await dispatch({ method: "table.rows", params: { table: "x" } }, ctx);
+      expect(reply.ok).toBe(false);
+      if (!reply.ok) expect(reply.error.code).toBe(code);
+    }
+  });
+
+  test("a capability throw (driver failure) is caught as internal_error", async () => {
+    const ctx: RpcContext = {
+      ...stubCtx(),
+      tableRows: async () => {
+        throw new Error("connection unavailable (network)");
+      },
+    };
+    const reply = await dispatch({ method: "table.rows", params: { table: "x" } }, ctx);
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("internal_error");
   });
 });

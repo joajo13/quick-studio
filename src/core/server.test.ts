@@ -165,6 +165,7 @@ describe("connect RPC through the gate (Story 1.3)", () => {
         schema: "public",
         name: "widgets",
         columns: [{ name: "id", dataType: "integer", nullable: false }],
+        primaryKey: ["id"],
       },
     ],
   };
@@ -183,6 +184,12 @@ describe("connect RPC through the gate (Story 1.3)", () => {
       async connect() {},
       async listSchema() {
         return FAKE_SCHEMA;
+      },
+      async query() {
+        return { columns: [], rows: [] };
+      },
+      quoteIdent(ident: string) {
+        return `"${ident}"`;
       },
       async close() {},
     });
@@ -208,6 +215,12 @@ describe("connect RPC through the gate (Story 1.3)", () => {
       },
       async listSchema() {
         return FAKE_SCHEMA;
+      },
+      async query() {
+        return { columns: [], rows: [] };
+      },
+      quoteIdent(ident: string) {
+        return `"${ident}"`;
       },
       async close() {},
     });
@@ -237,6 +250,12 @@ describe("connect RPC through the gate (Story 1.3)", () => {
       },
       async listSchema() {
         return FAKE_SCHEMA;
+      },
+      async query() {
+        return { columns: [], rows: [] };
+      },
+      quoteIdent(ident: string) {
+        return `"${ident}"`;
       },
       async close() {
         closes++;

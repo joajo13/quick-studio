@@ -12,15 +12,17 @@
  * to the RPC dispatcher. The token — not loopback — is the real gate (AD-12).
  */
 
-import type { ExposureInfo } from "../shared/contract.ts";
-import { errorReply } from "../shared/contract.ts";
+import type { ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
+import { errorReply, okReply } from "../shared/contract.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
 import { createConnectionManager } from "./connection.ts";
 import { createConnectionRegistry } from "./connection-registry.ts";
 import type { DriverFactory } from "./driver.ts";
+import { rowsToFrozenData } from "./frozen-map.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
+import { planTableRows, readTotal } from "./table-rows.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
 import { createWorkspaceRegistry } from "./workspace-registry.ts";
 
@@ -190,6 +192,31 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // pure in-memory no-op, never touching the app dir).
   const workspaceRegistry = createWorkspaceRegistry({ storeDeps: { mode } });
 
+  /**
+   * Browse-rows capability (Story 3.2): validate the request against the live
+   * introspected schema, compose the Core-owned read-only SELECT/COUNT (identifiers
+   * schema-validated + `quoteIdent`-quoted, LIMIT/OFFSET integer literals), run both
+   * on the live connection, and map the page to `FrozenData`. A validation failure
+   * is a formed `bad_request`/`not_found` reply; a driver/connection throw is left
+   * to propagate → `internal_error` (engine-neutral, credentials never echoed).
+   */
+  async function tableRows(params: unknown): Promise<RpcReply<TableRowsResult>> {
+    const schema = await connectionManager.getSchema();
+    const planned = planTableRows(schema, params, (ident) => connectionManager.quoteIdent(ident));
+    if (!planned.ok) {
+      return errorReply(planned.error.code, planned.error.message);
+    }
+    const { plan } = planned;
+    const countResult = await connectionManager.query(plan.countSql);
+    const total = readTotal(countResult.rows);
+    const dataResult = await connectionManager.query(plan.selectSql);
+    const data = rowsToFrozenData(
+      plan.columns.map((c) => c.name),
+      dataResult.rows,
+    );
+    return okReply({ data, page: plan.page, pageSize: plan.pageSize, total });
+  }
+
   const server = Bun.serve({
     hostname: bindHost,
     port,
@@ -207,6 +234,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         connections: connectionRegistry,
         // Workspace-state registry (lazily opens the store on first call).
         workspace: workspaceRegistry,
+        // Browse-rows read path (composes the Core-owned SELECT on the live conn).
+        tableRows,
       };
 
       // --- Static UI assets ---------------------------------------------

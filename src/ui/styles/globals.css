@@ -26,6 +26,27 @@
   --accent: hsl(223 14% 18%);
   --accent-foreground: hsl(210 14% 92%);
   --radius: 0.5rem;
+
+  /* ---- Story 3.2 design tokens (DESIGN.md): coral accent, type coding ---- */
+  /* Coral — the ONE bold color, spent on the primary action + active/selected. */
+  --coral: #f2705d;
+  --coral-ink: #0b0d11;
+  --coral-soft: rgba(242, 112, 93, 0.14);
+  --coral-line: rgba(242, 112, 93, 0.45);
+  /* Data-type column coding — a real information system for headers/cells. */
+  --t-int: #6ba5ff; /* int / numeric-int */
+  --t-time: #b18cff; /* timestamp */
+  --t-bool: #e0a458; /* bool */
+  --t-json: #3ec6b6; /* jsonb / numeric (teal) */
+  --t-text: #98a1b0; /* text / varchar (muted) */
+  --t-key: #f2705d; /* PK — reuses accent coral */
+  /* Monospace is the voice of the interface (data, tree, grid, tabs, labels). */
+  --font-mono-stack: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code",
+    "Fira Code", Menlo, Consolas, monospace;
+  --data-cell-size: 12.5px; /* result-grid cells */
+  --label-size: 10.5px; /* uppercase tracked section/type labels */
+  --tree-width: 232px; /* schema-tree column width */
+  --focus-ring: #f2705d; /* 2px coral :focus-visible outline */
 }
 
 /* Map design tokens onto Tailwind's color scale so utilities resolve them. */
@@ -42,6 +63,37 @@
   --color-accent: var(--accent);
   --color-accent-foreground: var(--accent-foreground);
   --radius: var(--radius);
+
+  /* Story 3.2: expose the coral + data-type tokens as Tailwind color utilities
+     (e.g. `text-t-int`, `bg-coral-soft`, `text-coral`) and the mono font stack
+     as `font-mono`, so the schema tree + result grid consume them directly. */
+  --color-coral: var(--coral);
+  --color-coral-ink: var(--coral-ink);
+  --color-coral-soft: var(--coral-soft);
+  --color-coral-line: var(--coral-line);
+  --color-t-int: var(--t-int);
+  --color-t-time: var(--t-time);
+  --color-t-bool: var(--t-bool);
+  --color-t-json: var(--t-json);
+  --color-t-text: var(--t-text);
+  --color-t-key: var(--t-key);
+  --font-mono: var(--font-mono-stack);
+}
+
+/* Coral focus ring on every interactive element (DESIGN.md focus-ring). */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 html,
