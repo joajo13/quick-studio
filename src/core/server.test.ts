@@ -188,6 +188,9 @@ describe("connect RPC through the gate (Story 1.3)", () => {
       async query() {
         return { columns: [], rows: [] };
       },
+      async queryReadOnly() {
+        return { columns: [], rows: [] };
+      },
       quoteIdent(ident: string) {
         return `"${ident}"`;
       },
@@ -217,6 +220,9 @@ describe("connect RPC through the gate (Story 1.3)", () => {
         return FAKE_SCHEMA;
       },
       async query() {
+        return { columns: [], rows: [] };
+      },
+      async queryReadOnly() {
         return { columns: [], rows: [] };
       },
       quoteIdent(ident: string) {
@@ -252,6 +258,9 @@ describe("connect RPC through the gate (Story 1.3)", () => {
         return FAKE_SCHEMA;
       },
       async query() {
+        return { columns: [], rows: [] };
+      },
+      async queryReadOnly() {
         return { columns: [], rows: [] };
       },
       quoteIdent(ident: string) {

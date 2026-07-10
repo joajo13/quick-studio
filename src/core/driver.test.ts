@@ -8,6 +8,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import postgres from "postgres";
+import mysql2 from "mysql2";
 import type { ConnectionFailureKind } from "../shared/contract.ts";
 import {
   DriverConnectionError,
@@ -15,6 +17,7 @@ import {
   classifyConnectionError,
   createDriver,
 } from "./driver.ts";
+import { buildMysqlConfig, createMutex } from "./driver-mysql.ts";
 
 /** A synthetic engine/OS error carrying the `code`/`errno` tags drivers surface. */
 function fakeErr(tags: { code?: string; errno?: number }): Error {
@@ -104,5 +107,114 @@ describe("assembleSchema", () => {
 
   test("an empty column set yields an empty table list", () => {
     expect(assembleSchema("mysql", [])).toEqual({ engine: "mysql", tables: [] });
+  });
+});
+
+// Story 3.1 — mysql read-only-transaction ISOLATION: the driver serializes
+// `query`/`queryReadOnly` behind this mutex so two concurrent `execute` RPCs cannot
+// interleave the START/statement/ROLLBACK sequence on the single shared connection
+// (mysql `START TRANSACTION` implicitly commits the in-flight tx). Here we prove the
+// serialization guarantee directly, without a live mysql.
+describe("createMutex — serializes overlapping tasks (mysql read-only isolation)", () => {
+  test("a second task never begins until the first has settled", async () => {
+    const run = createMutex();
+    const trace: string[] = [];
+    const gate = { resolve: (): void => {} };
+    const first = new Promise<void>((r) => {
+      gate.resolve = r;
+    });
+
+    const a = run(async () => {
+      trace.push("A:start");
+      await first; // hold the mutex open across an await point
+      trace.push("A:end");
+    });
+    const b = run(async () => {
+      trace.push("B:start");
+      trace.push("B:end");
+    });
+
+    // B was enqueued while A holds the slot: it must NOT have started yet.
+    await Promise.resolve();
+    expect(trace).toEqual(["A:start"]);
+
+    gate.resolve();
+    await Promise.all([a, b]);
+    // Strict ordering — no interleave: A fully finishes before B begins.
+    expect(trace).toEqual(["A:start", "A:end", "B:start", "B:end"]);
+  });
+
+  test("a rejected task does not wedge the queue for the next", async () => {
+    const run = createMutex();
+    const a = run(async () => {
+      throw new Error("boom");
+    });
+    await expect(a).rejects.toThrow("boom");
+    const b = await run(async () => 42);
+    expect(b).toBe(42);
+  });
+});
+
+// Story 3.1 — postgres DRIVER-BOUNDARY BACKSTOP: raw execution must NOT use the
+// simple-query protocol (which runs every `;`-command). The adapter forces the
+// EXTENDED protocol by passing `{ simple: false }` to `sql.unsafe`. postgres.js
+// builds the query lazily (it only hits the wire on await), so we can inspect the
+// protocol choice WITHOUT a live postgres: extended = the multi-command backstop.
+describe("postgres extended-protocol backstop (no live DB)", () => {
+  test("default sql.unsafe(text) with no params selects the SIMPLE protocol (the vulnerable default)", async () => {
+    const sql = postgres("postgres://u:p@127.0.0.1:1/db", { max: 1 });
+    try {
+      const q = sql.unsafe("SELECT 1; DROP TABLE users") as unknown as { options: { simple: boolean } };
+      expect(q.options.simple).toBe(true);
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+
+  test("forcing { simple: false } selects the EXTENDED protocol (rejects multi-command at the server)", async () => {
+    const sql = postgres("postgres://u:p@127.0.0.1:1/db", { max: 1 });
+    try {
+      const opts = { simple: false } as unknown as { prepare?: boolean };
+      const q = sql.unsafe("SELECT 1; DROP TABLE users", [], opts) as unknown as { options: { simple: boolean } };
+      expect(q.options.simple).toBe(false);
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+});
+
+describe("mysql multi-statement backstop (no live DB)", () => {
+  // mysql2's real ConnectionConfig applies the SAME URI-parse + option-merge the live
+  // driver hits at connect time, so feeding it `buildMysqlConfig(url)` proves the
+  // effective, post-merge `multipleStatements` value the server would actually use.
+  const ConnectionConfig = (
+    mysql2 as unknown as {
+      ConnectionConfig: new (opts: unknown) => {
+        multipleStatements: boolean;
+        host: string;
+        database: string;
+      };
+    }
+  ).ConnectionConfig;
+
+  test("a plain mysql URL yields multipleStatements:false (backstop always on)", () => {
+    const cfg = new ConnectionConfig(buildMysqlConfig("mysql://u:p@localhost:3306/db"));
+    expect(cfg.multipleStatements).toBe(false);
+  });
+
+  test("a URL carrying ?multipleStatements=true is OVERRIDDEN to false (explicit wins)", () => {
+    const cfg = new ConnectionConfig(
+      buildMysqlConfig("mysql://u:p@localhost:3306/db?multipleStatements=true"),
+    );
+    expect(cfg.multipleStatements).toBe(false);
+    // …while the rest of the URL still flows through unchanged.
+    expect(cfg.host).toBe("localhost");
+    expect(cfg.database).toBe("db");
+  });
+
+  test("buildMysqlConfig pins the flag off in its returned options object", () => {
+    expect(
+      buildMysqlConfig("mysql://u:p@h/db?multipleStatements=true").multipleStatements,
+    ).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import {
   errorReply,
   okReply,
   type ConnectResult,
+  type ExecuteResult,
   type HealthResult,
   type RpcReply,
   type RpcRequest,
@@ -45,6 +46,15 @@ export type RpcContext = {
    * driver/connection failure rejects → `internal_error` at dispatch.
    */
   readonly tableRows: (params: unknown) => Promise<RpcReply<TableRowsResult>>;
+  /**
+   * The single guarded SQL executor (Story 3.1): classify + run a `raw` or
+   * `structured` `execute` request. Returns an ALREADY-formed {@link RpcReply} so it
+   * can signal `bad_request` (smuggling/multi-statement/malformed op) itself; a
+   * domain outcome (rows / ok / confirmation_required) rides inside `okReply`. A
+   * driver/connection throw rejects → `internal_error` at dispatch (never echoes raw
+   * engine text).
+   */
+  readonly execute: (params: unknown) => Promise<RpcReply<ExecuteResult>>;
 };
 
 /**
@@ -171,6 +181,14 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
    * A driver/connection throw propagates → `internal_error` (engine-neutral).
    */
   "table.rows": async (params, ctx): Promise<Preformed> => preformed(await ctx.tableRows(params)),
+  /**
+   * Guarded SQL execution (Story 3.1). The executor validates the request shape,
+   * classifies it default-deny, and composes/runs it, returning a fully-formed reply
+   * (`bad_request` on smuggling/multi-statement/malformed op; domain outcomes inside
+   * `okReply`); we tag it `preformed`. A driver/connection throw propagates →
+   * `internal_error` (raw engine text never reaches the client `detail`).
+   */
+  execute: async (params, ctx): Promise<Preformed> => preformed(await ctx.execute(params)),
 };
 
 /**

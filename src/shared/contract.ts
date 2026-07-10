@@ -411,6 +411,108 @@ export type LoadWorkspaceResult = {
 };
 
 /* ------------------------------------------------------------------ *
+ * Guarded-executor contract (Story 3.1) — two request shapes
+ * ------------------------------------------------------------------ */
+
+/**
+ * One column's value in a structured `insert`/`update`. The `value` key MUST be
+ * present (an ABSENT `value` is a `bad_request` at the executor, never a silent
+ * SQL `NULL`); an explicit `null` binds a real NULL. `value` is always bound as a
+ * parameter — never string-spliced.
+ */
+export type StructuredColumnValue = {
+  readonly column: string;
+  readonly value: unknown;
+};
+
+/**
+ * The primary-key address of a structured `update`/`delete`: exactly one column +
+ * one value. Structural only — the executor additionally verifies (against the live
+ * schema) that `column` is the table's SINGLE primary-key column, so a composed
+ * `WHERE <column>=$n` can never match more than one row.
+ */
+export type StructuredPk = {
+  readonly column: string;
+  readonly value: unknown;
+};
+
+/**
+ * One typed column definition for a structured `createTable`. `type` must be a
+ * canonical token from the executor's fixed allowlist (there is NO raw-text
+ * fallback); `notNull`/`primaryKey` are optional flags.
+ */
+export type StructuredColumnDef = {
+  readonly name: string;
+  readonly type: string;
+  readonly notNull?: boolean;
+  readonly primaryKey?: boolean;
+};
+
+/**
+ * The four structured operations (path a). There is deliberately NO field that can
+ * carry raw SQL, so widening to raw/multi-statement/arbitrary-DDL is unrepresentable
+ * — not merely rejected. Each carries an optional `schema` to disambiguate a table
+ * name across schemas.
+ */
+export type StructuredOp =
+  | {
+      readonly kind: "insert";
+      readonly schema?: string;
+      readonly table: string;
+      readonly columns: ReadonlyArray<StructuredColumnValue>;
+    }
+  | {
+      readonly kind: "update";
+      readonly schema?: string;
+      readonly table: string;
+      readonly pk: StructuredPk;
+      readonly set: ReadonlyArray<StructuredColumnValue>;
+    }
+  | {
+      readonly kind: "delete";
+      readonly schema?: string;
+      readonly table: string;
+      readonly pk: StructuredPk;
+    }
+  | {
+      readonly kind: "createTable";
+      readonly schema?: string;
+      readonly table: string;
+      readonly columns: ReadonlyArray<StructuredColumnDef>;
+      readonly primaryKey?: ReadonlyArray<string>;
+    };
+
+/**
+ * The single `execute` request shape, discriminated by `shape`:
+ *  - `raw` — opaque SQL text, classified default-deny + multi-statement-rejected.
+ *  - `structured` — a typed single-row DML / CREATE TABLE op (path a).
+ * `confirmed` gates any statement the executor classifies as needing confirmation
+ * (raw mutations/DDL, structured `delete`); absent/`false` ⇒ nothing runs.
+ */
+export type ExecuteRequest =
+  | { readonly shape: "raw"; readonly sql: string; readonly confirmed?: boolean }
+  | { readonly shape: "structured"; readonly op: StructuredOp; readonly confirmed?: boolean };
+
+/**
+ * The outcome of an `execute` RPC — a DOMAIN result carried inside a successful
+ * {@link RpcReply} (mirroring {@link ConnectResult}), discriminated by `status`:
+ *  - `rows` — a read ran; `data` is the Core-capped {@link FrozenData}, `truncated`
+ *    is set when the result set exceeded the Core row cap.
+ *  - `ok` — a mutation/DDL committed; `rowsAffected` is the engine's count.
+ *  - `confirmation_required` — a needs-confirm statement was NOT executed; `preview`
+ *    carries the composed/echoed SQL + a short risk string for the confirm prompt.
+ * A protocol violation (smuggling, multi-statement, malformed op) is NOT here — it
+ * surfaces as a `bad_request` error envelope.
+ */
+export type ExecuteResult =
+  | { readonly status: "rows"; readonly data: FrozenData; readonly truncated: boolean }
+  | { readonly status: "ok"; readonly rowsAffected: number }
+  | {
+      readonly status: "confirmation_required";
+      readonly preview: { readonly sql: string; readonly risk: string };
+    };
+
+/* ------------------------------------------------------------------ *
  * RPC contract — request / reply / error envelope
  * ------------------------------------------------------------------ */
 

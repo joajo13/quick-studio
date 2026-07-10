@@ -11,7 +11,7 @@
  */
 
 import mysql from "mysql2/promise";
-import type { Connection } from "mysql2/promise";
+import type { Connection, ConnectionOptions } from "mysql2/promise";
 import type { DatabaseSchema } from "../shared/contract.ts";
 import {
   assembleSchema,
@@ -58,6 +58,80 @@ const SYSTEM_SCHEMAS: readonly string[] = [
   "sys",
 ];
 
+/**
+ * A per-driver async mutex: `run(fn)` runs `fn` only after every previously enqueued
+ * task has settled, so callers are serialized in FIFO order. Used to ISOLATE the
+ * read-only transaction on the single shared mysql connection — without it, two
+ * concurrent `execute` RPCs could interleave as `A:START, B:START, A:stmt, …` and,
+ * because mysql `START TRANSACTION` implicitly commits the in-flight transaction, B's
+ * START would drop A's READ-ONLY scope and A's statement could then commit a write.
+ * Exported so the serialization guarantee is unit-testable without a live mysql.
+ */
+export function createMutex(): <T>(fn: () => Promise<T>) => Promise<T> {
+  let tail: Promise<unknown> = Promise.resolve();
+  return function run<T>(fn: () => Promise<T>): Promise<T> {
+    // Chain onto the tail regardless of the previous task's outcome (success or
+    // failure), so one rejected task can never wedge the queue for the next.
+    const result = tail.then(fn, fn);
+    tail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+}
+
+/**
+ * Run one Core-composed statement on `conn` and map it into the neutral
+ * {@link DriverQueryResult}. A SELECT comes back (with `rowsAsArray`) as row arrays +
+ * a `fields` descriptor; a DML statement comes back as a `ResultSetHeader` object
+ * (not an array) carrying `affectedRows`. `multipleStatements` is forced OFF at
+ * connect time (see {@link buildMysqlConfig}) — unconditionally, so a smuggled
+ * `;`-statement is refused by the driver even if the URL asks otherwise.
+ */
+async function execMysql(
+  conn: Connection,
+  text: string,
+  params?: ReadonlyArray<unknown>,
+): Promise<DriverQueryResult> {
+  const [result, fields] = await conn.query(
+    { sql: text, rowsAsArray: true },
+    params !== undefined ? [...params] : [],
+  );
+  if (Array.isArray(result)) {
+    const columns = ((fields as ReadonlyArray<{ name: string }> | undefined) ?? []).map((f) => ({
+      name: f.name,
+    }));
+    return {
+      columns,
+      rows: result as unknown as ReadonlyArray<ReadonlyArray<unknown>>,
+      rowsAffected: result.length,
+    };
+  }
+  // Non-SELECT: `result` is a ResultSetHeader — no rows, but an affected count.
+  const affected = (result as { affectedRows?: number }).affectedRows ?? 0;
+  return { columns: [], rows: [], rowsAffected: affected };
+}
+
+/**
+ * Build the mysql2 connection config from `url`, forcing client-side
+ * multi-statements OFF — UNCONDITIONALLY. mysql2 parses query-string params off a
+ * connection URI, so a `?multipleStatements=true` in the URL would otherwise
+ * silently re-enable the smuggle vector the executor's single-statement guard
+ * relies on (the postgres adapter's `{ simple: false }` backstop is always-on; this
+ * must be too). We cannot simply pass `multipleStatements: false` alongside `uri`:
+ * mysql2's config merge only preserves a *truthy* explicit option, so a URI's
+ * `true` overwrites an explicit `false`. Instead we pin the query param itself to
+ * `false` in the URL — mysql2 then parses that as the definitive value — and also
+ * set the flag explicitly, so multi-statements can never be enabled via the URL.
+ * Exported so the enforcement is unit-testable without a live mysql.
+ */
+export function buildMysqlConfig(url: string): ConnectionOptions {
+  const u = new URL(url);
+  u.searchParams.set("multipleStatements", "false");
+  return { uri: u.toString(), multipleStatements: false };
+}
+
 /** Extract the target database name from the URL path (`/db` → `db`), or `null`. */
 function databaseOf(url: string): string | null {
   try {
@@ -76,14 +150,18 @@ function databaseOf(url: string): string | null {
 export function createMysqlDriver(url: string): Driver {
   const database = databaseOf(url);
   let connection: Connection | null = null;
+  // Serializes `query`/`queryReadOnly` on the single shared connection so the
+  // multi-step read-only transaction can never interleave with another query.
+  const runExclusive = createMutex();
 
   return {
     async connect(): Promise<void> {
       try {
         // createConnection resolves only once the handshake (incl. auth) succeeds,
         // so a bad password / unknown host / refused port rejects here — classified,
-        // never raw.
-        connection = await mysql.createConnection(url);
+        // never raw. The config forces `multipleStatements: false` (see
+        // buildMysqlConfig) so the URL can never re-enable the smuggle vector.
+        connection = await mysql.createConnection(buildMysqlConfig(url));
       } catch (err) {
         throw toDriverConnectionError(err);
       }
@@ -142,21 +220,39 @@ export function createMysqlDriver(url: string): Driver {
     },
 
     async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {
-      if (connection === null) {
-        throw new Error("query called before connect");
-      }
-      // `rowsAsArray` returns rows as position-aligned arrays; `fields` carry the
-      // ordered column names. The browse SELECT passes no params (only quoted
-      // identifiers + integer literals); positional `?` binds are forwarded when a
-      // caller supplies them — mysql2's placeholder syntax never leaks above here.
-      const [rows, fields] = await connection.query(
-        { sql: text, rowsAsArray: true },
-        params !== undefined ? [...params] : [],
-      );
-      const columns = ((fields as ReadonlyArray<{ name: string }> | undefined) ?? []).map((f) => ({
-        name: f.name,
-      }));
-      return { columns, rows: rows as unknown as ReadonlyArray<ReadonlyArray<unknown>> };
+      // Serialized behind the mutex so a concurrent read-only transaction cannot
+      // interleave on the shared connection. `execMysql` maps SELECT vs DML results;
+      // positional `?` binds are forwarded — mysql2's placeholder syntax never leaks.
+      return runExclusive(async () => {
+        if (connection === null) {
+          throw new Error("query called before connect");
+        }
+        return execMysql(connection, text, params);
+      });
+    },
+
+    async queryReadOnly(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {
+      // ISOLATED read-only transaction: the whole START/statement/ROLLBACK sequence
+      // runs inside ONE exclusive mutex slot, so no other `query`/`queryReadOnly` can
+      // interleave and drop the read-only scope. Any write attempt fails at the engine
+      // (turning a mis-classified read into a safe failure); ROLLBACK runs in `finally`
+      // so a failed rollback cannot wedge the connection mid-transaction.
+      return runExclusive(async () => {
+        if (connection === null) {
+          throw new Error("queryReadOnly called before connect");
+        }
+        const conn = connection;
+        await conn.query("START TRANSACTION READ ONLY");
+        try {
+          return await execMysql(conn, text, params);
+        } finally {
+          try {
+            await conn.query("ROLLBACK");
+          } catch {
+            /* best-effort — the mutex slot ends regardless */
+          }
+        }
+      });
     },
 
     quoteIdent(ident: string): string {

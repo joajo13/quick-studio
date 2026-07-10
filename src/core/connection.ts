@@ -44,6 +44,12 @@ export type ConnectionManager = {
    */
   query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult>;
   /**
+   * Run a statement inside an engine READ-ONLY transaction (rolled back) on the live
+   * connection — the seam feeding the executor's `runReadOnly` auto-classified-read
+   * path (Story 3.1). Opens the driver lazily+once; throws if unopenable or closed.
+   */
+  queryReadOnly(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult>;
+  /**
    * Quote an identifier via the live driver's engine rules. Requires an already-
    * open driver (call after {@link ConnectionManager.getSchema}); throws otherwise.
    */
@@ -188,6 +194,11 @@ export function createConnectionManager(
     async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {
       const d = await ensureDriver();
       return d.query(text, params);
+    },
+
+    async queryReadOnly(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {
+      const d = await ensureDriver();
+      return d.queryReadOnly(text, params);
     },
 
     quoteIdent(ident: string): string {

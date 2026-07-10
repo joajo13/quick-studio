@@ -44,6 +44,9 @@ function fakeDriver(behavior: {
     async query() {
       return { columns: [], rows: [] };
     },
+    async queryReadOnly() {
+      return { columns: [], rows: [] };
+    },
     quoteIdent(ident: string) {
       return `"${ident}"`;
     },
@@ -154,6 +157,9 @@ describe("connection manager", () => {
         async query() {
           return { columns: [], rows: [] };
         },
+        async queryReadOnly() {
+          return { columns: [], rows: [] };
+        },
         quoteIdent(ident: string) {
           return `"${ident}"`;
         },
@@ -190,6 +196,9 @@ describe("connection manager", () => {
         throw new Error("permission denied for information_schema");
       },
       async query() {
+        return { columns: [], rows: [] };
+      },
+      async queryReadOnly() {
         return { columns: [], rows: [] };
       },
       quoteIdent(ident: string) {
@@ -243,6 +252,9 @@ describe("connection manager", () => {
         return SAMPLE_SCHEMA;
       },
       async query() {
+        return { columns: [], rows: [] };
+      },
+      async queryReadOnly() {
         return { columns: [], rows: [] };
       },
       quoteIdent(ident: string) {

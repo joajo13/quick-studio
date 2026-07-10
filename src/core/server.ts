@@ -19,6 +19,7 @@ import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
 import { createConnectionManager } from "./connection.ts";
 import { createConnectionRegistry } from "./connection-registry.ts";
 import type { DriverFactory } from "./driver.ts";
+import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
@@ -217,6 +218,20 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     return okReply({ data, page: plan.page, pageSize: plan.pageSize, total });
   }
 
+  // Guarded SQL executor (Story 3.1): the ONE Core-owned risk classifier. Its seams
+  // are the live connection manager — `runQuery` (committing path) and `runReadOnly`
+  // (auto-classified reads in an engine read-only transaction) delegate to the driver;
+  // `getEngine`/`getSchema` resolve the live connection lazily+once; `quoteIdent` is
+  // the engine-correct identifier quoter. A malformed/smuggling request is rejected
+  // before any composed SQL runs.
+  const executor = createExecutor({
+    runQuery: (sql, params) => connectionManager.query(sql, params),
+    runReadOnly: (sql, params) => connectionManager.queryReadOnly(sql, params),
+    getEngine: async () => (await connectionManager.getSchema()).engine,
+    getSchema: () => connectionManager.getSchema(),
+    quoteIdent: (ident) => connectionManager.quoteIdent(ident),
+  });
+
   const server = Bun.serve({
     hostname: bindHost,
     port,
@@ -236,6 +251,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         workspace: workspaceRegistry,
         // Browse-rows read path (composes the Core-owned SELECT on the live conn).
         tableRows,
+        // Guarded SQL execution (the single risk classifier + composer).
+        execute: (params) => executor.execute(params),
       };
 
       // --- Static UI assets ---------------------------------------------

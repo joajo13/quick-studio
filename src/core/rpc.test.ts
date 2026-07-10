@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type {
   ConnectResult,
   ConnectionSummary,
+  ExecuteResult,
   RpcReply,
   TableRowsResult,
   WorkspaceSnapshot,
@@ -90,11 +91,21 @@ function stubCtx(
     ok: false,
     error: { code: "bad_request", message: "stub tableRows" },
   },
-): RpcContext & { calls: number; connectCalls: number; tableRowsCalls: number } {
+  executeReply: RpcReply<ExecuteResult> = {
+    ok: false,
+    error: { code: "bad_request", message: "stub execute" },
+  },
+): RpcContext & {
+  calls: number;
+  connectCalls: number;
+  tableRowsCalls: number;
+  executeCalls: number;
+} {
   const ctx = {
     calls: 0,
     connectCalls: 0,
     tableRowsCalls: 0,
+    executeCalls: 0,
     connections: fakeRegistry(),
     workspace: fakeWorkspaceRegistry(),
     requestShutdown() {
@@ -107,6 +118,10 @@ function stubCtx(
     async tableRows(): Promise<RpcReply<TableRowsResult>> {
       ctx.tableRowsCalls++;
       return tableRowsReply;
+    },
+    async execute(): Promise<RpcReply<ExecuteResult>> {
+      ctx.executeCalls++;
+      return executeReply;
     },
   };
   return ctx;
@@ -149,6 +164,7 @@ describe("rpc dispatch", () => {
       "workspace.load",
       "workspace.save",
       "table.rows",
+      "execute",
     ]);
   });
 
@@ -334,5 +350,45 @@ describe("rpc dispatch — table.rows", () => {
     const reply = await dispatch({ method: "table.rows", params: { table: "x" } }, ctx);
     expect(reply.ok).toBe(false);
     if (!reply.ok) expect(reply.error.code).toBe("internal_error");
+  });
+});
+
+describe("rpc dispatch — execute", () => {
+  const ROWS: ExecuteResult = {
+    status: "rows",
+    data: { schemaVersion: 1, columns: [{ name: "n", type: "number" }], rows: [[{ kind: "number", value: 1 }]] },
+    truncated: false,
+  };
+
+  test("dispatches to ctx.execute and returns its formed reply verbatim (OK)", async () => {
+    const ctx = stubCtx(undefined, undefined, { ok: true, result: ROWS });
+    const reply = await dispatch({ method: "execute", params: { shape: "raw", sql: "SELECT 1" } }, ctx);
+    expect(ctx.executeCalls).toBe(1);
+    expect(reply).toEqual({ ok: true, result: ROWS });
+  });
+
+  test("carries the executor's bad_request envelope through (protocol violation)", async () => {
+    const ctx = stubCtx(undefined, undefined, {
+      ok: false,
+      error: { code: "bad_request", message: "multiple statements are not allowed" },
+    });
+    const reply = await dispatch({ method: "execute", params: { shape: "raw", sql: "SELECT 1; DROP TABLE t" } }, ctx);
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+  });
+
+  test("an executor throw (driver failure) is caught as internal_error (no raw text echoed)", async () => {
+    const ctx: RpcContext = {
+      ...stubCtx(),
+      execute: async () => {
+        throw new Error("relation \"secret\" does not exist");
+      },
+    };
+    const reply = await dispatch({ method: "execute", params: { shape: "raw", sql: "SELECT 1" } }, ctx);
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) {
+      expect(reply.error.code).toBe("internal_error");
+      expect(JSON.stringify(reply.error)).not.toContain("secret");
+    }
   });
 });
