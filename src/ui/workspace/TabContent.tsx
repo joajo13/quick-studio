@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useState } from "react";
-import type { TableRowsResult } from "../../shared/contract.ts";
+import type { ExecuteResult, FrozenRow, StructuredOp, TableRowsResult } from "../../shared/contract.ts";
 import { DataGrid } from "../data/DataGrid.tsx";
 import {
   applyPage,
@@ -22,6 +22,14 @@ import {
   selectRow,
   type DataGridState,
 } from "../data/data-grid-state.ts";
+import {
+  buildDeleteOp,
+  buildInsertOp,
+  buildUpdateOp,
+  isMutationError,
+  type CellEdit,
+  type DraftCell,
+} from "../data/row-mutations.ts";
 import { rpc } from "../rpc/client.ts";
 import { envelopeText } from "../rpc/envelope-text.ts";
 import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
@@ -64,6 +72,16 @@ function TableTabView({
   // CURRENT page — a failed page-N fetch would otherwise leave the pager frozen
   // (Next is a no-op when it targets the already-set page) with no in-tab recovery.
   const [reloadNonce, setReloadNonce] = useState(0);
+  // Mutation feedback, owned here (the grid stays presentational). `mutating` gates
+  // inputs against a double-submit; `mutationError` surfaces a build/RPC failure
+  // inline without touching the page-load `error` banner (the panel stays alive).
+  const [mutating, setMutating] = useState(false);
+  const [mutationError, setMutationError] = useState<string | null>(null);
+
+  // Exactly one PK column is the executor's `resolveSinglePkTable` precondition;
+  // without it inline edit + delete are disabled (insert stays available).
+  const canMutate = primaryKeys.length === 1;
+  const target = { schema: table.schema, table: table.name };
 
   // NOTE: per-table state (page/data/grid/error/loading) is reset by REMOUNTING —
   // the parent keys this component by the bound table identity, so a table switch
@@ -98,6 +116,71 @@ function TableTabView({
       alive = false;
     };
   }, [table.schema, table.name, page, reloadNonce]);
+
+  // Run one structured op through the guarded Core executor. On `ok` (insert/update
+  // auto-commit, or a confirmed delete) it refetches the current page via the
+  // `reloadNonce` bump; on `confirmation_required` (a delete without the flag — the
+  // Core is the real gate) it reports without mutating; any error surfaces inline.
+  // Returns the domain status so a caller can branch (e.g. the delete confirm flow).
+  const runOp = async (op: StructuredOp, confirmed: boolean): Promise<ExecuteResult["status"] | "error"> => {
+    setMutating(true);
+    setMutationError(null);
+    const reply = await rpc<ExecuteResult>("execute", { shape: "structured", op, confirmed });
+    setMutating(false);
+    if (!reply.ok) {
+      setMutationError(envelopeText(reply.error));
+      return "error";
+    }
+    if (reply.result.status === "ok") {
+      setReloadNonce((n) => n + 1);
+      return "ok";
+    }
+    if (reply.result.status === "confirmation_required") {
+      // Defensive: a delete should always carry `confirmed:true` by the time it runs.
+      setMutationError(`confirmation required: ${reply.result.preview.risk}`);
+      return "confirmation_required";
+    }
+    return reply.result.status;
+  };
+
+  // Fail a build error into the inline banner rather than issuing a doomed RPC.
+  // Returns whether the edit was ACCEPTED (validation passed + the op committed `ok`)
+  // vs REJECTED — the grid keeps the cell editor open (with its value) on rejection,
+  // and only closes it on acceptance.
+  const onCommitEdit = async (row: FrozenRow, column: string, edit: CellEdit): Promise<boolean> => {
+    if (mutating || !data) return false;
+    const op = buildUpdateOp({ target, columns: data.columns, primaryKeys, row, column, edit });
+    if (isMutationError(op)) {
+      setMutationError(op.error);
+      return false;
+    }
+    return (await runOp(op, false)) === "ok";
+  };
+
+  const onDeleteRow = (row: FrozenRow): void => {
+    if (mutating || !data) return;
+    const op = buildDeleteOp({ target, columns: data.columns, primaryKeys, row });
+    if (isMutationError(op)) {
+      setMutationError(op.error);
+      return;
+    }
+    // The UI already confirmed (inline yes/no); execute with the Core's gate flag.
+    void runOp(op, true);
+  };
+
+  // Returns whether the insert SUCCEEDED (`ok`) so the draft row resets/closes only on
+  // success — on a validation or RPC error the draft stays open with its values so a
+  // re-submit doesn't require re-typing (and a successful insert can't be re-fired as
+  // a duplicate).
+  const onInsertRow = async (draft: ReadonlyArray<DraftCell>): Promise<boolean> => {
+    if (mutating || !data) return false;
+    const op = buildInsertOp({ target, columns: data.columns, draft });
+    if (isMutationError(op)) {
+      setMutationError(op.error);
+      return false;
+    }
+    return (await runOp(op, false)) === "ok";
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -148,12 +231,32 @@ function TableTabView({
         </div>
       ) : null}
 
+      {mutationError !== null ? (
+        <div className="flex items-center gap-3 border-b border-amber-700 bg-amber-950/40 px-3 py-2">
+          <p role="alert" className="font-mono text-xs lowercase text-amber-400">
+            {mutationError}
+          </p>
+          <button
+            type="button"
+            onClick={() => setMutationError(null)}
+            className="ml-auto rounded-[var(--radius)] border border-amber-700 px-2 py-0.5 font-mono text-xs lowercase text-amber-300 transition-colors hover:bg-amber-900/40"
+          >
+            dismiss
+          </button>
+        </div>
+      ) : null}
+
       {data !== null ? (
         <DataGrid
           data={data}
           primaryKeys={primaryKeys}
           selectedRow={grid.selectedRow}
           onSelectRow={(index) => setGrid((g) => selectRow(g, index))}
+          canMutate={canMutate}
+          busy={mutating}
+          onCommitEdit={onCommitEdit}
+          onDeleteRow={onDeleteRow}
+          onInsertRow={onInsertRow}
         />
       ) : (
         <div

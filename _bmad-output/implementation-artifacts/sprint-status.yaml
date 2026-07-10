@@ -78,7 +78,7 @@ development_status:
   epic-3: backlog
   3-1-guarded-core-executor: done            # Story 3.1: Single guarded Core executor — two request shapes, confirmation by shape, with adversarial guard
   3-2-browse-rows-pagination: done              # Story 3.2: Browse table rows with pagination
-  3-3-edit-insert-delete-rows: backlog          # Story 3.3: Edit, insert, and delete rows
+  3-3-edit-insert-delete-rows: done          # Story 3.3: Edit, insert, and delete rows
   3-4-create-tables: backlog                    # Story 3.4: Create tables
   3-5-inspect-indexes: backlog                  # Story 3.5: Inspect indexes
   3-6-run-adhoc-sql: backlog                    # Story 3.6: Run ad-hoc SQL in a query Tab
