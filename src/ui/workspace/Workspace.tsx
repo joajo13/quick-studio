@@ -134,6 +134,8 @@ export function Workspace({
   onSchemaLoaded,
   primaryKeys,
   indexes,
+  queryDrafts,
+  onQueryDraftChange,
   onStop,
   stopping,
   connectionIndicator,
@@ -156,6 +158,10 @@ export function Workspace({
   primaryKeys: ReadonlyArray<string>;
   /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
   indexes: ReadonlyArray<SchemaIndexInfo>;
+  /** Session-only draft SQL per query Tab id (Story 3.6; never persisted). */
+  queryDrafts: ReadonlyMap<number, string>;
+  /** Update the draft SQL for query Tab `id`. */
+  onQueryDraftChange: (id: number, sql: string) => void;
   onStop: () => void;
   stopping: boolean;
   connectionIndicator: React.ReactNode;
@@ -254,7 +260,15 @@ export function Workspace({
             <div className="flex h-full flex-col">
               <TabBar state={state} onActivate={onActivate} onClose={onClose} />
               <div className="min-h-0 flex-1 overflow-auto">
-                <TabContent tab={activeTab} primaryKeys={primaryKeys} indexes={indexes} />
+                <TabContent
+                  tab={activeTab}
+                  primaryKeys={primaryKeys}
+                  indexes={indexes}
+                  queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
+                  onQueryDraftChange={(sql) => {
+                    if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
+                  }}
+                />
               </div>
             </div>
           )}

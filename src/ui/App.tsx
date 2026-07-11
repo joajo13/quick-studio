@@ -227,6 +227,14 @@ export function App(): React.JSX.Element {
   const [createdTables, setCreatedTables] = useState<ReadonlyArray<SchemaTableInfo>>([]);
   const onTableCreated = (table: SchemaTableInfo): void => setCreatedTables((cur) => [...cur, table]);
 
+  // Session-only draft SQL per query Tab id (Story 3.6), keyed by Tab id so each
+  // query Tab keeps its own typed-but-unrun text across Tab switches. Deliberately
+  // NEVER folded into `toWorkspaceSnapshot`/`workspace.save` — the snapshot invariant
+  // is that query text never touches disk; a relaunch starts every query Tab blank.
+  const [queryDrafts, setQueryDrafts] = useState<ReadonlyMap<number, string>>(new Map());
+  const onQueryDraftChange = (tabId: number, sql: string): void =>
+    setQueryDrafts((cur) => new Map(cur).set(tabId, sql));
+
   // The introspected tables plus the optimistically-created ones — the single source
   // for both the PK lookup (so a freshly-created table is immediately editable per
   // Story 3.3) and the create-form's schema selector.
@@ -366,13 +374,25 @@ export function App(): React.JSX.Element {
         state={workspace}
         onOpen={(kind) => dispatch({ type: "open", kind })}
         onActivate={(id) => dispatch({ type: "activate", id })}
-        onClose={(id) => dispatch({ type: "close", id })}
+        onClose={(id) => {
+          dispatch({ type: "close", id });
+          // Reclaim the closed Tab's draft SQL — ids are monotonic (never reused),
+          // so a closed query Tab's entry would otherwise linger for the session.
+          setQueryDrafts((cur) => {
+            if (!cur.has(id)) return cur;
+            const next = new Map(cur);
+            next.delete(id);
+            return next;
+          });
+        }}
         onActivateTable={(table) =>
           dispatch({ type: "bindTable", ref: { schema: table.schema, name: table.name } })
         }
         onSchemaLoaded={setSchemaTables}
         primaryKeys={primaryKeys}
         indexes={indexes}
+        queryDrafts={queryDrafts}
+        onQueryDraftChange={onQueryDraftChange}
         extraTables={createdTables}
         schemas={schemas}
         onTableCreated={onTableCreated}

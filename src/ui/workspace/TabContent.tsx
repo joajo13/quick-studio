@@ -4,8 +4,9 @@
  * Renders the body of the active Tab. A bound `table` Tab (Story 3.2) fetches one
  * page via `table.rows`, manages page state, and renders the {@link DataGrid} plus
  * a Prev/Next pager and a "rows X–Y of N" summary — one table shown at a time. An
- * unbound `table` Tab shows a "select a table" empty state. The other kinds (query
- * / erd / chat / report) remain labelled shell placeholders for later epics.
+ * unbound `table` Tab shows a "select a table" empty state. A `query` Tab (Story
+ * 3.6) renders {@link QueryTabView}, the ad-hoc SQL runner. The remaining kinds
+ * (erd / chat / report) stay labelled shell placeholders for later epics.
  */
 
 import { useEffect, useState } from "react";
@@ -39,6 +40,7 @@ import {
 } from "../data/row-mutations.ts";
 import { rpc } from "../rpc/client.ts";
 import { envelopeText } from "../rpc/envelope-text.ts";
+import { QueryTabView } from "./QueryTabView.tsx";
 import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
 
 /** Short human blurb per Tab kind for the (non-table) placeholder body. */
@@ -335,12 +337,18 @@ export function TabContent({
   tab,
   primaryKeys,
   indexes,
+  queryDraft,
+  onQueryDraftChange,
 }: {
   tab: WorkspaceTab | null;
   /** PK column names of the active table tab's bound table (for the grid key icon). */
   primaryKeys?: ReadonlyArray<string>;
   /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
   indexes?: ReadonlyArray<SchemaIndexInfo>;
+  /** The active query tab's session-only draft SQL (Story 3.6; never persisted). */
+  queryDraft?: string;
+  /** Update the active query tab's draft SQL. */
+  onQueryDraftChange?: (sql: string) => void;
 }): React.JSX.Element {
   if (tab === null) {
     return <EmptyState />;
@@ -358,6 +366,20 @@ export function TabContent({
       />
     ) : (
       <SelectTablePrompt />
+    );
+  }
+
+  if (tab.kind === "query") {
+    // Keyed by tab id so each query Tab owns an isolated result/confirm/pending
+    // state instance — without this, switching Tabs reuses one component and leaks
+    // Tab A's grid AND its pending destructive-confirm into Tab B (mirrors how the
+    // table branch above remounts per bound table).
+    return (
+      <QueryTabView
+        key={tab.id}
+        draft={queryDraft ?? ""}
+        onDraftChange={onQueryDraftChange ?? (() => {})}
+      />
     );
   }
 
