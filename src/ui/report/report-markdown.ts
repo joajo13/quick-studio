@@ -32,7 +32,7 @@ const URL_ATTR_RE = /\b(href|src)="([^"]*)"/gi;
  * BEFORE scheme detection, so an obfuscated `java\tscript:` / ` javascript:` can never
  * smuggle a dangerous scheme past the check. Pure and total.
  */
-function isSafeUrl(rawUrl: string): boolean {
+function isSafeUrl(rawUrl: string, isImageSrc = false): boolean {
   const url = rawUrl.replace(/[\u0000-\u0020]+/g, "");
   // Protocol-relative guard. Browsers read leading `/\`, `\/`, `\\` (any slash/backslash
   // mix) as protocol-relative off-origin. micromark percent-encodes a backslash to `%5c`,
@@ -44,6 +44,12 @@ function isSafeUrl(rawUrl: string): boolean {
   if (url.startsWith("\\") || /^%5c/i.test(url)) return false;
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url);
   if (scheme === null) return true; // relative / fragment / no scheme
+  // An IMAGE `src` fetches on render with NO user gesture. Unlike the Ring 3 sandbox — where
+  // a CSP (`connect-src 'none'`, restricted `img-src`) backstops egress — a report renders in
+  // Ring 2 with no CSP, so a remote `src` would send a request off the machine on preview
+  // (R5: no data leaves the machine; no arbitrary embeds). A scheme-less relative `src` is
+  // fine; any explicit scheme (http/https/…) on an image is neutralized to `#`.
+  if (isImageSrc) return false;
   return SAFE_URL_SCHEMES.has((scheme[1] as string).toLowerCase());
 }
 
@@ -58,6 +64,6 @@ function isSafeUrl(rawUrl: string): boolean {
 export function renderReportMarkdown(md: string): string {
   const html = micromark(md, { allowDangerousHtml: false });
   return html.replace(URL_ATTR_RE, (whole, attr: string, value: string) =>
-    isSafeUrl(value) ? whole : `${attr}="#"`,
+    isSafeUrl(value, attr.toLowerCase() === "src") ? whole : `${attr}="#"`,
   );
 }

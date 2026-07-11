@@ -6,7 +6,7 @@ status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 baseline_revision: 'a4afb130f126d5ba48d1157bd194749319c44c12'
-final_revision: 'c3baf395c41ba46ae64dad58ea0992b4a87ff2e6'
+final_revision: 'f9a550a0681112cdf342b8a0963708d6cfd42434'
 context: []
 warnings: ['oversized']
 ---
@@ -113,6 +113,19 @@ _No bad_spec loopbacks — the intent contract held through implementation and r
   - `[low]` `[patch]` orphaned transient run state: a completion for a block removed mid-flight re-created its run state — `applyOutcome` now no-ops when the block id is absent from the latest state.
   - Rejected (dropped): `dot`→Scatter rendering (unconfirmed without a DOM; left as residual risk), URL-attr regex rewriting literal `href="…"` text (risky fix, low value), duplicate-column-name collapse in `frozenToRecords` (narrow trigger), x/y/series distinctness in the chart editor (UX nicety), pivot without aggregation on duplicate (x,series) pairs (acceptable limitation).
 
+### 2026-07-11 — Review pass (follow-up)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (high 1, medium 3, low 0)
+- defer: 0
+- reject: 15: (high 0, medium 0, low 15)
+- addressed_findings:
+  - `[high]` `[patch]` Chart authoring was completely broken: `ChartSpecEditor` was fully controlled off `block.chart`, and `parseChartSpec` requires BOTH `x` and `y` to name real columns — so every partial pick (x set, y still empty) parsed to `null`, wiped the spec, and reverted the dropdown. No interaction order could accumulate x AND y, making the story's headline in-app chart uncomposable. The editor now holds a LOCAL draft (rendered from its own state, seeded from the stored spec), so partial picks persist while `onChange` still parses the draft to a `ChartSpec | null` for the preview.
+  - `[medium]` `[patch]` FR-18 clobber reintroduced on user-action writes: the prior pass moved async run completions to functional updaters, but every user-triggered write (add/remove/reorder/edit-sql/view/chart) still passed a value computed from the render-time `state` snapshot, and `App.onReportStateChange` ignores `prev` for the value form — so a user edit landing in the same React batch as a concurrent query result could discard that result. All user-action writes now use the functional-updater form too, closing the isolation guarantee the code asserts.
+  - `[medium]` `[patch]` Remote image egress (R5): `report-markdown` allowed `http(s)` on image `src` identically to link `href`; a Markdown `![](https://host/x)` emits a live `<img>` that auto-fetches on render. Unlike the Ring 3 sandbox (whose CSP `connect-src 'none'` backstops egress), the report renders in Ring 2 with no CSP, so this sent a request off the machine on preview. Image `src` with any explicit scheme is now neutralized to `#`; scheme-less relative srcs still render. Locked with a test.
+  - `[medium]` `[patch]` Recharts silent series drop: pivot keys and axis keys were passed to Recharts as STRING `dataKey`s, which Recharts resolves as lodash paths — so a column name or series value containing `.`/`[`/`]` (e.g. `web.prod`, `2024.01`, a dotted SQL alias) was mis-read as a nested lookup and the series/axis rendered blank. All `dataKey`s (axis + every mark) now use a function accessor that reads `record[key]` directly, bypassing path parsing.
+  - Rejected (dropped): `mapChart` non-`number` y-type guard (Core infers column type from actual values, so numeric aggregates like `COUNT(*)` are typed `number` — premise doesn't hold); `dot`→Scatter categorical-axis (DOM-unconfirmable residual, already noted); pivot `String()` collision of mixed-type x (number `1` vs string `"1"`, narrow); all-null series column → blank chart (recoverable via table/clear-series); duplicate `(x,series)` pair last-wins (acceptable limitation); duplicate column-name collapse (narrow trigger); `setRuns` stale-closure on transient run state (self-heals); `firing.current` entry not reclaimed on removal (harmless, monotonic ids); stale chart-spec column option after SQL re-run (cosmetic); `isSafeUrl` non-ASCII whitespace (browser rejects invalid scheme — defense-in-depth only); `mapChart` x===y degenerate chart (no crash); stale result shown after SQL edit before re-run (run button adjacent); `href`/`src` rewrite touching escaped code samples (risky fix, low value); selected grid row index past end after shorter re-run (`applyOutcome` resets to null); first-series CSS-var vs hardcoded-hex palette (cosmetic).
+
 ## Design Notes
 
 - **Interpreting "MDX Blocks":** 6.1 ships a pragmatic, typed block model (prose / query-table / query-chart), not a full MDX runtime. Executable-JS authoring (CAP-10, aspirational) needs the Ring 3 sandbox and belongs to the export stories — deliberately excluded here.
@@ -170,3 +183,26 @@ Delivered the Epic 6 foundation: an in-app (Ring 2) Report builder tab. The alre
 ### Residual risks
 - The `dot`→Scatter mark could not be visually confirmed (Recharts needs a DOM the `bun test`/`react-dom/server` setup does not provide); the other three marks are idiomatic. Worth a manual/QA check when a real DB is attached.
 - Prose text that literally contains `href="…"`/`src="…"` as prose can be cosmetically rewritten by the URL sanitizer (trusted-author, low impact — left as-is).
+
+## Follow-up Review Result (2026-07-11)
+
+An independent follow-up review pass (Blind Hunter + Edge Case Hunter, same model capability) surfaced a functionally-blocking defect the first pass missed.
+
+### Findings breakdown
+- 0 intent_gap · 0 bad_spec · **4 patches applied** (1 high, 3 medium) · 0 deferred · 15 rejected.
+- **Headline:** in-app chart authoring was completely non-functional (the story's marquee capability) — every partial column pick wiped the spec, so no chart could ever be composed through the UI. Fixed by giving the chart-spec editor a local draft.
+- Also fixed: an FR-18 concurrency clobber still open on user-action writes; a Ring-2 remote-image egress gap (R5); and a Recharts silent-series-drop for keys containing `.`. See the Review Triage Log entry for the full list and the rejection rationale.
+
+### Files changed (this pass)
+- `src/ui/report/ReportTabView.tsx` — `ChartSpecEditor` now holds a local draft (partial picks persist); all user-action state writes converted to functional updaters (FR-18)
+- `src/ui/report/report-markdown.ts` — image `src` with an explicit scheme is neutralized to `#` (remote-image egress, R5)
+- `src/ui/report/ReportChart.tsx` — axis + every mark use function `dataKey` accessors (bypass Recharts path parsing for dotted keys)
+- `src/ui/report/report-markdown.test.ts` — new tests locking the remote-image-src neutralization
+
+### Verification (this pass)
+- `bunx tsc --noEmit` — pass (exit 0).
+- `bun test` (full suite) — 887 pass / 0 fail (55 files; +2 new markdown tests).
+- `bun run build` — pass; sandbox bundle byte-identical (342345), confirming the chart fix added no Ring-3 footprint.
+
+### Follow-up review recommendation
+`followup_review_recommended: true` — this pass applied a HIGH-severity fix restoring a broken core capability plus three medium fixes spanning state-write semantics, chart rendering, and the URL sanitizer; an independent confirmation pass on the chart-authoring flow (ideally against a real DB, where Recharts renders) remains worthwhile.

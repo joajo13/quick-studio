@@ -69,4 +69,17 @@ describe("renderReportMarkdown", () => {
     expect(renderReportMarkdown("[x](mailto:a@b.com)")).toContain('href="mailto:a@b.com"');
     expect(renderReportMarkdown("[x](/local/path)")).toContain('href="/local/path"');
   });
+
+  test("neutralizes a REMOTE image src — no off-machine fetch on render (R5)", () => {
+    // A Markdown image auto-fetches its src on render; Ring 2 has no CSP backstop, so a
+    // remote src must be rewritten to '#' rather than emitting a live off-origin request.
+    const html = renderReportMarkdown("![beacon](https://evil.example/beacon?viewed)");
+    expect(html).not.toContain("https://evil.example");
+    expect(html).toContain('src="#"');
+  });
+
+  test("keeps a relative (same-machine) image src intact", () => {
+    // A scheme-less relative src does not reach off the machine, so it survives.
+    expect(renderReportMarkdown("![local](/assets/pic.png)")).toContain('src="/assets/pic.png"');
+  });
 });

@@ -114,17 +114,28 @@ function ChartSpecEditor({
 }): React.JSX.Element {
   const columns = data.columns.map((c) => c.name);
   const spec = block.chart;
-  const cur = {
+  // LOCAL draft of the in-progress pick. The editor renders from its OWN draft (not from
+  // `block.chart`) so a partial selection — x chosen while y is still empty — is NOT wiped:
+  // `onChange` parses the draft to a `ChartSpec | null` for the chart preview (an incomplete
+  // draft degrades to the table view), but the pickers keep showing the raw draft so the
+  // author can accumulate x AND y across separate picks. Seeded once from the stored spec;
+  // the instance is stable per block id (the `<li key={block.id}>`), so the draft survives
+  // re-renders and only resets when the block unmounts.
+  const [draft, setDraft] = useState<{ mark: MarkKind; x: string; y: string; series: string }>(() => ({
     mark: (spec?.mark ?? "bar") as MarkKind,
     x: spec?.x ?? "",
     y: spec?.y ?? "",
     series: spec?.series ?? "",
+  }));
+  const update = (next: { mark: MarkKind; x: string; y: string; series: string }): void => {
+    setDraft(next);
+    onChange(next);
   };
   const select = "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--coral-line)]";
   return (
     <div className="flex flex-wrap items-center gap-2">
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">mark</label>
-      <select aria-label="mark" className={select} value={cur.mark} onChange={(e) => onChange({ ...cur, mark: e.target.value as MarkKind })}>
+      <select aria-label="mark" className={select} value={draft.mark} onChange={(e) => update({ ...draft, mark: e.target.value as MarkKind })}>
         {MARK_KINDS.map((m) => (
           <option key={m} value={m}>
             {m}
@@ -132,7 +143,7 @@ function ChartSpecEditor({
         ))}
       </select>
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">x</label>
-      <select aria-label="x column" className={select} value={cur.x} onChange={(e) => onChange({ ...cur, x: e.target.value })}>
+      <select aria-label="x column" className={select} value={draft.x} onChange={(e) => update({ ...draft, x: e.target.value })}>
         <option value="">select…</option>
         {columns.map((c) => (
           <option key={c} value={c}>
@@ -141,7 +152,7 @@ function ChartSpecEditor({
         ))}
       </select>
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">y</label>
-      <select aria-label="y column" className={select} value={cur.y} onChange={(e) => onChange({ ...cur, y: e.target.value })}>
+      <select aria-label="y column" className={select} value={draft.y} onChange={(e) => update({ ...draft, y: e.target.value })}>
         <option value="">select…</option>
         {columns.map((c) => (
           <option key={c} value={c}>
@@ -150,7 +161,7 @@ function ChartSpecEditor({
         ))}
       </select>
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">series</label>
-      <select aria-label="series column" className={select} value={cur.series} onChange={(e) => onChange({ ...cur, series: e.target.value })}>
+      <select aria-label="series column" className={select} value={draft.series} onChange={(e) => update({ ...draft, series: e.target.value })}>
         <option value="">none</option>
         {columns.map((c) => (
           <option key={c} value={c}>
@@ -245,10 +256,10 @@ export function ReportTabView({
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--card)] px-3 py-2">
         <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">report</span>
         <div className="ml-auto flex items-center gap-2">
-          <button type="button" className={btn} onClick={() => onStateChange(addProseBlock(state))}>
+          <button type="button" className={btn} onClick={() => onStateChange((prev) => addProseBlock(prev))}>
             + prose
           </button>
-          <button type="button" className={btn} onClick={() => onStateChange(addQueryBlock(state))}>
+          <button type="button" className={btn} onClick={() => onStateChange((prev) => addQueryBlock(prev))}>
             + query
           </button>
         </div>
@@ -273,10 +284,10 @@ export function ReportTabView({
               >
                 <BlockControls
                   label={`${block.kind} · block ${i + 1}/${totalBlocks}`}
-                  onUp={() => onStateChange(moveBlock(state, block.id, "up"))}
-                  onDown={() => onStateChange(moveBlock(state, block.id, "down"))}
+                  onUp={() => onStateChange((prev) => moveBlock(prev, block.id, "up"))}
+                  onDown={() => onStateChange((prev) => moveBlock(prev, block.id, "down"))}
                   onRemove={() => {
-                    onStateChange(removeBlock(state, block.id));
+                    onStateChange((prev) => removeBlock(prev, block.id));
                     setRuns((r) => {
                       if (!(block.id in r)) return r;
                       const next = { ...r };
@@ -289,27 +300,29 @@ export function ReportTabView({
                 {block.kind === "prose" ? (
                   <ProseBlock
                     markdown={block.markdown}
-                    onChange={(md) => onStateChange(updateProse(state, block.id, md))}
+                    onChange={(md) => onStateChange((prev) => updateProse(prev, block.id, md))}
                   />
                 ) : (
                   <QueryBlock
                     block={block}
                     entry={runEntry(block.id)}
-                    onSqlChange={(sql) => onStateChange(updateQuerySql(state, block.id, sql))}
+                    onSqlChange={(sql) => onStateChange((prev) => updateQuerySql(prev, block.id, sql))}
                     onRun={() => void runBlock(block.id, block.sql)}
                     onConfirm={() => void confirmBlock(block.id)}
                     onCancel={() => cancelConfirm(block.id)}
-                    onView={(view) => onStateChange(setBlockView(state, block.id, view))}
+                    onView={(view) => onStateChange((prev) => setBlockView(prev, block.id, view))}
                     onSelectRow={(row) => setRuns((r) => ({ ...r, [block.id]: { ...runEntry(block.id), selectedRow: row } }))}
                     onChartChange={(raw) => {
                       // Validate the composed spec against THIS result's columns; an incomplete /
                       // invalid pick clears the chart (mapChart then degrades to the table view).
+                      // Functional updater (like the async run writes) so a concurrent block's
+                      // just-stored result is never clobbered by this render-snapshot write (FR-18).
                       const columnNames = block.result?.columns.map((c) => c.name) ?? [];
                       const spec = parseChartSpec(
                         { mark: raw.mark, x: raw.x, y: raw.y, ...(raw.series !== "" ? { series: raw.series } : {}) },
                         columnNames,
                       );
-                      onStateChange(setBlockChart(state, block.id, spec));
+                      onStateChange((prev) => setBlockChart(prev, block.id, spec));
                     }}
                   />
                 )}

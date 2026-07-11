@@ -81,12 +81,20 @@ export function pivot(chart: ChartData): { rows: ChartRecord[]; keys: string[] }
 /** Strip the reserved `s:` series-key prefix for a human-readable mark/tooltip name. */
 const seriesLabel = (key: string): string => (key.startsWith("s:") ? key.slice(2) : key);
 
+/**
+ * A FUNCTION `dataKey` that reads `record[key]` directly. Recharts resolves a STRING
+ * `dataKey` as a lodash-style path, so a key containing `.`/`[`/`]` (a column name or a
+ * pivoted series value like `web.prod` or `2024.01`) would be mis-read as a nested lookup
+ * and silently drop the whole series. A function accessor bypasses path parsing entirely.
+ */
+const keyOf = (key: string) => (record: ChartRecord): ChartValue => record[key] ?? null;
+
 /** Shared axis + grid + tooltip furniture for every mark. */
 function Frame({ xKey }: { xKey: string }): React.JSX.Element {
   return (
     <>
       <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-      <XAxis dataKey={xKey} tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
+      <XAxis dataKey={keyOf(xKey)} tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
       <YAxis tick={{ fontSize: 11 }} stroke="var(--muted-foreground)" />
       <Tooltip
         contentStyle={{
@@ -117,7 +125,7 @@ export function ReportChart({ chart }: { chart: ChartData }): React.JSX.Element 
           <LineChart {...common}>
             <Frame xKey={chart.xKey} />
             {keys.map((k, i) => (
-              <Line key={k} name={seriesLabel(k)} type="monotone" dataKey={k} stroke={colorAt(i)} dot={false} isAnimationActive={false} />
+              <Line key={k} name={seriesLabel(k)} type="monotone" dataKey={keyOf(k)} stroke={colorAt(i)} dot={false} isAnimationActive={false} />
             ))}
           </LineChart>
         </ResponsiveContainer>
@@ -128,7 +136,7 @@ export function ReportChart({ chart }: { chart: ChartData }): React.JSX.Element 
           <BarChart {...common}>
             <Frame xKey={chart.xKey} />
             {keys.map((k, i) => (
-              <Bar key={k} name={seriesLabel(k)} dataKey={k} fill={colorAt(i)} isAnimationActive={false} />
+              <Bar key={k} name={seriesLabel(k)} dataKey={keyOf(k)} fill={colorAt(i)} isAnimationActive={false} />
             ))}
           </BarChart>
         </ResponsiveContainer>
@@ -143,7 +151,7 @@ export function ReportChart({ chart }: { chart: ChartData }): React.JSX.Element 
                 key={k}
                 name={seriesLabel(k)}
                 type="monotone"
-                dataKey={k}
+                dataKey={keyOf(k)}
                 stroke={colorAt(i)}
                 fill={colorAt(i)}
                 fillOpacity={0.25}
@@ -159,7 +167,7 @@ export function ReportChart({ chart }: { chart: ChartData }): React.JSX.Element 
           <ScatterChart {...common}>
             <Frame xKey={chart.xKey} />
             {keys.map((k, i) => (
-              <Scatter key={k} name={seriesLabel(k)} dataKey={k} fill={colorAt(i)} isAnimationActive={false} />
+              <Scatter key={k} name={seriesLabel(k)} dataKey={keyOf(k)} fill={colorAt(i)} isAnimationActive={false} />
             ))}
           </ScatterChart>
         </ResponsiveContainer>
