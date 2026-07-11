@@ -452,6 +452,62 @@ export type RemoveProviderResult = {
 };
 
 /* ------------------------------------------------------------------ *
+ * Chat Q&A contract (Story 5.2) — schema-only, Core-sole-caller
+ * ------------------------------------------------------------------ */
+
+/**
+ * Params for `chat.ask`. The request explicitly carries the {@link ProviderKind}
+ * to call — there is no "active provider" concept; the UI offers only configured
+ * providers (from `providers.list`). `message` is the developer's question.
+ */
+export type ChatAskParams = {
+  readonly provider: ProviderKind;
+  readonly message: string;
+};
+
+/**
+ * A row-free projection of the live {@link DatabaseSchema} — the ONLY database
+ * context that leaves the machine (AR-6 / R5). `text` is the compact, deterministic
+ * serialization (table/column names, `dataType`, primary keys, foreign keys — no
+ * rows) fed to the model as its system context; `tables` is the table count for the
+ * inspectable summary. Assembled Core-side; carries zero row data by construction.
+ */
+export type SchemaForModel = {
+  readonly engine: DbEngine;
+  readonly text: string;
+  readonly tables: number;
+};
+
+/**
+ * The outbound provider payload assembled Core-side. `schema` and `rowSample` are
+ * DISTINCT fields so the AR-6 separation is structural, not incidental: in Story 5.2
+ * `rowSample` is ALWAYS `null` (zero rows leave the machine). Story 5.3's per-query
+ * row opt-in is what will ever populate `rowSample` — this shape wires that seam now
+ * without shipping any row-sending path.
+ */
+export type ChatProviderPayload = {
+  readonly schema: SchemaForModel;
+  readonly rowSample: null;
+};
+
+/**
+ * The schema-only context summary returned alongside an answer — the visible proof
+ * of the default policy. `policy` is the literal `"schema-only"`; `tables` is how
+ * many tables were summarized; `rowsIncluded` is the literal `0` (no rows sent).
+ */
+export type ChatContextSummary = {
+  readonly policy: "schema-only";
+  readonly tables: number;
+  readonly rowsIncluded: 0;
+};
+
+/** Result of `chat.ask`: the model's answer plus the schema-only context summary. */
+export type ChatAskResult = {
+  readonly answer: string;
+  readonly context: ChatContextSummary;
+};
+
+/* ------------------------------------------------------------------ *
  * Workspace-state persistence contract (Story 2.5) — credential-free
  * ------------------------------------------------------------------ */
 

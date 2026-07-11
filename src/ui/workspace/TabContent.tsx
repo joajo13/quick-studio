@@ -42,6 +42,8 @@ import {
 } from "../data/row-mutations.ts";
 import { rpc } from "../rpc/client.ts";
 import { envelopeText } from "../rpc/envelope-text.ts";
+import { ChatTabView } from "./ChatTabView.tsx";
+import { emptyChatState, type ChatState } from "./chat-model.ts";
 import { ErdTabView } from "./ErdTabView.tsx";
 import { QueryTabView } from "./QueryTabView.tsx";
 import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
@@ -343,6 +345,8 @@ export function TabContent({
   tables,
   queryDraft,
   onQueryDraftChange,
+  chatState,
+  onChatStateChange,
   erdLayout,
   onErdLayoutChange,
 }: {
@@ -357,6 +361,10 @@ export function TabContent({
   queryDraft?: string;
   /** Update the active query tab's draft SQL. */
   onQueryDraftChange?: (sql: string) => void;
+  /** The active chat tab's session-only state (Story 5.2; never persisted). */
+  chatState?: ChatState;
+  /** Update the active chat tab's session state. */
+  onChatStateChange?: (next: ChatState) => void;
   /** The active ERD tab's persisted layout (Story 4.2), or undefined for dagre fallback. */
   erdLayout?: ErdTabLayout;
   /** Report the active ERD tab's captured geometry up, keyed by tab id (Story 4.2). */
@@ -391,6 +399,19 @@ export function TabContent({
         key={tab.id}
         draft={queryDraft ?? ""}
         onDraftChange={onQueryDraftChange ?? (() => {})}
+      />
+    );
+  }
+
+  if (tab.kind === "chat") {
+    // Keyed by tab id (mirroring the query branch) so each chat Tab owns an isolated
+    // message log + input/busy state instance; the lifted state keeps its history
+    // across Tab switches. Never persisted to the workspace snapshot.
+    return (
+      <ChatTabView
+        key={tab.id}
+        state={chatState ?? emptyChatState()}
+        onStateChange={onChatStateChange ?? (() => {})}
       />
     );
   }

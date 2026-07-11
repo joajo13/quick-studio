@@ -185,3 +185,6 @@ source_spec: `spec-4-2-persist-erd-layout.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260710-224752-6cf5; this entry preserves the lingering follow-up recommendation for a deliberate later review.
 status: open
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-chat-qa-schema-only.md`
+  summary: `connectionManager.getSchema()` memoizes the schema at connect and never re-introspects, so chat context (and the "N tables" badge) goes stale after DDL runs (create/drop table).
+  evidence: `src/core/connection.ts` returns `cached.schema` fixed at first connect; Story 3.4/3.x DDL mutates the live DB but no re-introspection path exists. Surfaced by 5.2 which now feeds that cached schema to the AI provider.

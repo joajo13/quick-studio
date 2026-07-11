@@ -12,10 +12,13 @@
  * to the RPC dispatcher. The token — not loopback — is the real gate (AD-12).
  */
 
-import type { ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
+import type { ChatAskResult, ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
 import { errorReply, okReply } from "../shared/contract.ts";
+import { generateText } from "ai";
+import { resolveModel } from "./ai-provider.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
+import { createChatResponder } from "./chat.ts";
 import { createConnectionManager } from "./connection.ts";
 import { createConnectionRegistry } from "./connection-registry.ts";
 import type { DriverFactory } from "./driver.ts";
@@ -239,6 +242,29 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     quoteIdent: (ident) => connectionManager.quoteIdent(ident),
   });
 
+  // Chat responder (Story 5.2): the SOLE outbound provider caller. Closes over the
+  // single live schema source, the Core-internal `getKey`, the unified model resolver,
+  // and the non-streaming `generateText` — every `ai`/`@ai-sdk/*` touch stays in Ring 1.
+  const chatResponder = createChatResponder({
+    getSchema: () => connectionManager.getSchema(),
+    getKey: (provider) => providerRegistry.getKey(provider),
+    resolveModel,
+    generate: ({ model, system, prompt }) => generateText({ model, system, prompt }),
+  });
+
+  /**
+   * Chat Q&A capability (Story 5.2): delegate to the responder and map its
+   * {@link RegistryResult} onto the wire (mirroring `toReply`). A validation/domain
+   * failure rides as its own `bad_request`/`not_found`/`internal_error`; the raw key
+   * never crosses this boundary nor appears in any `detail`.
+   */
+  async function chat(params: unknown): Promise<RpcReply<ChatAskResult>> {
+    const result = await chatResponder.answer(params);
+    return result.ok
+      ? okReply(result.value)
+      : errorReply(result.code, result.message, result.detail);
+  }
+
   const server = Bun.serve({
     hostname: bindHost,
     port,
@@ -262,6 +288,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         tableRows,
         // Guarded SQL execution (the single risk classifier + composer).
         execute: (params) => executor.execute(params),
+        // Chat Q&A (Core is the sole provider caller; schema-only, zero rows leave).
+        chat,
       };
 
       // --- Static UI assets ---------------------------------------------

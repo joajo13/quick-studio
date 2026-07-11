@@ -31,6 +31,7 @@ import type {
   WorkspaceSnapshot,
 } from "../shared/contract.ts";
 import { rpc } from "./rpc/client.ts";
+import type { ChatState } from "./workspace/chat-model.ts";
 import { Workspace } from "./workspace/Workspace.tsx";
 import {
   activateTab,
@@ -237,6 +238,14 @@ export function App(): React.JSX.Element {
   const onQueryDraftChange = (tabId: number, sql: string): void =>
     setQueryDrafts((cur) => new Map(cur).set(tabId, sql));
 
+  // Session-only chat state per chat Tab id (Story 5.2), keyed by Tab id so each chat
+  // Tab keeps its own message log + picked provider across Tab switches. Like the query
+  // drafts, this is deliberately NEVER folded into `toWorkspaceSnapshot`/`workspace.save`
+  // — chat content (and provider choice) never touches disk; a relaunch starts blank.
+  const [chatStates, setChatStates] = useState<ReadonlyMap<number, ChatState>>(new Map());
+  const onChatStateChange = (tabId: number, next: ChatState): void =>
+    setChatStates((cur) => new Map(cur).set(tabId, next));
+
   // Persisted ERD layouts per tab id (Story 4.2), keyed by stringified tab id to match
   // the snapshot shape. Unlike query drafts, this DOES ride into `toWorkspaceSnapshot`
   // (geometry only — positions + viewport, never credentials/rows/SQL). Seeded from the
@@ -398,6 +407,14 @@ export function App(): React.JSX.Element {
             next.delete(id);
             return next;
           });
+          // Reclaim the closed chat Tab's session state (mirrors the query-draft cleanup;
+          // ids are monotonic so a closed Tab's entry would otherwise linger).
+          setChatStates((cur) => {
+            if (!cur.has(id)) return cur;
+            const next = new Map(cur);
+            next.delete(id);
+            return next;
+          });
           // Prune the closed tab's ERD layout so it stops being persisted (Story 4.2).
           setErdLayouts((cur) => {
             const key = String(id);
@@ -416,6 +433,8 @@ export function App(): React.JSX.Element {
         allTables={allTables}
         queryDrafts={queryDrafts}
         onQueryDraftChange={onQueryDraftChange}
+        chatStates={chatStates}
+        onChatStateChange={onChatStateChange}
         erdLayouts={erdLayouts}
         onErdLayoutChange={onErdLayoutChange}
         extraTables={createdTables}

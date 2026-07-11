@@ -19,6 +19,7 @@ import type { ErdTabLayout, ExposureInfo, SchemaIndexInfo, SchemaTableInfo } fro
 import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
+import type { ChatState } from "./chat-model.ts";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
 import { TAB_KINDS, type TabKind, type WorkspaceState } from "./workspace-state.ts";
@@ -137,6 +138,8 @@ export function Workspace({
   allTables,
   queryDrafts,
   onQueryDraftChange,
+  chatStates,
+  onChatStateChange,
   erdLayouts,
   onErdLayoutChange,
   onStop,
@@ -167,6 +170,10 @@ export function Workspace({
   queryDrafts: ReadonlyMap<number, string>;
   /** Update the draft SQL for query Tab `id`. */
   onQueryDraftChange: (id: number, sql: string) => void;
+  /** Session-only chat state per chat Tab id (Story 5.2; never persisted). */
+  chatStates: ReadonlyMap<number, ChatState>;
+  /** Update the chat state for chat Tab `id`. */
+  onChatStateChange: (id: number, next: ChatState) => void;
   /** Persisted ERD layouts keyed by stringified tab id (Story 4.2). */
   erdLayouts: Readonly<Record<string, ErdTabLayout>>;
   /** Report an ERD tab's captured geometry up for the debounced persist. */
@@ -277,6 +284,10 @@ export function Workspace({
                   queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
                   onQueryDraftChange={(sql) => {
                     if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
+                  }}
+                  chatState={activeTab !== null ? chatStates.get(activeTab.id) : undefined}
+                  onChatStateChange={(next) => {
+                    if (activeTab !== null) onChatStateChange(activeTab.id, next);
                   }}
                   erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
                   onErdLayoutChange={onErdLayoutChange}

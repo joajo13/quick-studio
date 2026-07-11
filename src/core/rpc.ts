@@ -10,6 +10,7 @@ import {
   FROZEN_SCHEMA_VERSION,
   errorReply,
   okReply,
+  type ChatAskResult,
   type ConnectResult,
   type ExecuteResult,
   type HealthResult,
@@ -63,6 +64,16 @@ export type RpcContext = {
    * engine text).
    */
   readonly execute: (params: unknown) => Promise<RpcReply<ExecuteResult>>;
+  /**
+   * Chat Q&A (Story 5.2): the Core is the SOLE provider caller. Resolves the
+   * requested provider's key in Ring 1, introspects the single live schema, assembles
+   * a schema-only payload (zero rows), runs one non-streaming generate, and returns
+   * {@link ChatAskResult}. Returns an ALREADY-formed {@link RpcReply} so it can signal
+   * `bad_request` (invalid provider / blank message / no connection), `not_found`
+   * (provider not configured), or `internal_error` (SDK throw) itself — the raw key
+   * never crosses this boundary nor appears in any `detail`.
+   */
+  readonly chat: (params: unknown) => Promise<RpcReply<ChatAskResult>>;
 };
 
 /**
@@ -222,6 +233,13 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
    * `internal_error` (raw engine text never reaches the client `detail`).
    */
   execute: async (params, ctx): Promise<Preformed> => preformed(await ctx.execute(params)),
+  /**
+   * Chat Q&A (Story 5.2). The responder resolves the key in Ring 1, assembles the
+   * schema-only payload, and runs the single outbound provider call, returning a
+   * fully-formed reply (`bad_request`/`not_found`/`internal_error` on its own); we
+   * tag it `preformed`. The raw key never reaches the client `detail`.
+   */
+  "chat.ask": async (params, ctx): Promise<Preformed> => preformed(await ctx.chat(params)),
 };
 
 /**
