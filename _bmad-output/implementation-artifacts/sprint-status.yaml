@@ -96,7 +96,7 @@ development_status:
   5-2-chat-qa-schema-only: done                 # Story 5.2: Chat Q&A with the Core as sole Provider caller, schema-only by default
   5-3-nl-to-query-execution: done            # Story 5.3: Natural-language to query + execution from chat
   5-4-streaming-reasoning: done                 # Story 5.4: Streaming responses with visible reasoning
-  5-5-crossorigin-js-sandbox: backlog           # Story 5.5: Cross-origin executable-JS sandbox with adversarial containment
+  5-5-crossorigin-js-sandbox: done           # Story 5.5: Cross-origin executable-JS sandbox with adversarial containment
   5-6-rich-mdx-rendering: backlog               # Story 5.6: Rich MDX rendering (Markdown + executable JS + charts)
   epic-5-retrospective: optional
 

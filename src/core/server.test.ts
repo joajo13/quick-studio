@@ -80,6 +80,62 @@ test("default boot is not exposed and injects exposed:false into the served HTML
   expect(html).toContain('"exposed":false');
 });
 
+// Story 5.5: Core boots a SECOND server (the Ring 3 sandbox origin) on a distinct
+// port and injects that origin into the served HTML for Ring 2 to point the iframe at.
+describe("Ring 3 sandbox origin (Story 5.5)", () => {
+  test("core.sandboxOrigin is a distinct loopback origin injected into the HTML", async () => {
+    expect(core.sandboxOrigin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    // A genuinely separate origin: same host, DIFFERENT port from the Core.
+    expect(core.sandboxOrigin).not.toBe(core.url);
+    const html = await (await fetch(`${core.url}/`)).text();
+    expect(html).toContain("window.__QS_SANDBOX_ORIGIN__");
+    expect(html).toContain(core.sandboxOrigin);
+  });
+
+  test("the sandbox origin serves the guest doc under connect-src 'none' and no token", async () => {
+    const res = await fetch(`${core.sandboxOrigin}/`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-security-policy") ?? "").toContain("connect-src 'none'");
+    const body = await res.text();
+    expect(body).not.toContain("__QS_TOKEN__");
+    // The sandbox origin exposes no data endpoints.
+    expect((await fetch(`${core.sandboxOrigin}/rpc`, { method: "POST" })).status).toBe(404);
+  });
+
+  test("core.stop() also tears the sandbox server down (its origin stops answering)", async () => {
+    const c = await startCore(0);
+    const sandboxOrigin = c.sandboxOrigin;
+    expect((await fetch(`${sandboxOrigin}/`)).status).toBe(200);
+    await c.stop();
+    // After teardown the sandbox listener is gone — a fetch now fails to connect.
+    await expect(fetch(`${sandboxOrigin}/`)).rejects.toThrow();
+  });
+
+  test("core.stop() still stops the Core server even when sandbox stop rejects", async () => {
+    // A throwing sandbox teardown must NEVER skip the Core `server.stop()` (try/finally):
+    // both ports are always released, never orphaned by an ordering accident.
+    let sandboxStopCalls = 0;
+    const c = await startCore(0, {
+      startSandboxServer: () => ({
+        port: 65535,
+        origin: "http://127.0.0.1:65535",
+        stop: () => {
+          sandboxStopCalls += 1;
+          throw new Error("sandbox stop boom");
+        },
+      }),
+    });
+    const coreUrl = c.url;
+    // The Core is live before teardown.
+    expect((await fetch(`${coreUrl}/`)).status).toBe(200);
+    // stop() surfaces the sandbox failure…
+    await expect(c.stop()).rejects.toThrow("sandbox stop boom");
+    expect(sandboxStopCalls).toBe(1);
+    // …but the Core server was still stopped in the `finally` — its port is freed.
+    await expect(fetch(`${coreUrl}/`)).rejects.toThrow();
+  });
+});
+
 // The exposed-path injection is unit-tested via the exported `renderIndexHtml`
 // rather than a second `startCore({ host: "0.0.0.0" })` boot — booting a real
 // wildcard listener would open a token-bearing endpoint to the whole LAN for the
@@ -290,7 +346,7 @@ describe("connect RPC through the gate (Story 1.3)", () => {
 
 describe("renderIndexHtml exposure injection", () => {
   test("carries exposed:true and the bound host into the served HTML", () => {
-    const html = renderIndexHtml("abc123", { exposed: true, host: "0.0.0.0", port: 4321 });
+    const html = renderIndexHtml("abc123", { exposed: true, host: "0.0.0.0", port: 4321 }, "http://127.0.0.1:5555");
     expect(html).toContain("window.__QS_EXPOSURE__");
     expect(html).toContain('"exposed":true');
     expect(html).toContain('"host":"0.0.0.0"');
@@ -298,13 +354,30 @@ describe("renderIndexHtml exposure injection", () => {
   });
 
   test("script-escapes an untrusted host so it cannot break out of <script>", () => {
-    const html = renderIndexHtml("abc123", {
-      exposed: true,
-      host: "</script><script>alert(1)</script>",
-      port: 80,
-    });
+    const html = renderIndexHtml(
+      "abc123",
+      { exposed: true, host: "</script><script>alert(1)</script>", port: 80 },
+      "http://127.0.0.1:5555",
+    );
     // The literal `</script>` sequence must never appear unescaped in the shell.
     expect(html).not.toContain("<script>alert(1)");
     expect(html).toContain("\\u003c");
+  });
+
+  test("injects the sandbox origin and URL-charset-filters it", () => {
+    const html = renderIndexHtml("abc123", { exposed: false, host: "127.0.0.1", port: 80 }, "http://127.0.0.1:6789");
+    expect(html).toContain("window.__QS_SANDBOX_ORIGIN__");
+    expect(html).toContain("http://127.0.0.1:6789");
+  });
+
+  test("strips a script-breakout attempt from an untrusted sandbox origin", () => {
+    const html = renderIndexHtml(
+      "abc123",
+      { exposed: false, host: "127.0.0.1", port: 80 },
+      'http://127.0.0.1:1</script><script>alert(1)</script>',
+    );
+    expect(html).not.toContain("<script>alert(1)");
+    // The filter drops `<`/`>`/space so the injected value is inert.
+    expect(html).not.toContain("</script><script>alert(1)");
   });
 });

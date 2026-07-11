@@ -515,6 +515,119 @@ export type ChatStreamChunk =
   | { readonly type: "error"; readonly code: RpcErrorCode; readonly message: string };
 
 /* ------------------------------------------------------------------ *
+ * Sandbox postMessage protocol (Story 5.5) — one-way data, Ring 3
+ * ------------------------------------------------------------------ */
+
+/**
+ * Version of the Ring 2 <-> Ring 3 `postMessage` protocol. Bump on any breaking
+ * change to {@link SandboxInbound} / {@link SandboxOutbound}. Both directions
+ * carry the version so a mismatched host and guest reject each other's frames
+ * rather than mis-parsing them.
+ */
+export const SANDBOX_PROTOCOL_VERSION = 1 as const;
+export type SandboxProtocolVersion = typeof SANDBOX_PROTOCOL_VERSION;
+
+/**
+ * A frame pushed Ring 2 -> guest (host -> Ring 3). One-way for DATA: the ONLY
+ * inbound frame is `render`, which carries already-public canonical
+ * {@link FrozenData}. There is deliberately NO inbound frame that can hand the
+ * guest a secret, a live handle, or a capability, and none that asks the guest to
+ * request data or trigger a query — that separation is structural, not policy.
+ */
+export type SandboxInbound = {
+  readonly type: "render";
+  readonly protocolVersion: SandboxProtocolVersion;
+  readonly data: FrozenData;
+};
+
+/**
+ * A frame emitted guest -> Ring 2 (Ring 3 -> host). Render-lifecycle and
+ * interaction SIGNALS only — never data:
+ *  - `ready` — the guest has drawn the current frame.
+ *  - `height` — the guest's measured content height in CSS px (for iframe sizing).
+ *  - `datum-clicked` — the user clicked a rendered cell at `{row,col}` (grid
+ *    coordinates into the pushed `FrozenData`, never the cell's value).
+ *  - `error` — the guest failed to render; carries a terse message, never data.
+ *    `message` is UNTRUSTED guest-authored text — treat it as opaque, never as
+ *    markup/HTML, and the guard caps its length (see {@link isSandboxOutbound}).
+ * The union structurally cannot carry `FrozenData` or a query — that is what makes
+ * "capability never flows inward" provable at the type level.
+ */
+export type SandboxOutbound =
+  | { readonly type: "ready"; readonly protocolVersion: SandboxProtocolVersion }
+  | { readonly type: "height"; readonly protocolVersion: SandboxProtocolVersion; readonly px: number }
+  | {
+      readonly type: "datum-clicked";
+      readonly protocolVersion: SandboxProtocolVersion;
+      readonly row: number;
+      readonly col: number;
+    }
+  | { readonly type: "error"; readonly protocolVersion: SandboxProtocolVersion; readonly message: string };
+
+/**
+ * Pure runtime guard for an inbound frame. Accepts ONLY a `render` frame at the
+ * current protocol version whose `data` is valid {@link FrozenData} (delegated to
+ * the existing {@link decode}, so the guest never re-derives the schema rules).
+ * Rejects a wrong tag, a wrong/absent version, a non-object, and invalid data.
+ * Total: never throws (a `decode` throw is swallowed into `false`).
+ */
+export function isSandboxInbound(value: unknown): value is SandboxInbound {
+  if (typeof value !== "object" || value === null) return false;
+  const frame = value as { readonly type?: unknown; readonly protocolVersion?: unknown; readonly data?: unknown };
+  if (frame.type !== "render") return false;
+  if (frame.protocolVersion !== SANDBOX_PROTOCOL_VERSION) return false;
+  try {
+    decode(frame.data as FrozenData);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Pure runtime guard for an outbound signal. Validates the tag + version and the
+ * per-tag shape. Rejects a wrong/absent version, an unknown tag, a non-object, and
+ * a numeric field that is not a finite number. Bounds every untrusted field the
+ * guest controls: `height.px` must be non-negative, `datum-clicked` coordinates must
+ * be non-negative integers (never a negative index into the grid), and `error.message`
+ * — untrusted guest text — is length-capped so a hostile guest cannot flood the host.
+ * There is no branch that admits data because the union has no such member. Total:
+ * never throws.
+ */
+export function isSandboxOutbound(value: unknown): value is SandboxOutbound {
+  if (typeof value !== "object" || value === null) return false;
+  const frame = value as {
+    readonly type?: unknown;
+    readonly protocolVersion?: unknown;
+    readonly px?: unknown;
+    readonly row?: unknown;
+    readonly col?: unknown;
+    readonly message?: unknown;
+  };
+  if (frame.protocolVersion !== SANDBOX_PROTOCOL_VERSION) return false;
+  switch (frame.type) {
+    case "ready":
+      return true;
+    case "height":
+      return typeof frame.px === "number" && Number.isFinite(frame.px) && frame.px >= 0;
+    case "datum-clicked":
+      return (
+        typeof frame.row === "number" &&
+        Number.isInteger(frame.row) &&
+        frame.row >= 0 &&
+        typeof frame.col === "number" &&
+        Number.isInteger(frame.col) &&
+        frame.col >= 0
+      );
+    case "error":
+      // `message` is untrusted guest-authored text — cap its length defensively.
+      return typeof frame.message === "string" && frame.message.length <= 1000;
+    default:
+      return false;
+  }
+}
+
+/* ------------------------------------------------------------------ *
  * Workspace-state persistence contract (Story 2.5) — credential-free
  * ------------------------------------------------------------------ */
 

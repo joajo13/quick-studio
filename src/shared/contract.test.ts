@@ -1,13 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import {
   FROZEN_SCHEMA_VERSION,
+  SANDBOX_PROTOCOL_VERSION,
   assertIsoUtc,
   decode,
   encode,
   errorReply,
+  isSandboxInbound,
+  isSandboxOutbound,
   okReply,
   toIsoUtc,
   type FrozenData,
+  type SandboxInbound,
+  type SandboxOutbound,
 } from "./contract.ts";
 
 const fixture: FrozenData = {
@@ -168,6 +173,101 @@ describe("ISO-8601 UTC enforcement", () => {
   test("toIsoUtc throws a TypeError on an invalid Date (not a raw RangeError)", () => {
     expect(() => toIsoUtc(new Date("garbage"))).toThrow(TypeError);
     expect(() => toIsoUtc(new Date(NaN))).toThrow(TypeError);
+  });
+});
+
+describe("sandbox protocol guards (Story 5.5)", () => {
+  const renderFrame: SandboxInbound = {
+    type: "render",
+    protocolVersion: SANDBOX_PROTOCOL_VERSION,
+    data: fixture,
+  };
+
+  describe("isSandboxInbound", () => {
+    test("accepts a valid render frame carrying valid FrozenData", () => {
+      expect(isSandboxInbound(renderFrame)).toBe(true);
+    });
+
+    test("rejects a wrong tag", () => {
+      expect(isSandboxInbound({ ...renderFrame, type: "run-query" })).toBe(false);
+      expect(isSandboxInbound({ ...renderFrame, type: "data-request" })).toBe(false);
+    });
+
+    test("rejects a wrong / absent protocol version", () => {
+      expect(isSandboxInbound({ ...renderFrame, protocolVersion: 999 })).toBe(false);
+      expect(isSandboxInbound({ type: "render", data: fixture })).toBe(false);
+    });
+
+    test("rejects a non-object", () => {
+      expect(isSandboxInbound(null)).toBe(false);
+      expect(isSandboxInbound("render")).toBe(false);
+      expect(isSandboxInbound(undefined)).toBe(false);
+    });
+
+    test("rejects a render frame whose data fails FrozenData decoding", () => {
+      const ragged = {
+        schemaVersion: FROZEN_SCHEMA_VERSION,
+        columns: [{ name: "a", type: "number" }, { name: "b", type: "string" }],
+        rows: [[{ kind: "number", value: 1 }]], // one cell for two columns
+      };
+      expect(isSandboxInbound({ type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, data: ragged })).toBe(false);
+      expect(isSandboxInbound({ type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION })).toBe(false);
+      expect(isSandboxInbound({ type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, data: null })).toBe(false);
+    });
+  });
+
+  describe("isSandboxOutbound", () => {
+    const ready: SandboxOutbound = { type: "ready", protocolVersion: SANDBOX_PROTOCOL_VERSION };
+    const height: SandboxOutbound = { type: "height", protocolVersion: SANDBOX_PROTOCOL_VERSION, px: 240 };
+    const clicked: SandboxOutbound = { type: "datum-clicked", protocolVersion: SANDBOX_PROTOCOL_VERSION, row: 2, col: 3 };
+    const err: SandboxOutbound = { type: "error", protocolVersion: SANDBOX_PROTOCOL_VERSION, message: "boom" };
+
+    test("accepts every valid signal frame", () => {
+      for (const frame of [ready, height, clicked, err]) {
+        expect(isSandboxOutbound(frame)).toBe(true);
+      }
+    });
+
+    test("rejects a wrong tag", () => {
+      expect(isSandboxOutbound({ type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION })).toBe(false);
+      expect(isSandboxOutbound({ type: "data", protocolVersion: SANDBOX_PROTOCOL_VERSION })).toBe(false);
+    });
+
+    test("rejects a wrong / absent protocol version", () => {
+      expect(isSandboxOutbound({ ...ready, protocolVersion: 2 })).toBe(false);
+      expect(isSandboxOutbound({ type: "ready" })).toBe(false);
+    });
+
+    test("rejects a non-object", () => {
+      expect(isSandboxOutbound(null)).toBe(false);
+      expect(isSandboxOutbound(42)).toBe(false);
+    });
+
+    test("rejects a malformed numeric payload", () => {
+      expect(isSandboxOutbound({ ...height, px: "240" })).toBe(false);
+      expect(isSandboxOutbound({ ...height, px: Number.NaN })).toBe(false);
+      expect(isSandboxOutbound({ ...clicked, row: 1.5 })).toBe(false);
+      expect(isSandboxOutbound({ ...clicked, col: "3" })).toBe(false);
+      expect(isSandboxOutbound({ ...err, message: 7 })).toBe(false);
+    });
+
+    test("rejects a negative height px (bounds an untrusted guest field)", () => {
+      expect(isSandboxOutbound({ ...height, px: -1 })).toBe(false);
+      // Zero is a legitimate measured height (empty content).
+      expect(isSandboxOutbound({ ...height, px: 0 })).toBe(true);
+    });
+
+    test("rejects negative datum-clicked coordinates (never a negative grid index)", () => {
+      expect(isSandboxOutbound({ ...clicked, row: -1 })).toBe(false);
+      expect(isSandboxOutbound({ ...clicked, col: -1 })).toBe(false);
+      // Zero coordinates are the first cell — admissible.
+      expect(isSandboxOutbound({ ...clicked, row: 0, col: 0 })).toBe(true);
+    });
+
+    test("rejects an over-long error message (untrusted guest text is length-capped)", () => {
+      expect(isSandboxOutbound({ ...err, message: "x".repeat(1000) })).toBe(true);
+      expect(isSandboxOutbound({ ...err, message: "x".repeat(1001) })).toBe(false);
+    });
   });
 });
 
