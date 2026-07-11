@@ -178,3 +178,10 @@ Append-only ledger of issues surfaced during review that are intentionally defer
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
   summary: Decide how to signal cross-database MySQL foreign keys instead of silently dropping their edges in the ERD.
   evidence: When a MySQL connection names a database, columns are scoped to that schema but a FK may reference a table in another database; `schemaToGraph` then drops the edge as an "absent table" with no user indication a real relationship was omitted. Defensible for v1 but an explicit product decision (dangling-edge affordance vs. note vs. silent) is preferable.
+
+### DW-1: Follow-up review still recommended for 4-2-persist-erd-layout after the review budget was exhausted
+origin: review-budget-followup
+source_spec: `spec-4-2-persist-erd-layout.md`
+severity: low
+reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260710-224752-6cf5; this entry preserves the lingering follow-up recommendation for a deliberate later review.
+status: open

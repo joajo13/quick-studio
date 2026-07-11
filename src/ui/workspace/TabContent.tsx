@@ -11,6 +11,7 @@
 
 import { useEffect, useState } from "react";
 import type {
+  ErdTabLayout,
   ExecuteResult,
   FrozenRow,
   SchemaIndexInfo,
@@ -342,6 +343,8 @@ export function TabContent({
   tables,
   queryDraft,
   onQueryDraftChange,
+  erdLayout,
+  onErdLayoutChange,
 }: {
   tab: WorkspaceTab | null;
   /** PK column names of the active table tab's bound table (for the grid key icon). */
@@ -354,6 +357,10 @@ export function TabContent({
   queryDraft?: string;
   /** Update the active query tab's draft SQL. */
   onQueryDraftChange?: (sql: string) => void;
+  /** The active ERD tab's persisted layout (Story 4.2), or undefined for dagre fallback. */
+  erdLayout?: ErdTabLayout;
+  /** Report the active ERD tab's captured geometry up, keyed by tab id (Story 4.2). */
+  onErdLayoutChange?: (tabId: number, layout: ErdTabLayout) => void;
 }): React.JSX.Element {
   if (tab === null) {
     return <EmptyState />;
@@ -390,9 +397,17 @@ export function TabContent({
 
   if (tab.kind === "erd") {
     // Keyed by tab id (mirroring the query branch) so each ERD Tab owns an isolated
-    // React Flow instance. Fed App's live `allTables`, so a table created via Epic 3's
-    // builder appears without a manual refresh.
-    return <ErdTabView key={tab.id} tables={tables ?? []} />;
+    // React Flow instance and reads ITS tab's saved layout at mount. Fed App's live
+    // `allTables`, so a table created via Epic 3's builder appears without a manual
+    // refresh. Layout changes are reported up keyed by this tab id (Story 4.2).
+    return (
+      <ErdTabView
+        key={tab.id}
+        tables={tables ?? []}
+        savedLayout={erdLayout}
+        onLayoutChange={(layout) => onErdLayoutChange?.(tab.id, layout)}
+      />
+    );
   }
 
   return (

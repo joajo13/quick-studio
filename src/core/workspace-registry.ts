@@ -22,6 +22,7 @@
  */
 
 import type {
+  ErdTabLayout,
   LoadWorkspaceResult,
   SaveWorkspaceResult,
   WorkspaceSnapshot,
@@ -105,6 +106,61 @@ function checkTabs(
   return { ok: true, value: value as WorkspaceSnapshotTab[] };
 }
 
+const isFiniteNumber = (n: unknown): n is number => typeof n === "number" && Number.isFinite(n);
+
+/**
+ * Optional `erdLayouts` (Story 4.2): a map keyed by stringified tab id, each layout a
+ * `positions` object of `{x,y}` FINITE coords and an optional finite `{x,y,zoom}`
+ * viewport. An entry with a non-finite coordinate is a `bad_request` (nothing written);
+ * an ABSENT field is valid (additive — old callers omit it). Returns a normalized value
+ * (or `undefined` when absent) so the saved snapshot only carries the field when present.
+ */
+function checkErdLayouts(
+  value: unknown,
+): { ok: true; value: Record<string, ErdTabLayout> | undefined } | { ok: false; reason: string } {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { ok: false, reason: "erdLayouts must be an object keyed by tab id" };
+  }
+  const out: Record<string, ErdTabLayout> = {};
+  for (const [tabKey, layout] of Object.entries(value)) {
+    if (typeof layout !== "object" || layout === null || Array.isArray(layout)) {
+      return { ok: false, reason: "each erd layout must be an object" };
+    }
+    const l = layout as Record<string, unknown>;
+    if (typeof l.positions !== "object" || l.positions === null || Array.isArray(l.positions)) {
+      return { ok: false, reason: "each erd layout.positions must be an object" };
+    }
+    const positions: Record<string, { x: number; y: number }> = {};
+    for (const [nodeId, pos] of Object.entries(l.positions)) {
+      if (typeof pos !== "object" || pos === null) {
+        return { ok: false, reason: "each erd position must have finite numeric x and y" };
+      }
+      const p = pos as Record<string, unknown>;
+      if (!isFiniteNumber(p.x) || !isFiniteNumber(p.y)) {
+        return { ok: false, reason: "each erd position must have finite numeric x and y" };
+      }
+      positions[nodeId] = { x: p.x, y: p.y };
+    }
+    const built: { positions: Record<string, { x: number; y: number }>; viewport?: { x: number; y: number; zoom: number } } = {
+      positions,
+    };
+    if (l.viewport !== undefined) {
+      if (typeof l.viewport !== "object" || l.viewport === null) {
+        return { ok: false, reason: "erd layout.viewport must have finite numeric x, y, zoom" };
+      }
+      const vp = l.viewport as Record<string, unknown>;
+      // `zoom` must be positive — 0/negative restores a degenerate (blank) canvas.
+      if (!isFiniteNumber(vp.x) || !isFiniteNumber(vp.y) || !isFiniteNumber(vp.zoom) || vp.zoom <= 0) {
+        return { ok: false, reason: "erd layout.viewport must have finite numeric x, y, and positive zoom" };
+      }
+      built.viewport = { x: vp.x, y: vp.y, zoom: vp.zoom };
+    }
+    out[tabKey] = built;
+  }
+  return { ok: true, value: out };
+}
+
 /**
  * Full semantic validation of `workspace.save` params, producing a well-formed
  * {@link WorkspaceSnapshot} on success or a field-named `bad_request` on failure.
@@ -136,6 +192,9 @@ function validateSnapshotParams(params: unknown): RegistryResult<WorkspaceSnapsh
     return badRequest("nextId", "nextId must be a finite number greater than every tab id");
   }
 
+  const erdLayouts = checkErdLayouts(p.erdLayouts);
+  if (!erdLayouts.ok) return badRequest("erdLayouts", erdLayouts.reason);
+
   return {
     ok: true,
     value: {
@@ -144,6 +203,9 @@ function validateSnapshotParams(params: unknown): RegistryResult<WorkspaceSnapsh
       tabs: tabs.value,
       activeTabId: (p.activeTabId as number | null) ?? null,
       nextId: p.nextId,
+      // Only carry `erdLayouts` when actually present, so a snapshot with no ERD layout
+      // stays byte-identical to a pre-4.2 one (no gratuitous empty field on the wire).
+      ...(erdLayouts.value !== undefined ? { erdLayouts: erdLayouts.value } : {}),
     },
   };
 }

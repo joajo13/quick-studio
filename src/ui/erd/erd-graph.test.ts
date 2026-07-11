@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import { MarkerType } from "@xyflow/react";
 import type { SchemaForeignKeyInfo, SchemaTableInfo } from "../../shared/contract.ts";
-import { schemaToGraph, tableId } from "./erd-graph.ts";
+import { applyLayout, schemaToGraph, tableId } from "./erd-graph.ts";
 
 function col(name: string, dataType = "integer"): SchemaTableInfo["columns"][number] {
   return { name, dataType, nullable: false };
@@ -200,5 +200,97 @@ describe("schemaToGraph — I/O & Edge-Case Matrix", () => {
     expect(graph.edges.length).toBe(1);
     expect(graph.edges[0]?.source).toBe(tableId("sales", "orders"));
     expect(graph.edges[0]?.target).toBe(tableId("crm", "customers"));
+  });
+});
+
+describe("applyLayout — saved-position overlay I/O & Edge-Case Matrix (Story 4.2)", () => {
+  /** A two-table graph (orders → users) reused across the overlay scenarios. */
+  function sample(): ReturnType<typeof schemaToGraph> {
+    return schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        primaryKey: ["id"],
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "public", referencedTable: "users", referencedColumns: ["id"] },
+        ],
+      }),
+      table("users", [{ name: "id" }], { primaryKey: ["id"] }),
+    ]);
+  }
+
+  const ordersId = tableId("public", "orders");
+  const usersId = tableId("public", "users");
+
+  test("full saved layout: every node uses its saved {x,y}, dagre overridden", () => {
+    const graph = sample();
+    const saved = { [ordersId]: { x: 100, y: 200 }, [usersId]: { x: 300, y: 400 } };
+    const out = applyLayout(graph, saved);
+    expect(out.nodes.find((n) => n.id === ordersId)?.position).toEqual({ x: 100, y: 200 });
+    expect(out.nodes.find((n) => n.id === usersId)?.position).toEqual({ x: 300, y: 400 });
+    // Edges are untouched by the overlay.
+    expect(out.edges).toEqual(graph.edges);
+  });
+
+  test("partial saved layout: a new (unsaved) table keeps its dagre position", () => {
+    const graph = sample();
+    const dagreUsers = graph.nodes.find((n) => n.id === usersId)?.position;
+    const out = applyLayout(graph, { [ordersId]: { x: 100, y: 200 } });
+    expect(out.nodes.find((n) => n.id === ordersId)?.position).toEqual({ x: 100, y: 200 });
+    // users had no saved position → keeps the exact dagre position it started with.
+    expect(out.nodes.find((n) => n.id === usersId)?.position).toEqual(dagreUsers!);
+  });
+
+  test("stale saved layout: a position for an absent node id is ignored (no phantom node)", () => {
+    const graph = sample();
+    const out = applyLayout(graph, {
+      [ordersId]: { x: 100, y: 200 },
+      [tableId("public", "dropped")]: { x: 999, y: 999 },
+    });
+    // Still exactly the two real nodes; the dropped-table entry created nothing.
+    expect(out.nodes.map((n) => n.id).sort()).toEqual([ordersId, usersId].sort());
+    expect(out.nodes.find((n) => n.id === ordersId)?.position).toEqual({ x: 100, y: 200 });
+  });
+
+  test("no saved layout (undefined): all nodes keep their dagre positions unchanged", () => {
+    const graph = sample();
+    const out = applyLayout(graph, undefined);
+    expect(out).toBe(graph); // returned unchanged (Story 4.1 behaviour)
+  });
+
+  test("no saved layout (empty map): all nodes keep their dagre positions", () => {
+    const graph = sample();
+    const out = applyLayout(graph, {});
+    for (const n of out.nodes) {
+      const original = graph.nodes.find((g) => g.id === n.id)!;
+      expect(n.position).toEqual(original.position);
+    }
+  });
+
+  test("empty graph: empty graph returned, nothing applied", () => {
+    const empty = schemaToGraph([]);
+    const out = applyLayout(empty, { [ordersId]: { x: 10, y: 20 } });
+    expect(out.nodes).toEqual([]);
+    expect(out.edges).toEqual([]);
+  });
+
+  test("malformed coordinate (non-finite x or y): entry skipped, node falls back to dagre", () => {
+    const graph = sample();
+    const dagreOrders = graph.nodes.find((n) => n.id === ordersId)?.position;
+    for (const bad of [
+      { x: Number.NaN, y: 10 },
+      { x: 10, y: Number.POSITIVE_INFINITY },
+      { x: Number.NEGATIVE_INFINITY, y: Number.NEGATIVE_INFINITY },
+    ]) {
+      const out = applyLayout(graph, { [ordersId]: bad });
+      expect(out.nodes.find((n) => n.id === ordersId)?.position).toEqual(dagreOrders!);
+    }
+  });
+
+  test("null/non-object saved entry: skipped without throwing, node falls back to dagre", () => {
+    const graph = sample();
+    const dagreOrders = graph.nodes.find((n) => n.id === ordersId)?.position;
+    for (const bad of [null, undefined, 5, "x"] as unknown[]) {
+      const out = applyLayout(graph, { [ordersId]: bad } as never);
+      expect(out.nodes.find((n) => n.id === ordersId)?.position).toEqual(dagreOrders!);
+    }
   });
 });

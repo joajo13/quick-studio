@@ -15,7 +15,7 @@
 
 import { useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import type { ExposureInfo, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
+import type { ErdTabLayout, ExposureInfo, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
 import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
@@ -137,6 +137,8 @@ export function Workspace({
   allTables,
   queryDrafts,
   onQueryDraftChange,
+  erdLayouts,
+  onErdLayoutChange,
   onStop,
   stopping,
   connectionIndicator,
@@ -165,6 +167,10 @@ export function Workspace({
   queryDrafts: ReadonlyMap<number, string>;
   /** Update the draft SQL for query Tab `id`. */
   onQueryDraftChange: (id: number, sql: string) => void;
+  /** Persisted ERD layouts keyed by stringified tab id (Story 4.2). */
+  erdLayouts: Readonly<Record<string, ErdTabLayout>>;
+  /** Report an ERD tab's captured geometry up for the debounced persist. */
+  onErdLayoutChange: (tabId: number, layout: ErdTabLayout) => void;
   onStop: () => void;
   stopping: boolean;
   connectionIndicator: React.ReactNode;
@@ -272,6 +278,8 @@ export function Workspace({
                   onQueryDraftChange={(sql) => {
                     if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
                   }}
+                  erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
+                  onErdLayoutChange={onErdLayoutChange}
                 />
               </div>
             </div>

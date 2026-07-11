@@ -22,6 +22,7 @@
 import {
   WORKSPACE_SNAPSHOT_VERSION,
   WORKSPACE_TAB_KINDS,
+  type ErdTabLayout,
   type WorkspaceSnapshot,
   type WorkspaceTabKind,
 } from "../../shared/contract.ts";
@@ -197,19 +198,56 @@ export function restoreWorkspace(snapshot: WorkspaceSnapshot): WorkspaceState {
 }
 
 /**
+ * Prune an `erdLayouts` map (Story 4.2) to only the tab ids present in `tabs` —
+ * defensive on BOTH persistence directions so a layout for a closed/absent tab never
+ * lingers on disk or after a restore. Layout keys are stringified tab ids. Pure.
+ */
+function pruneErdLayouts(
+  erdLayouts: Readonly<Record<string, ErdTabLayout>>,
+  tabs: ReadonlyArray<{ readonly id: number }>,
+): Record<string, ErdTabLayout> {
+  const ids = new Set(tabs.map((t) => String(t.id)));
+  const out: Record<string, ErdTabLayout> = {};
+  for (const [tabKey, layout] of Object.entries(erdLayouts)) {
+    if (ids.has(tabKey)) out[tabKey] = layout;
+  }
+  return out;
+}
+
+/**
+ * Seed the App-held `erdLayouts` from a loaded {@link WorkspaceSnapshot} (Story 4.2),
+ * dropping any layout whose tab id is not among `tabs` (the restored tab set) — the
+ * restore-side twin of {@link toWorkspaceSnapshot}'s pruning. Pure and total: a snapshot
+ * with no `erdLayouts` (a pre-4.2 file) yields `{}` so the ERD falls back to dagre. Like
+ * `panelSizes`, ERD geometry is React-held App state rather than part of the pure
+ * {@link WorkspaceState}, so it is threaded through this sibling helper.
+ */
+export function restoreErdLayouts(
+  snapshot: WorkspaceSnapshot,
+  tabs: ReadonlyArray<{ readonly id: number }>,
+): Record<string, ErdTabLayout> {
+  return snapshot.erdLayouts ? pruneErdLayouts(snapshot.erdLayouts, tabs) : {};
+}
+
+/**
  * Derive the wire {@link WorkspaceSnapshot} to persist via `workspace.save`.
- * Pure — `panelSizes` is supplied separately since it is React-held layout
- * state, not part of {@link WorkspaceState}.
+ * Pure — `panelSizes` and `erdLayouts` are supplied separately since they are
+ * React-held layout state, not part of {@link WorkspaceState}. `erdLayouts` (Story 4.2)
+ * is pruned to the current tab set and only carried when non-empty, so a workspace with
+ * no ERD geometry serializes byte-identically to a pre-4.2 snapshot.
  */
 export function toWorkspaceSnapshot(
   state: WorkspaceState,
   panelSizes: ReadonlyArray<number>,
+  erdLayouts?: Readonly<Record<string, ErdTabLayout>>,
 ): WorkspaceSnapshot {
-  return {
+  const base: WorkspaceSnapshot = {
     version: WORKSPACE_SNAPSHOT_VERSION,
     panelSizes: [...panelSizes],
     tabs: state.tabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title })),
     activeTabId: state.activeTabId,
     nextId: state.nextId,
   };
+  const pruned = erdLayouts ? pruneErdLayouts(erdLayouts, state.tabs) : {};
+  return Object.keys(pruned).length > 0 ? { ...base, erdLayouts: pruned } : base;
 }

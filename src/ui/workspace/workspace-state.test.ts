@@ -12,6 +12,7 @@ import {
   closeTab,
   emptyWorkspace,
   openTab,
+  restoreErdLayouts,
   restoreWorkspace,
   toWorkspaceSnapshot,
   type WorkspaceState,
@@ -268,6 +269,52 @@ describe("toWorkspaceSnapshot", () => {
     const snapshot = toWorkspaceSnapshot(state, sizes);
     expect(snapshot.panelSizes).not.toBe(sizes);
     expect(snapshot.panelSizes).toEqual(sizes);
+  });
+
+  test("omits erdLayouts entirely when none is supplied (byte-identical to a pre-4.2 snapshot)", () => {
+    const state = openMany("erd");
+    const snapshot = toWorkspaceSnapshot(state, [20, 80]);
+    expect("erdLayouts" in snapshot).toBe(false);
+  });
+});
+
+describe("erdLayouts bridge (Story 4.2)", () => {
+  const LAYOUT = { positions: { "public orders": { x: 10, y: 20 } }, viewport: { x: 0, y: 0, zoom: 1 } };
+
+  test("toWorkspaceSnapshot carries an erdLayouts entry for an open (erd) tab", () => {
+    const state = openMany("erd"); // tab id 1
+    const snapshot = toWorkspaceSnapshot(state, [20, 80], { "1": LAYOUT });
+    expect(snapshot.erdLayouts).toEqual({ "1": LAYOUT });
+  });
+
+  test("toWorkspaceSnapshot prunes a layout whose tab id is not in the tab set", () => {
+    const state = openMany("erd"); // tab id 1
+    const snapshot = toWorkspaceSnapshot(state, [20, 80], { "1": LAYOUT, "999": LAYOUT });
+    expect(snapshot.erdLayouts).toEqual({ "1": LAYOUT });
+  });
+
+  test("restoreErdLayouts drops layouts for tab ids absent from the restored set", () => {
+    const snapshot = {
+      version: 1 as const,
+      panelSizes: [20, 80],
+      tabs: [{ id: 1, kind: "erd" as const, title: "ERD 1" }],
+      activeTabId: 1,
+      nextId: 2,
+      erdLayouts: { "1": LAYOUT, "5": LAYOUT },
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(restoreErdLayouts(snapshot, state.tabs)).toEqual({ "1": LAYOUT });
+  });
+
+  test("restoreErdLayouts returns {} for a pre-4.2 snapshot with no erdLayouts", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [{ id: 1, kind: "erd", title: "ERD 1" }],
+      activeTabId: 1,
+      nextId: 2,
+    };
+    expect(restoreErdLayouts(snapshot, restoreWorkspace(snapshot).tabs)).toEqual({});
   });
 });
 

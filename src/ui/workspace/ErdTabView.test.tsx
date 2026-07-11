@@ -13,6 +13,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { SchemaTableInfo } from "../../shared/contract.ts";
+import { tableId } from "../erd/erd-graph.ts";
 import { ErdTabView } from "./ErdTabView.tsx";
 
 const SAMPLE: SchemaTableInfo[] = [
@@ -62,5 +63,27 @@ describe("ErdTabView", () => {
   test("a foreign key renders at least one edge in the canvas", () => {
     const out = renderToStaticMarkup(<ErdTabView tables={SAMPLE} />);
     expect(out).toContain("react-flow__edge");
+  });
+
+  test("a supplied saved layout still renders each table's name (positions overlaid, no crash)", () => {
+    // Keys MUST be the real NUL-separated `tableId` node ids — a space-separated literal
+    // never matches, so the overlay would silently no-op and the test would prove nothing.
+    const savedLayout = {
+      positions: {
+        [tableId("public", "orders")]: { x: 100, y: 200 },
+        [tableId("public", "users")]: { x: 300, y: 400 },
+      },
+      viewport: { x: 0, y: 0, zoom: 1 },
+    };
+    const out = renderToStaticMarkup(<ErdTabView tables={SAMPLE} savedLayout={savedLayout} />);
+    expect(out).toContain("public.orders");
+    expect(out).toContain("public.users");
+  });
+
+  test("an empty schema with a saved layout still renders the empty-state", () => {
+    const out = renderToStaticMarkup(
+      <ErdTabView tables={[]} savedLayout={{ positions: { [tableId("public", "orders")]: { x: 1, y: 2 } } }} />,
+    );
+    expect(out).toContain("no tables to diagram");
   });
 });

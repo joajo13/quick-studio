@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type {
+  ErdTabLayout,
   ExposureInfo,
   HealthResult,
   LoadWorkspaceResult,
@@ -37,6 +38,7 @@ import {
   closeTab,
   emptyWorkspace,
   openTab,
+  restoreErdLayouts,
   restoreWorkspace,
   toWorkspaceSnapshot,
   type TableRef,
@@ -235,6 +237,14 @@ export function App(): React.JSX.Element {
   const onQueryDraftChange = (tabId: number, sql: string): void =>
     setQueryDrafts((cur) => new Map(cur).set(tabId, sql));
 
+  // Persisted ERD layouts per tab id (Story 4.2), keyed by stringified tab id to match
+  // the snapshot shape. Unlike query drafts, this DOES ride into `toWorkspaceSnapshot`
+  // (geometry only — positions + viewport, never credentials/rows/SQL). Seeded from the
+  // loaded snapshot, updated from each ERD tab's `onLayoutChange`, and pruned on close.
+  const [erdLayouts, setErdLayouts] = useState<Record<string, ErdTabLayout>>({});
+  const onErdLayoutChange = (tabId: number, layout: ErdTabLayout): void =>
+    setErdLayouts((cur) => ({ ...cur, [String(tabId)]: layout }));
+
   // The introspected tables plus the optimistically-created ones — the single source
   // for both the PK lookup (so a freshly-created table is immediately editable per
   // Story 3.3) and the create-form's schema selector.
@@ -318,6 +328,9 @@ export function App(): React.JSX.Element {
         snapshot && snapshot.panelSizes.length > 0
           ? [...snapshot.panelSizes]
           : [...DEFAULT_PANEL_SIZES];
+      // Seed ERD geometry from the snapshot, pruned to the restored tab set (a pre-4.2
+      // file has no `erdLayouts` → {} → dagre fallback).
+      const layouts = snapshot ? restoreErdLayouts(snapshot, restored.tabs) : {};
       if (snapshot) {
         // These updates plus `setSavingEnabled`/`setWorkspaceReady` below are
         // batched into one re-render, so by the time `workspaceReady` flips true
@@ -325,8 +338,9 @@ export function App(): React.JSX.Element {
         // `panelSizes` already reflect the restored values.
         dispatch({ type: "restore", snapshot });
         setPanelSizes(sizes);
+        setErdLayouts(layouts);
       }
-      lastPersistedRef.current = JSON.stringify(toWorkspaceSnapshot(restored, sizes));
+      lastPersistedRef.current = JSON.stringify(toWorkspaceSnapshot(restored, sizes, layouts));
       setSavingEnabled(true);
       setWorkspaceReady(true);
     });
@@ -343,14 +357,14 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (!savingEnabled) return;
     const handle = setTimeout(() => {
-      const snapshot = toWorkspaceSnapshot(workspace, panelSizes);
+      const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastPersistedRef.current) return; // nothing actually changed
       lastPersistedRef.current = serialized;
       void rpc<SaveWorkspaceResult>("workspace.save", snapshot);
     }, SAVE_DEBOUNCE_MS);
     return () => clearTimeout(handle);
-  }, [workspace, panelSizes, savingEnabled]);
+  }, [workspace, panelSizes, erdLayouts, savingEnabled]);
 
   const onStop = (): void => {
     // Guard the destructive control: ignore repeat clicks so a double-click
@@ -384,6 +398,14 @@ export function App(): React.JSX.Element {
             next.delete(id);
             return next;
           });
+          // Prune the closed tab's ERD layout so it stops being persisted (Story 4.2).
+          setErdLayouts((cur) => {
+            const key = String(id);
+            if (!(key in cur)) return cur;
+            const next = { ...cur };
+            delete next[key];
+            return next;
+          });
         }}
         onActivateTable={(table) =>
           dispatch({ type: "bindTable", ref: { schema: table.schema, name: table.name } })
@@ -394,6 +416,8 @@ export function App(): React.JSX.Element {
         allTables={allTables}
         queryDrafts={queryDrafts}
         onQueryDraftChange={onQueryDraftChange}
+        erdLayouts={erdLayouts}
+        onErdLayoutChange={onErdLayoutChange}
         extraTables={createdTables}
         schemas={schemas}
         onTableCreated={onTableCreated}

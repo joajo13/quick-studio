@@ -14,18 +14,23 @@
  * testable via `renderToStaticMarkup` without mounting the (DOM-measuring) canvas.
  */
 
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import {
   Background,
   Controls,
   Handle,
   Position,
   ReactFlow,
+  useNodesState,
+  type Node,
   type NodeProps,
+  type OnMoveEnd,
+  type OnNodeDrag,
+  type Viewport,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import type { SchemaTableInfo } from "../../shared/contract.ts";
-import { schemaToGraph, type ErdNodeData } from "../erd/erd-graph.ts";
+import type { ErdTabLayout, SchemaTableInfo } from "../../shared/contract.ts";
+import { applyLayout, schemaToGraph, type ErdNodeData } from "../erd/erd-graph.ts";
 
 /**
  * The custom table node: a dark, tool-like card (tonal surface + border, no
@@ -87,33 +92,127 @@ function ErdEmptyState(): React.JSX.Element {
   );
 }
 
+/** Build the id→position map the layout report persists, from the live node array. */
+function positionsOf(nodes: ReadonlyArray<Node>): Record<string, { x: number; y: number }> {
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const n of nodes) positions[n.id] = { x: n.position.x, y: n.position.y };
+  return positions;
+}
+
 export function ErdTabView({
   tables,
+  savedLayout,
+  onLayoutChange,
 }: {
   /** App's lifted `allTables` (introspected + optimistically-created). */
   tables: ReadonlyArray<SchemaTableInfo>;
+  /**
+   * The persisted geometry for THIS ERD tab (Story 4.2), or undefined to fall back to
+   * dagre. Read ONCE at mount (the tab is keyed by tab id, so it remounts per tab):
+   * later changes — which flow back down after our own `onLayoutChange` — must NOT
+   * reset the canvas, so mount-time values are captured in refs.
+   */
+  savedLayout?: ErdTabLayout;
+  /** Report captured geometry (positions + viewport) up for the debounced persist. */
+  onLayoutChange?: (layout: ErdTabLayout) => void;
 }): React.JSX.Element {
-  const graph = useMemo(() => schemaToGraph(tables), [tables]);
+  // Mount-time saved layout, frozen so the feedback (App → savedLayout → here) after our
+  // own reports can never reset positions or re-fit the viewport mid-session.
+  const initialLayoutRef = useRef(savedLayout);
+  // All positions known this session (seeded from the saved layout, updated on drag stop)
+  // — the overlay source when `tables` changes, so already-placed nodes stay put while a
+  // NEW table gets a fresh dagre position. A ref (not state): mutating it must not itself
+  // re-derive the graph (that happens only on a `tables` change).
+  const positionsRef = useRef<Record<string, { x: number; y: number }>>(
+    initialLayoutRef.current?.positions ?? {},
+  );
+  // Latest viewport, seeded from the saved one, updated on move end — reported alongside
+  // positions so a pan/zoom persists too.
+  const viewportRef = useRef<Viewport | undefined>(initialLayoutRef.current?.viewport);
+
+  // Overlay saved/dragged positions onto the dagre graph. Recomputed only when `tables`
+  // changes (add/remove a table); at that point `positionsRef` already holds every
+  // dragged position, so existing nodes keep theirs and only new tables are auto-placed.
+  const graph = useMemo(
+    () => applyLayout(schemaToGraph(tables), positionsRef.current),
+    [tables],
+  );
+
+  // React Flow needs `onNodesChange` for `nodesDraggable` to be safe (Story 4.1 disabled
+  // dragging precisely because `nodes` was controlled with no change handler → error #015).
+  // `useNodesState` supplies exactly that handler.
+  const [nodes, setNodes, onNodesChange] = useNodesState(graph.nodes as unknown as Node[]);
+  // Mirror the live nodes into a ref so drag/move handlers read the freshest positions
+  // without being re-created on every node change.
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+
+  // Reconcile drag state with `tables` changes (and seed on mount): when the derived
+  // graph changes (mount, or a table created/removed), push the freshly-overlaid node
+  // set (existing nodes keep their dragged/saved position; new tables get dagre) into
+  // React Flow's controlled state AND snapshot every on-screen position back into
+  // `positionsRef`. Re-seeding the ref on every graph — not just at mount — is what keeps
+  // a SECOND consecutive create from reshuffling: after the first create, the auto-placed
+  // new node's dagre position is captured here, so the next `schemaToGraph` re-dagre is
+  // overlaid away for it too and only the newest table gets a fresh spot.
+  useEffect(() => {
+    setNodes(graph.nodes as unknown as Node[]);
+    positionsRef.current = positionsOf(graph.nodes as unknown as Node[]);
+  }, [graph, setNodes]);
+
+  // Report the full captured layout (positions + viewport) up for the debounced persist,
+  // and keep `positionsRef` current so a later `tables` change overlays the latest spots.
+  const report = useCallback((): void => {
+    const positions = positionsOf(nodesRef.current);
+    positionsRef.current = positions;
+    const layout: ErdTabLayout =
+      viewportRef.current !== undefined
+        ? { positions, viewport: viewportRef.current }
+        : { positions };
+    onLayoutChange?.(layout);
+  }, [onLayoutChange]);
+
+  // Capture node positions when a drag ends (not on every intermediate change).
+  const handleNodeDragStop: OnNodeDrag = useCallback(() => report(), [report]);
+  // Capture the viewport when a pan/zoom ends. React Flow fires `onMoveEnd` for
+  // PROGRAMMATIC viewport changes too — notably the mount-time `fitView` — passing a
+  // null event; only real user gestures carry an event. Ignore the programmatic ones so
+  // opening a tab never self-persists a viewport the developer never chose.
+  const handleMoveEnd: OnMoveEnd = useCallback(
+    (event, viewport) => {
+      if (event == null) return;
+      viewportRef.current = viewport;
+      report();
+    },
+    [report],
+  );
 
   if (tables.length === 0) {
     return <ErdEmptyState />;
   }
 
+  // Restore the saved viewport via `defaultViewport` (read once by React Flow at mount)
+  // and disable `fitView` when a viewport was saved, so a restored pan/zoom is honored
+  // instead of auto-fitting. With no saved viewport we fit to the (possibly restored)
+  // node positions so everything — including dragged nodes — is on screen.
+  const initialViewport = initialLayoutRef.current?.viewport;
+
   return (
     <div className="h-full w-full bg-[var(--background)]">
       <ReactFlow
-        nodes={graph.nodes as unknown as never[]}
+        nodes={nodes}
         edges={graph.edges as unknown as never[]}
+        onNodesChange={onNodesChange}
+        onNodeDragStop={handleNodeDragStop}
+        onMoveEnd={handleMoveEnd}
         nodeTypes={NODE_TYPES}
-        fitView
-        // View-only (v1): no schema mutation through the diagram. The ERD supports
-        // pan and zoom navigation only — no connections can be drawn, and node
-        // rearrangement + layout persistence are out of scope for this story
-        // (Story 4.2 owns node dragging and persistence). `nodesDraggable={false}`
-        // is required: React Flow defaults it to `true`, and since `nodes` is a
-        // controlled prop with no `onNodesChange`, leaving drag enabled both
-        // contradicts the view-only scope and trips React Flow's error #015.
-        nodesDraggable={false}
+        fitView={initialViewport === undefined}
+        defaultViewport={initialViewport}
+        // Story 4.2 enables node dragging so a developer can rearrange the diagram and
+        // have it persist. Dragging is safe now because `onNodesChange` is wired (see
+        // above). Still VIEW-ONLY otherwise: no connections drawn, no selection — the
+        // schema is never mutated through the diagram (editing is v2).
+        nodesDraggable
         nodesConnectable={false}
         elementsSelectable={false}
         proOptions={{ hideAttribution: true }}

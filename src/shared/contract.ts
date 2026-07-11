@@ -423,9 +423,29 @@ export type WorkspaceSnapshotTab = {
 };
 
 /**
+ * A persisted ERD tab layout (Story 4.2) — GEOMETRY ONLY. Deliberately carries no
+ * credentials, connection urls, row data, or query text (the three-ring trust model:
+ * the snapshot stays credential-free). `positions` maps a node id (the NUL-separated
+ * `tableId(schema, name)`) to its saved TOP-LEFT corner, so a rearranged diagram
+ * restores node-for-node after a relaunch (and re-introspection). `viewport` is the
+ * saved pan/zoom, restored via React Flow's `defaultViewport`; it is optional (an
+ * absent viewport falls back to fit-view).
+ */
+export type ErdTabLayout = {
+  readonly positions: Record<string, { readonly x: number; readonly y: number }>;
+  readonly viewport?: { readonly x: number; readonly y: number; readonly zoom: number };
+};
+
+/**
  * The persisted Workspace shape (FR-24 restore half, AR-9): Panel sizes + open
  * Tabs + active Tab + the next-id counter. Deliberately credential-free and
  * non-secret — never a connection url, row data, or query text.
+ *
+ * `erdLayouts` (Story 4.2) is an ADDITIVE optional field keyed by STRINGIFIED tab id,
+ * holding each ERD tab's saved geometry (see {@link ErdTabLayout}). It is optional so
+ * a pre-4.2 v1 snapshot (no ERD-layout data) still loads cleanly and falls back to the
+ * dagre layout — hence {@link WORKSPACE_SNAPSHOT_VERSION} stays `1` (no version bump,
+ * which would discard existing persisted workspaces).
  */
 export type WorkspaceSnapshot = {
   readonly version: 1;
@@ -433,6 +453,7 @@ export type WorkspaceSnapshot = {
   readonly tabs: ReadonlyArray<WorkspaceSnapshotTab>;
   readonly activeTabId: number | null;
   readonly nextId: number;
+  readonly erdLayouts?: Record<string, ErdTabLayout>;
 };
 
 /** Params for `workspace.save` — the snapshot to persist (or no-op in Ephemeral). */

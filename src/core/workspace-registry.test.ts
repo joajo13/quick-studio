@@ -84,6 +84,76 @@ describe("workspace-registry — save happy path", () => {
   });
 });
 
+describe("workspace-registry — erdLayouts validation (Story 4.2)", () => {
+  const WITH_LAYOUT: WorkspaceSnapshot = {
+    ...SAMPLE,
+    erdLayouts: {
+      "1": {
+        positions: { "public orders": { x: 10, y: 20 } },
+        viewport: { x: 0, y: 0, zoom: 1 },
+      },
+    },
+  };
+
+  test("a valid erdLayouts snapshot saves and is persisted verbatim", () => {
+    const fake = fakeStore("persistent");
+    const reg = registryOver(fake.store);
+    expect(reg.save(WITH_LAYOUT)).toEqual({ ok: true, value: { saved: true } });
+    expect(fake.store.load()).toEqual(WITH_LAYOUT);
+  });
+
+  test("a snapshot with no erdLayouts saves without adding the field (byte-identical to pre-4.2)", () => {
+    const fake = fakeStore("persistent");
+    const reg = registryOver(fake.store);
+    expect(reg.save(SAMPLE)).toEqual({ ok: true, value: { saved: true } });
+    const saved = fake.store.load();
+    expect(saved).toEqual(SAMPLE);
+    expect(saved?.erdLayouts).toBeUndefined();
+  });
+
+  test("a non-finite position coordinate is a bad_request naming erdLayouts (nothing written)", () => {
+    const fake = fakeStore("persistent");
+    const reg = registryOver(fake.store);
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, "10"]) {
+      const r = reg.save({
+        ...SAMPLE,
+        erdLayouts: { "1": { positions: { n: { x: bad, y: 0 } } } },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe("bad_request");
+        expect(r.detail).toContain("erdLayouts");
+      }
+    }
+    expect(fake.saveCalls()).toBe(0);
+  });
+
+  test("a non-finite viewport field is a bad_request naming erdLayouts", () => {
+    const reg = registryOver(fakeStore("persistent").store);
+    const r = reg.save({
+      ...SAMPLE,
+      erdLayouts: { "1": { positions: {}, viewport: { x: 0, y: 0, zoom: Number.NaN } } },
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("bad_request");
+      expect(r.detail).toContain("erdLayouts");
+    }
+  });
+
+  test("a non-positive viewport zoom is a bad_request (degenerate restore guard)", () => {
+    const reg = registryOver(fakeStore("persistent").store);
+    for (const zoom of [0, -1]) {
+      const r = reg.save({
+        ...SAMPLE,
+        erdLayouts: { "1": { positions: {}, viewport: { x: 0, y: 0, zoom } } },
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.code).toBe("bad_request");
+    }
+  });
+});
+
 describe("workspace-registry — ephemeral save is a no-op", () => {
   test("ephemeral mode: saved:false in the reply, and the underlying store still gets the (no-op) call", () => {
     const fake = fakeStore("ephemeral");
