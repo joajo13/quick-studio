@@ -1,15 +1,14 @@
 /**
- * quick-studio UI (Ring 2) — ChatTabView tests (Story 5.2, extended in Story 5.3).
+ * quick-studio UI (Ring 2) — ChatTabView tests (Story 5.2/5.3; streamed in Story 5.4).
  *
- * Following the repo convention (no jsdom/testing-library): the `chat.ask`
- * ROUND-TRIP logic lives in the exported, DOM-free `sendChat` (mock the `rpc` client
- * via `bun:test`'s `mock.module`, call it directly) and every send outcome is
- * exercised there; the Story 5.3 run/confirm/cancel/error paths live in the
- * exported, DOM-free `runChatQuery`/`confirmChatQuery`/`cancelChatQuery` (each
- * takes an injectable `run` stub standing in for `runRawQuery` — no rpc/DOM
- * needed) and are exercised there; a couple of `renderToStaticMarkup` checks cover
- * the static structure (the always-visible "schema-only" indicator, the
- * empty-state prompt, a rendered assistant badge, and the generated-SQL block).
+ * Following the repo convention (no jsdom/testing-library): the stream-driven send
+ * logic lives in the exported, DOM-free `streamSend` (fed a STUB `streamChat`, called
+ * directly) and every partial/terminal outcome is exercised there; the Story 5.3
+ * run/confirm/cancel/error paths live in the exported, DOM-free
+ * `runChatQuery`/`confirmChatQuery`/`cancelChatQuery` (each takes an injectable `run`
+ * stub) and are exercised there; a few `renderToStaticMarkup` checks cover the static
+ * structure (the "schema-only" indicator, the empty-state prompt, a rendered assistant
+ * badge + reasoning block, and the generated-SQL block).
  */
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
@@ -17,17 +16,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   errorReply,
   FROZEN_SCHEMA_VERSION,
-  okReply,
-  type ChatAskResult,
+  type ChatStreamChunk,
   type FrozenData,
+  type ProviderKind,
   type RpcReply,
 } from "../../shared/contract.ts";
+import type { StreamPartial } from "./chat-model.ts";
 import { appendAnswer, appendUserMessage, emptyChatState, setProvider } from "./chat-model.ts";
+import type { streamChat } from "../rpc/rpc-stream.ts";
 import type { ChatRunEntry } from "./ChatTabView.tsx";
 import type { RunOutcome } from "./run-raw-query.ts";
 
-// Mock the RPC client BEFORE the module under test is imported — `sendChat` calls
-// `rpc` from this module; the whole point is to observe what it sends with no Core.
+// Mock the RPC client BEFORE the module under test is imported — `ChatTabView` calls
+// `rpc` (providers.list) on mount; the stub keeps the import inert for these tests.
 const rpcMock = mock(
   async (_method: string, _params?: unknown): Promise<RpcReply<unknown>> =>
     errorReply("internal_error", "unset"),
@@ -35,7 +36,7 @@ const rpcMock = mock(
 mock.module("../rpc/client.ts", () => ({ rpc: rpcMock }));
 
 const {
-  sendChat,
+  streamSend,
   ChatTabView,
   IDLE_RUN,
   runChatQuery,
@@ -47,46 +48,64 @@ beforeEach(() => {
   rpcMock.mockClear();
 });
 
-describe("sendChat", () => {
-  test("happy path with a generated query -> answer outcome carries it", async () => {
-    const result: ChatAskResult = {
-      answer: "run this:\n```sql\nSELECT count(*) FROM t;\n```",
-      query: "SELECT count(*) FROM t;",
-      context: { policy: "schema-only", tables: 2, rowsIncluded: 0 },
-    };
-    rpcMock.mockImplementation(async () => okReply(result) as RpcReply<unknown>);
-    const outcome = await sendChat("anthropic", "how many rows in t?");
+/** A stub `streamChat` that emits `chunks` in order (records what it was sent). */
+function stubStream(chunks: ChatStreamChunk[]): {
+  fn: typeof streamChat;
+  sent: () => { provider: ProviderKind; message: string } | null;
+} {
+  let sent: { provider: ProviderKind; message: string } | null = null;
+  const fn: typeof streamChat = async (provider, message, onChunk) => {
+    sent = { provider, message };
+    for (const c of chunks) onChunk(c);
+  };
+  return { fn, sent: () => sent };
+}
+
+describe("streamSend", () => {
+  test("streams reasoning + answer deltas, then commits a done outcome carrying the query", async () => {
+    const partials: StreamPartial[] = [];
+    const { fn, sent } = stubStream([
+      { type: "reasoning-delta", text: "let me think" },
+      { type: "text-delta", text: "run:\n```sql\n" },
+      { type: "text-delta", text: "SELECT 1;\n```" },
+      {
+        type: "done",
+        query: "SELECT 1;",
+        context: { policy: "schema-only", tables: 2, rowsIncluded: 0 },
+      },
+    ]);
+    const outcome = await streamSend("anthropic", "how many?", (p) => partials.push(p), fn);
+    // Incremental partials arrived (reasoning routed separately from the answer).
+    expect(partials.at(0)).toEqual({ text: "", reasoning: "let me think" });
+    expect(partials.at(-1)).toEqual({ text: "run:\n```sql\nSELECT 1;\n```", reasoning: "let me think" });
+    // Terminal outcome carries the accumulated text, reasoning, and Core's query.
     expect(outcome.kind).toBe("answer");
     if (outcome.kind === "answer") {
-      expect(outcome.answer).toBe(result.answer);
-      expect(outcome.query).toBe("SELECT count(*) FROM t;");
-      expect(outcome.context.rowsIncluded).toBe(0);
+      expect(outcome.answer).toBe("run:\n```sql\nSELECT 1;\n```");
+      expect(outcome.reasoning).toBe("let me think");
+      expect(outcome.query).toBe("SELECT 1;");
       expect(outcome.context.tables).toBe(2);
     }
-    // The UI sends exactly the provider + message; it never sends a key.
-    expect(rpcMock).toHaveBeenCalledWith("chat.ask", {
-      provider: "anthropic",
-      message: "how many rows in t?",
-    });
+    // The UI sends exactly provider + message; it never sends a key.
+    expect(sent()).toEqual({ provider: "anthropic", message: "how many?" });
   });
 
-  test("prose-only answer -> query: null, no run action", async () => {
-    const result: ChatAskResult = {
-      answer: "there are 2 tables",
-      query: null,
-      context: { policy: "schema-only", tables: 2, rowsIncluded: 0 },
-    };
-    rpcMock.mockImplementation(async () => okReply(result) as RpcReply<unknown>);
-    const outcome = await sendChat("anthropic", "how many tables?");
+  test("answer-only stream (no reasoning) -> reasoning outcome is null", async () => {
+    const { fn } = stubStream([
+      { type: "text-delta", text: "there are 2 tables" },
+      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+    ]);
+    const outcome = await streamSend("openai", "how many tables?", () => {}, fn);
     expect(outcome.kind).toBe("answer");
-    if (outcome.kind === "answer") expect(outcome.query).toBeNull();
+    if (outcome.kind === "answer") {
+      expect(outcome.reasoning).toBeNull();
+      expect(outcome.query).toBeNull();
+    }
   });
 
-  test("not-configured envelope -> error outcome via envelopeText", async () => {
-    rpcMock.mockImplementation(
-      async () => errorReply("not_found", "provider not configured") as RpcReply<unknown>,
-    );
-    const outcome = await sendChat("openai", "hi");
+  test("an error chunk -> error outcome (mapped via envelopeText, feeds the banner)", async () => {
+    const { fn } = stubStream([{ type: "error", code: "not_found", message: "provider not configured" }]);
+    const outcome = await streamSend("openai", "hi", () => {}, fn);
     expect(outcome.kind).toBe("error");
     if (outcome.kind === "error") {
       expect(outcome.message).toContain("not_found");
@@ -94,12 +113,33 @@ describe("sendChat", () => {
     }
   });
 
-  test("internal_error envelope -> error outcome", async () => {
-    rpcMock.mockImplementation(
-      async () => errorReply("internal_error", "provider call failed") as RpcReply<unknown>,
-    );
-    const outcome = await sendChat("google", "hi");
+  test("a stream that ends with no terminal frame -> neutral error outcome", async () => {
+    const { fn } = stubStream([{ type: "text-delta", text: "partial" }]);
+    const outcome = await streamSend("google", "hi", () => {}, fn);
     expect(outcome.kind).toBe("error");
+  });
+
+  test("done with an empty/whitespace answer AND no reasoning -> error (no blank bubble)", async () => {
+    const { fn } = stubStream([
+      { type: "text-delta", text: "   " }, // only whitespace streamed
+      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+    ]);
+    const outcome = await streamSend("openai", "hi", () => {}, fn);
+    expect(outcome.kind).toBe("error");
+    if (outcome.kind === "error") expect(outcome.message).toContain("empty response");
+  });
+
+  test("done with an empty answer but WITH reasoning still commits (reasoning is informative)", async () => {
+    const { fn } = stubStream([
+      { type: "reasoning-delta", text: "thinking about it" },
+      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+    ]);
+    const outcome = await streamSend("anthropic", "hi", () => {}, fn);
+    expect(outcome.kind).toBe("answer");
+    if (outcome.kind === "answer") {
+      expect(outcome.answer).toBe("");
+      expect(outcome.reasoning).toBe("thinking about it");
+    }
   });
 });
 
@@ -240,12 +280,30 @@ describe("static structure", () => {
       "there are 3 tables",
       { policy: "schema-only", tables: 3, rowsIncluded: 0 },
       null,
+      null,
     );
     const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
     expect(html).toContain("there are 3 tables");
     expect(html).toContain("schema-only · 3 tables");
     // Prose-only answer: no query block, no run action.
     expect(html).not.toContain(">run<");
+    // No reasoning present -> the reasoning channel is not rendered.
+    expect(html).not.toContain("reasoning");
+  });
+
+  test("an assistant answer with reasoning renders a distinct reasoning block", () => {
+    let state = setProvider(emptyChatState(), "anthropic");
+    state = appendUserMessage(state, "how many tables?");
+    state = appendAnswer(
+      state,
+      "there are 3 tables",
+      { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
+      "counting the tables in the schema",
+    );
+    const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
+    expect(html).toContain("reasoning");
+    expect(html).toContain("counting the tables in the schema");
   });
 
   test("an assistant answer with a query renders the SQL read-only + a run action", () => {
@@ -256,6 +314,7 @@ describe("static structure", () => {
       "run this:",
       { policy: "schema-only", tables: 2, rowsIncluded: 0 },
       "SELECT count(*) FROM customers;",
+      null,
     );
     const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
     expect(html).toContain("SELECT count(*) FROM customers;");

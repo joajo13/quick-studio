@@ -456,16 +456,6 @@ export type RemoveProviderResult = {
  * ------------------------------------------------------------------ */
 
 /**
- * Params for `chat.ask`. The request explicitly carries the {@link ProviderKind}
- * to call — there is no "active provider" concept; the UI offers only configured
- * providers (from `providers.list`). `message` is the developer's question.
- */
-export type ChatAskParams = {
-  readonly provider: ProviderKind;
-  readonly message: string;
-};
-
-/**
  * A row-free projection of the live {@link DatabaseSchema} — the ONLY database
  * context that leaves the machine (AR-6 / R5). `text` is the compact, deterministic
  * serialization (table/column names, `dataType`, primary keys, foreign keys — no
@@ -503,16 +493,26 @@ export type ChatContextSummary = {
 };
 
 /**
- * Result of `chat.ask`: the model's answer, a distinct extracted `query` (Story
- * 5.3's Core-side, pure fenced-block extraction — `null` when the answer carried no
- * SQL block), and the schema-only context summary. The UI never parses/classifies
- * `answer` for SQL itself (AR-3) — it sends `query` verbatim to `execute` when set.
+ * One frame of the streaming chat response (Story 5.4) — the typed SSE wire shape
+ * shared across Ring 1 (Core producer) and Ring 2 (UI consumer). A discriminated
+ * union carried one-per-`data:` event over `POST /chat/stream`:
+ *  - `text-delta` — a token of the final ANSWER channel (rendered incrementally).
+ *  - `reasoning-delta` — a token of the model's REASONING channel (rendered in a
+ *    visually distinct secondary treatment; absent entirely when the provider emits
+ *    no reasoning — never an error).
+ *  - `done` — the terminal frame: the Core-extracted `query` (pure fenced-block
+ *    extraction over the fully-accumulated answer, `null` when none) plus the
+ *    schema-only `context` summary — feeds the unchanged 5.3 run/confirm affordance.
+ *  - `error` — a redacted terminal failure (pre-flight validation OR a mid-stream
+ *    provider throw). Carries a mapped {@link RpcErrorCode} + a terse message; the
+ *    provider key NEVER appears here (redacted, stderr-only in Core).
+ * Ring-neutral and types-only — carries no rows and no key by construction.
  */
-export type ChatAskResult = {
-  readonly answer: string;
-  readonly query: string | null;
-  readonly context: ChatContextSummary;
-};
+export type ChatStreamChunk =
+  | { readonly type: "text-delta"; readonly text: string }
+  | { readonly type: "reasoning-delta"; readonly text: string }
+  | { readonly type: "done"; readonly query: string | null; readonly context: ChatContextSummary }
+  | { readonly type: "error"; readonly code: RpcErrorCode; readonly message: string };
 
 /* ------------------------------------------------------------------ *
  * Workspace-state persistence contract (Story 2.5) — credential-free

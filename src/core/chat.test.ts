@@ -1,16 +1,17 @@
 /**
- * quick-studio Core — Chat responder tests (Story 5.2).
+ * quick-studio Core — Chat responder tests (Story 5.2, streamed in Story 5.4).
  *
- * Exercises the full I/O matrix with an INJECTED `generate` (no network, no real
- * key): happy path, not-configured → not_found, unknown kind → bad_request, blank
- * message → bad_request, no-schema → bad_request, and an injected `generate` throw →
- * typed internal_error. Crucially asserts the assembled payload carries ZERO rows
- * (`rowSample: null`, `rowsIncluded: 0`) and that the raw key NEVER appears in any
- * error `detail`, and that no outbound call is made on a rejected request.
+ * Exercises the full streaming I/O matrix with an INJECTED `generateStream` (no
+ * network, no real key): reasoning-vs-text routing, the terminal `done.query`
+ * extracted from the ACCUMULATED answer text, the pre-flight error chunks
+ * (not-configured / unknown kind / blank message / no-schema / registry failure),
+ * and a mid-stream throw → a redacted `error` chunk. Crucially asserts the assembled
+ * payload the model receives carries ZERO rows (`rowSample: null`, schema text only)
+ * and that the raw key NEVER appears in any chunk or the stderr log.
  */
 
 import { describe, expect, test } from "bun:test";
-import type { DatabaseSchema } from "../shared/contract.ts";
+import type { ChatStreamChunk, DatabaseSchema } from "../shared/contract.ts";
 import type { ResolveModelResult } from "./ai-provider.ts";
 import type { RegistryResult } from "./provider-registry.ts";
 import {
@@ -19,6 +20,8 @@ import {
   buildSchemaContext,
   createChatResponder,
   extractQuery,
+  type ChatStreamPart,
+  type GenerateStreamFn,
 } from "./chat.ts";
 
 const SECRET = "sk-super-secret-key-1234";
@@ -61,27 +64,43 @@ const SCHEMA: DatabaseSchema = {
 
 const okModel: ResolveModelResult = { ok: true, model: {} as never };
 
+/** A `generateStream` whose `fullStream` yields the given parts in order. */
+function streamOf(...parts: ChatStreamPart[]): GenerateStreamFn {
+  return () => ({
+    fullStream: (async function* () {
+      for (const p of parts) yield p;
+    })(),
+  });
+}
+
 /** A responder wired with sensible defaults; each test overrides the seams it cares about. */
 function makeResponder(overrides: {
   getSchema?: () => Promise<DatabaseSchema>;
   getKey?: (provider: string) => RegistryResult<string | null>;
   resolveModel?: () => ResolveModelResult;
-  generate?: (args: { model: unknown; system: string; prompt: string }) => Promise<{ text: string }>;
+  generateStream?: GenerateStreamFn;
 }) {
-  let generateCalls = 0;
-  const inner =
-    overrides.generate ??
-    (async (args: { system: string; prompt: string }) => ({ text: `answered: ${args.prompt}` }));
+  let streamCalls = 0;
+  let seenSystem = "";
+  const inner = overrides.generateStream ?? streamOf({ type: "text-delta", text: "ok" });
   const responder = createChatResponder({
     getSchema: overrides.getSchema ?? (async () => SCHEMA),
     getKey: (overrides.getKey ?? (() => ({ ok: true, value: SECRET }))) as never,
     resolveModel: overrides.resolveModel ?? (() => okModel),
-    generate: (async (args: { model: unknown; system: string; prompt: string }) => {
-      generateCalls += 1;
-      return inner(args as never);
-    }) as never,
+    generateStream: (args) => {
+      streamCalls += 1;
+      seenSystem = args.system;
+      return inner(args);
+    },
   });
-  return { responder, calls: () => generateCalls };
+  return { responder, calls: () => streamCalls, system: () => seenSystem };
+}
+
+/** Drain an async generator into an array. */
+async function collect(gen: AsyncGenerator<ChatStreamChunk>): Promise<ChatStreamChunk[]> {
+  const out: ChatStreamChunk[] = [];
+  for await (const c of gen) out.push(c);
+  return out;
 }
 
 describe("buildSchemaContext / assemblePayload", () => {
@@ -98,7 +117,6 @@ describe("buildSchemaContext / assemblePayload", () => {
     expect(payload.rowSample).toBeNull();
     expect(payload.schema.tables).toBe(2);
     expect(payload.schema.engine).toBe("postgres");
-    // No row value can appear in the serialized schema — it is names/types/PK/FK only.
     expect(JSON.stringify(payload)).not.toContain("answered");
   });
 });
@@ -121,8 +139,7 @@ describe("extractQuery", () => {
   });
 
   test("extracts a bare ``` fenced block when no `sql` tag is present", () => {
-    const text = "```\nSELECT 1;\n```";
-    expect(extractQuery(text)).toBe("SELECT 1;");
+    expect(extractQuery("```\nSELECT 1;\n```")).toBe("SELECT 1;");
   });
 
   test("a non-`sql` language tag (```postgresql) is consumed, not captured into the query", () => {
@@ -144,84 +161,99 @@ describe("extractQuery", () => {
   });
 });
 
-describe("createChatResponder — I/O matrix", () => {
-  test("happy path returns the answer + query + schema-only context (rowsIncluded 0)", async () => {
-    const { responder, calls } = makeResponder({});
-    const r = await responder.answer({ provider: "anthropic", message: "how many tables?" });
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.value.answer).toBe("answered: how many tables?");
-      expect(r.value.query).toBeNull();
-      expect(r.value.context).toEqual({ policy: "schema-only", tables: 2, rowsIncluded: 0 });
-    }
+describe("createChatResponder — answerStream I/O matrix", () => {
+  test("routes reasoning vs text and ends with a done chunk (prose-only -> query null)", async () => {
+    const { responder, calls } = makeResponder({
+      generateStream: streamOf(
+        { type: "reasoning-start" },
+        { type: "reasoning-delta", text: "let me think " },
+        { type: "reasoning-delta", text: "about tables" },
+        { type: "text-start" },
+        { type: "text-delta", text: "there are " },
+        { type: "text-delta", text: "2 tables" },
+        { type: "text-end" },
+      ),
+    });
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "how many?" }));
+    expect(chunks).toEqual([
+      { type: "reasoning-delta", text: "let me think " },
+      { type: "reasoning-delta", text: "about tables" },
+      { type: "text-delta", text: "there are " },
+      { type: "text-delta", text: "2 tables" },
+      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+    ]);
     expect(calls()).toBe(1);
   });
 
-  test("a fenced-SQL answer surfaces the extracted query with zero rows in the payload", async () => {
+  test("done.query is extracted from the ACCUMULATED answer text (spanning deltas)", async () => {
     const { responder } = makeResponder({
-      generate: async () => ({
-        text: "you can find that with:\n```sql\nSELECT count(*) FROM customers;\n```",
-      }),
+      generateStream: streamOf(
+        { type: "text-delta", text: "run:\n```sql\nSELECT count(*)" },
+        { type: "text-delta", text: " FROM customers;\n```" },
+      ),
     });
-    const r = await responder.answer({ provider: "anthropic", message: "how many customers?" });
-    expect(r.ok).toBe(true);
-    if (r.ok) {
-      expect(r.value.query).toBe("SELECT count(*) FROM customers;");
-      expect(r.value.context.rowsIncluded).toBe(0);
-    }
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "how many?" }));
+    const done = chunks.at(-1);
+    expect(done).toEqual({
+      type: "done",
+      query: "SELECT count(*) FROM customers;",
+      context: { policy: "schema-only", tables: 2, rowsIncluded: 0 },
+    });
   });
 
-  test("provider not configured -> not_found, no outbound call, no secret", async () => {
+  test("the payload the model receives carries the schema text and zero rows", async () => {
+    const { responder, system } = makeResponder({});
+    await collect(responder.answerStream({ provider: "google", message: "hi" }));
+    expect(system()).toContain("table public.orders");
+    expect(system()).toContain("fk: customer_id -> public.customers(id)");
+    // No row value can appear — schema is names/types/PK/FK only.
+    expect(system()).not.toContain("answered");
+  });
+
+  test("provider not configured -> single error chunk (not_found), no outbound call, no secret", async () => {
     const { responder, calls } = makeResponder({ getKey: () => ({ ok: true, value: null }) });
-    const r = await responder.answer({ provider: "openai", message: "hi" });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.code).toBe("not_found");
-      expect(r.message).toBe("provider not configured");
-      expect(JSON.stringify(r)).not.toContain(SECRET);
-    }
+    const chunks = await collect(responder.answerStream({ provider: "openai", message: "hi" }));
+    expect(chunks).toEqual([{ type: "error", code: "not_found", message: "provider not configured" }]);
+    expect(JSON.stringify(chunks)).not.toContain(SECRET);
     expect(calls()).toBe(0);
   });
 
-  test("unknown provider kind -> bad_request, no outbound call", async () => {
+  test("unknown provider kind -> error chunk (bad_request), no outbound call", async () => {
     const { responder, calls } = makeResponder({});
-    const r = await responder.answer({ provider: "bogus", message: "hi" });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("bad_request");
+    const chunks = await collect(responder.answerStream({ provider: "bogus", message: "hi" }));
+    expect(chunks).toEqual([{ type: "error", code: "bad_request", message: "invalid provider" }]);
     expect(calls()).toBe(0);
   });
 
-  test("blank message -> bad_request, no outbound call", async () => {
+  test("blank message -> error chunk (bad_request), no outbound call", async () => {
     const { responder, calls } = makeResponder({});
-    const r = await responder.answer({ provider: "anthropic", message: "   " });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.code).toBe("bad_request");
-      expect(r.message).toBe("message required");
-    }
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "   " }));
+    expect(chunks).toEqual([{ type: "error", code: "bad_request", message: "message required" }]);
     expect(calls()).toBe(0);
   });
 
-  test("no active connection (getSchema throws) -> bad_request, no outbound call", async () => {
+  test("no active connection (getSchema throws) -> error chunk (bad_request), no outbound call, no secret", async () => {
     const { responder, calls } = makeResponder({
       getSchema: async () => {
         throw new Error("connection unavailable (network)");
       },
     });
-    const r = await responder.answer({ provider: "anthropic", message: "hi" });
-    expect(r.ok).toBe(false);
-    if (!r.ok) {
-      expect(r.code).toBe("bad_request");
-      expect(r.message).toBe("no active connection");
-      // The neutral detail must never carry a secret.
-      expect(JSON.stringify(r)).not.toContain(SECRET);
-    }
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    expect(chunks).toEqual([{ type: "error", code: "bad_request", message: "no active connection" }]);
+    expect(JSON.stringify(chunks)).not.toContain(SECRET);
     expect(calls()).toBe(0);
   });
 
-  test("generate throws -> internal_error, key never in any detail or the log", async () => {
-    // Capture stderr: a provider auth error can echo the key, and the spec forbids
-    // the key ever being logged. The redaction must scrub it from the stderr line.
+  test("registry getKey failure propagates its own code as the error chunk", async () => {
+    const { responder, calls } = makeResponder({
+      getKey: () => ({ ok: false, code: "internal_error", message: "store unavailable" }),
+    });
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    expect(chunks).toEqual([{ type: "error", code: "internal_error", message: "store unavailable" }]);
+    expect(calls()).toBe(0);
+  });
+
+  test("mid-stream throw -> redacted error chunk, key never in any chunk or the log", async () => {
     const writes: string[] = [];
     const original = process.stderr.write.bind(process.stderr);
     (process.stderr as { write: unknown }).write = ((chunk: unknown) => {
@@ -229,48 +261,85 @@ describe("createChatResponder — I/O matrix", () => {
       return true;
     }) as typeof process.stderr.write;
     try {
-      const { responder } = makeResponder({
-        generate: async () => {
+      const failing: GenerateStreamFn = () => ({
+        fullStream: (async function* () {
+          yield { type: "text-delta", text: "partial " } as ChatStreamPart;
           throw new Error(`auth failed for ${SECRET}`);
-        },
+        })(),
       });
-      const r = await responder.answer({ provider: "anthropic", message: "hi" });
-      expect(r.ok).toBe(false);
-      if (!r.ok) {
-        expect(r.code).toBe("internal_error");
-        expect(r.message).toBe("provider call failed");
-        expect(r.detail ?? "").not.toContain(SECRET);
-        expect(JSON.stringify(r)).not.toContain(SECRET);
-      }
-      // The cause was logged (debuggability) but with the key redacted.
+      const { responder } = makeResponder({ generateStream: failing });
+      const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+      // The partial delta streamed, then a redacted terminal error (no `done`).
+      expect(chunks).toEqual([
+        { type: "text-delta", text: "partial " },
+        { type: "error", code: "internal_error", message: "provider call failed" },
+      ]);
+      expect(JSON.stringify(chunks)).not.toContain(SECRET);
       const logged = writes.join("");
-      expect(logged).toContain("[chat] provider call failed");
+      expect(logged).toContain("[chat] provider stream failed");
       expect(logged).not.toContain(SECRET);
     } finally {
       (process.stderr as { write: unknown }).write = original;
     }
   });
 
-  test("registry getKey failure propagates its own code", async () => {
-    const { responder, calls } = makeResponder({
-      getKey: () => ({ ok: false, code: "internal_error", message: "store unavailable" }),
+  test("the caller's AbortSignal is threaded into the generate seam (client-disconnect teardown)", async () => {
+    let seenSignal: AbortSignal | undefined;
+    const recording: GenerateStreamFn = (args) => {
+      seenSignal = args.abortSignal;
+      return {
+        fullStream: (async function* () {
+          yield { type: "text-delta", text: "hi" } as ChatStreamPart;
+        })(),
+      };
+    };
+    const responder = createChatResponder({
+      getSchema: async () => SCHEMA,
+      getKey: (() => ({ ok: true, value: SECRET })) as never,
+      resolveModel: () => okModel,
+      generateStream: recording,
     });
-    const r = await responder.answer({ provider: "anthropic", message: "hi" });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.code).toBe("internal_error");
-    expect(calls()).toBe(0);
+    const controller = new AbortController();
+    await collect(responder.answerStream({ provider: "anthropic", message: "hi" }, controller.signal));
+    // The exact signal the caller passed reaches `streamText`'s `abortSignal`.
+    expect(seenSignal).toBe(controller.signal);
   });
 
-  test("the payload the model receives carries the schema text and zero rows", async () => {
-    let seenSystem = "";
+  test("openai receives NO maxOutputTokens (never silently capped), anthropic does", async () => {
+    const seen: { provider: string; maxOutputTokens?: number }[] = [];
+    const recording: GenerateStreamFn = (args) => {
+      seen.push({ provider: "", maxOutputTokens: args.maxOutputTokens });
+      return {
+        fullStream: (async function* () {
+          yield { type: "text-delta", text: "ok" } as ChatStreamPart;
+        })(),
+      };
+    };
+    const make = (provider: string) =>
+      createChatResponder({
+        getSchema: async () => SCHEMA,
+        getKey: (() => ({ ok: true, value: SECRET })) as never,
+        resolveModel: () => okModel,
+        generateStream: recording,
+      }).answerStream({ provider, message: "hi" });
+    await collect(make("openai"));
+    await collect(make("anthropic"));
+    expect(seen[0]?.maxOutputTokens).toBeUndefined();
+    expect(seen[1]?.maxOutputTokens).toBeGreaterThan(0);
+  });
+
+  test("an SDK-emitted `error` part is treated as a redacted mid-stream failure", async () => {
     const { responder } = makeResponder({
-      generate: async (args) => {
-        seenSystem = args.system;
-        return { text: "ok" };
-      },
+      generateStream: streamOf(
+        { type: "text-delta", text: "hi" },
+        { type: "error", error: new Error(`boom ${SECRET}`) },
+      ),
     });
-    await responder.answer({ provider: "google", message: "hi" });
-    expect(seenSystem).toContain("table public.orders");
-    expect(seenSystem).toContain("fk: customer_id -> public.customers(id)");
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    expect(chunks).toEqual([
+      { type: "text-delta", text: "hi" },
+      { type: "error", code: "internal_error", message: "provider call failed" },
+    ]);
+    expect(JSON.stringify(chunks)).not.toContain(SECRET);
   });
 });

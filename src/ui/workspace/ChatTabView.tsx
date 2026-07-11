@@ -1,5 +1,5 @@
 /**
- * quick-studio UI (Ring 2) — ChatTabView (Story 5.2, extended in Story 5.3).
+ * quick-studio UI (Ring 2) — ChatTabView (Story 5.2, 5.3; streamed in Story 5.4).
  *
  * The chat surface for a `chat` Tab: a provider picker (only CONFIGURED providers,
  * from `providers.list`), a message input (send button + Ctrl/Cmd+Enter, with a
@@ -7,10 +7,18 @@
  * that makes the default policy visible. Session state (messages + picked provider)
  * is lifted to `App` keyed by tab id and is NEVER persisted (mirrors `queryDrafts`).
  *
- * The UI holds NO provider key and issues NO outbound provider call — it sends
- * `chat.ask {provider, message}` and the Core (the sole key holder) makes the only
- * outbound call, returning an answer, a Core-extracted `query`, and a schema-only
- * context summary. No `ai`/`@ai-sdk/*` import exists in this ring.
+ * The UI holds NO provider key and issues NO outbound provider call — it opens the
+ * token-gated `POST /chat/stream` SSE stream (`streamChat`) and the Core (the sole
+ * key holder) makes the only outbound call, streaming back `reasoning-delta` /
+ * `text-delta` tokens and a terminal `done{query,context}`. No `ai`/`@ai-sdk/*`
+ * import exists in this ring.
+ *
+ * Story 5.4: the answer types in incrementally and the model's reasoning renders in a
+ * visually distinct muted channel as it thinks. Deltas are accumulated into a
+ * component-local partial and flushed on `requestAnimationFrame` (coalesced — no
+ * per-token `setState` thrash, NFR-6); the fetch is aborted on unmount. On `done` the
+ * message is committed via `appendAnswer` (incl. `reasoning` + `query`) so the 5.3
+ * run/confirm affordance renders unchanged.
  *
  * Story 5.3: an assistant message carrying a non-null `query` renders the SQL
  * read-only with a "run" action. Running it drives the SAME `runRawQuery` seam
@@ -21,60 +29,99 @@
  * — it is transient/local, never lifted or persisted (mirrors `QueryTabView`'s
  * `pendingSql`/`confirm`/`busy`, one instance per runnable message).
  *
- * `sendChat` is exported as a standalone, DOM-free async function (mocking `rpc` is
- * enough to exercise every send outcome) so the round-trip logic is unit-testable
- * without a live DOM — mirroring `runRawQuery`.
+ * `streamSend` is exported as a standalone, DOM-free async function (feed it a stub
+ * `streamChat` — no live DOM required) so the stream-driven send logic (incremental
+ * partials, reasoning routing, done/error terminal) is unit-testable.
  */
 
 import { useEffect, useRef, useState } from "react";
 import {
   PROVIDER_KINDS,
-  type ChatAskResult,
   type ChatContextSummary,
   type ListProvidersResult,
   type ProviderKind,
 } from "../../shared/contract.ts";
 import { DataGrid } from "../data/DataGrid.tsx";
 import { rpc } from "../rpc/client.ts";
+import { streamChat } from "../rpc/rpc-stream.ts";
 import { envelopeText } from "../rpc/envelope-text.ts";
 import {
+  accumulateStream,
   appendAnswer,
   appendUserMessage,
+  EMPTY_PARTIAL,
   setProvider,
   validateSend,
   type ChatState,
+  type StreamPartial,
 } from "./chat-model.ts";
 import { ConfirmRun } from "./ConfirmRun.tsx";
 import { runRawQuery, type RunOutcome } from "./run-raw-query.ts";
 
 /**
- * The outcome of one `chat.ask` round-trip, decoupled from React state so the send
- * flow is unit-testable by mocking `rpc` and calling `sendChat` directly (no render /
- * no DOM required).
+ * The terminal outcome of one streamed send, decoupled from React state so the flow
+ * is unit-testable by feeding a stub `streamChat` and calling `streamSend` directly
+ * (no render / no DOM required). Incremental partials arrive via `onPartial`.
  */
 export type SendOutcome =
   | {
       readonly kind: "answer";
       readonly answer: string;
       readonly query: string | null;
+      readonly reasoning: string | null;
       readonly context: ChatContextSummary;
     }
   | { readonly kind: "error"; readonly message: string };
 
 /**
- * Ask `message` of `provider` through the Core-only `chat.ask` RPC. The UI never
- * holds a key nor calls a provider — the Core resolves the key in Ring 1 and makes
- * the sole outbound call. A failed envelope maps to a terse `error` outcome.
+ * Drive one streamed chat response: open the SSE stream via `stream` (defaults to the
+ * real `streamChat`), accumulate `text-delta`/`reasoning-delta` tokens into a partial
+ * (emitting each accumulated snapshot to `onPartial` for incremental render), and
+ * resolve to the terminal {@link SendOutcome} — an `answer` (carrying the final text,
+ * reasoning, and Core-extracted query/context on `done`) or a terse `error`. The UI
+ * never holds a key nor parses SQL — `query` is whatever Core's `done` chunk carried.
  */
-export async function sendChat(provider: ProviderKind, message: string): Promise<SendOutcome> {
-  const reply = await rpc<ChatAskResult>("chat.ask", { provider, message });
-  if (!reply.ok) return { kind: "error", message: envelopeText(reply.error) };
-  return {
-    kind: "answer",
-    answer: reply.result.answer,
-    query: reply.result.query,
-    context: reply.result.context,
-  };
+export async function streamSend(
+  provider: ProviderKind,
+  message: string,
+  onPartial: (partial: StreamPartial) => void,
+  stream: typeof streamChat = streamChat,
+  opts?: { signal?: AbortSignal },
+): Promise<SendOutcome> {
+  let partial: StreamPartial = EMPTY_PARTIAL;
+  let outcome: SendOutcome | null = null;
+  await stream(
+    provider,
+    message,
+    (chunk) => {
+      if (chunk.type === "text-delta" || chunk.type === "reasoning-delta") {
+        partial = accumulateStream(partial, chunk);
+        onPartial(partial);
+      } else if (chunk.type === "done") {
+        const reasoning = partial.reasoning.length > 0 ? partial.reasoning : null;
+        // An empty/whitespace answer with NO reasoning is a dead response — surface it
+        // as an error rather than committing a blank assistant bubble. A response that
+        // DID stream reasoning still commits normally (the reasoning block is informative,
+        // even when the answer text is empty).
+        if (partial.text.trim().length === 0 && reasoning === null) {
+          outcome = { kind: "error", message: "empty response" };
+        } else {
+          outcome = {
+            kind: "answer",
+            answer: partial.text,
+            query: chunk.query,
+            reasoning,
+            context: chunk.context,
+          };
+        }
+      } else {
+        outcome = { kind: "error", message: envelopeText({ code: chunk.code, message: chunk.message }) };
+      }
+    },
+    opts,
+  );
+  // A stream that ended without a terminal frame (EOF/abort) is a neutral failure.
+  return outcome ?? { kind: "error", message: "stream ended without a result" };
 }
 
 /**
@@ -222,6 +269,29 @@ function ChatQueryRun({
   );
 }
 
+/**
+ * The model's REASONING channel, rendered VISUALLY DISTINCT from the final answer
+ * (Story 5.4, UX-DR3): a muted/secondary `<details>` (smaller italic mono on the
+ * `--muted` surface) vs the answer's primary `--foreground`. Only rendered when
+ * reasoning is present — an empty channel never shows. `live` keeps it open while the
+ * model is still thinking. Honors `prefers-reduced-motion` (no animation used here).
+ */
+function ReasoningBlock({ text, live }: { text: string; live?: boolean }): React.JSX.Element {
+  return (
+    <details
+      open={live}
+      className="max-w-[85%] rounded-[var(--radius)] border border-[var(--border)] bg-[var(--muted)] px-3 py-1.5"
+    >
+      <summary className="cursor-pointer font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
+        reasoning{live ? " · thinking…" : ""}
+      </summary>
+      <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] italic text-[var(--muted-foreground)]">
+        {text}
+      </p>
+    </details>
+  );
+}
+
 export function ChatTabView({
   state,
   onStateChange,
@@ -240,12 +310,28 @@ export function ChatTabView({
   // A failed `providers.list` (Core/transport error) is distinct from "none
   // configured" — surfacing it prevents a misleading empty-state dead-end.
   const [providersError, setProvidersError] = useState<string | null>(null);
+  // The transient streaming partial (Story 5.4): the answer + reasoning accumulated so
+  // far for the IN-FLIGHT response, or `null` when nothing is streaming. Session-only,
+  // like `ChatRunEntry` — never lifted into `state`/`onStateChange`, never persisted.
+  const [partial, setPartial] = useState<StreamPartial | null>(null);
+  // The latest accumulated partial, held in a ref so rapid deltas coalesce: each delta
+  // updates the ref synchronously and schedules ONE `requestAnimationFrame` flush into
+  // `setPartial` (not one setState per token) — NFR-6, no main-thread thrash.
+  const partialRef = useRef<StreamPartial>(EMPTY_PARTIAL);
+  const frameRef = useRef<number | null>(null);
+  // Aborts the in-flight `fetch` when the Tab unmounts (or a stream is superseded).
+  const abortRef = useRef<AbortController | null>(null);
+
   // Mounted guard: a send can resolve after this Tab is closed/switched away. Without
   // this, `onStateChange` would re-insert the closed Tab's (already-reclaimed) state.
   const mounted = useRef(true);
   useEffect(() => {
     return () => {
       mounted.current = false;
+      // Abort the in-flight stream and cancel any pending flush — no post-unmount
+      // fetch, no post-unmount state push.
+      abortRef.current?.abort();
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     };
   }, []);
   // Synchronous re-entrancy guard: `busy` only lands after a re-render, so two
@@ -253,6 +339,18 @@ export function ChatTabView({
   // check. This ref flips immediately, so a send can never fire twice (mirrors
   // QueryTabView's `firing`).
   const firing = useRef(false);
+
+  // Coalesced flush: record the newest partial, then flush it to render on the next
+  // animation frame (at most one pending frame). Deltas arriving in the same frame are
+  // collapsed into a single re-render.
+  const schedulePartial = (next: StreamPartial): void => {
+    partialRef.current = next;
+    if (frameRef.current !== null) return;
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = null;
+      if (mounted.current) setPartial(partialRef.current);
+    });
+  };
 
   // Load the configured providers once on mount. A failed list leaves the picker
   // empty (the empty-state prompt covers "no providers"); the request still can't be
@@ -291,13 +389,27 @@ export function ChatTabView({
     const afterUser = appendUserMessage(state, message);
     onStateChange(afterUser);
     setInput("");
+    // Start the live streaming bubble empty; each delta coalesces into it via rAF.
+    partialRef.current = EMPTY_PARTIAL;
+    setPartial(EMPTY_PARTIAL);
+    const controller = new AbortController();
+    abortRef.current = controller;
     try {
-      const outcome = await sendChat(provider, message);
+      const outcome = await streamSend(provider, message, schedulePartial, streamChat, {
+        signal: controller.signal,
+      });
       // Tab closed/switched mid-flight — drop the result so we never resurrect the
       // reclaimed Tab's state.
       if (!mounted.current) return;
+      // Cancel any pending flush: the transient bubble is about to be committed/cleared.
+      if (frameRef.current !== null) {
+        cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
       if (outcome.kind === "answer") {
-        onStateChange(appendAnswer(afterUser, outcome.answer, outcome.context, outcome.query));
+        onStateChange(
+          appendAnswer(afterUser, outcome.answer, outcome.context, outcome.query, outcome.reasoning),
+        );
       } else {
         setError(outcome.message);
       }
@@ -307,6 +419,8 @@ export function ChatTabView({
       if (mounted.current) {
         setBusy(false);
         firing.current = false;
+        setPartial(null);
+        abortRef.current = null;
       }
     }
   };
@@ -399,7 +513,7 @@ export function ChatTabView({
 
       {/* Message log. */}
       <div className="min-h-0 flex-1 overflow-auto p-3">
-        {state.messages.length === 0 ? (
+        {state.messages.length === 0 && partial === null ? (
           <div
             className="flex h-full items-center justify-center lowercase text-[var(--muted-foreground)]"
             style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
@@ -413,6 +527,9 @@ export function ChatTabView({
                 key={i}
                 className={`flex flex-col gap-1 ${m.role === "user" ? "items-end" : "items-start"}`}
               >
+                {m.role === "assistant" && m.reasoning !== null ? (
+                  <ReasoningBlock text={m.reasoning} />
+                ) : null}
                 <div
                   className={`max-w-[85%] rounded-[var(--radius)] border px-3 py-2 font-mono text-xs ${
                     m.role === "user"
@@ -443,6 +560,21 @@ export function ChatTabView({
                 ) : null}
               </li>
             ))}
+            {/* Live streaming bubble (Story 5.4): the in-flight reasoning + incremental
+                answer, coalesced per animation frame. Committed to a real message on
+                `done`; cleared on completion/error/unmount. */}
+            {partial !== null ? (
+              <li className="flex flex-col items-start gap-1">
+                {partial.reasoning.length > 0 ? (
+                  <ReasoningBlock text={partial.reasoning} live />
+                ) : null}
+                <div className="max-w-[85%] rounded-[var(--radius)] border border-[var(--border)] bg-[var(--card)] px-3 py-2 font-mono text-xs text-[var(--foreground)]">
+                  <p className="whitespace-pre-wrap break-words">
+                    {partial.text.length > 0 ? partial.text : "…"}
+                  </p>
+                </div>
+              </li>
+            ) : null}
           </ul>
         )}
       </div>

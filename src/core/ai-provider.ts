@@ -55,3 +55,66 @@ export function resolveModel(provider: ProviderKind, apiKey: string): ResolveMod
     }
   }
 }
+
+/**
+ * A modest thinking-token budget for anthropic reasoning (Story 5.4). Kept well
+ * below `maxOutputTokens` (see {@link REASONING_MAX_OUTPUT_TOKENS}) — the anthropic
+ * SDK requires the output ceiling to exceed the thinking budget.
+ */
+export const REASONING_BUDGET_TOKENS = 1024;
+
+/**
+ * The output-token ceiling for a reasoning-enabled stream. MUST exceed
+ * {@link REASONING_BUDGET_TOKENS} (anthropic's `maxOutputTokens > budgetTokens`
+ * constraint); threaded into the stream call alongside the provider options.
+ */
+export const REASONING_MAX_OUTPUT_TOKENS = 4096;
+
+/**
+ * Per-provider streaming knobs (Story 5.4, AR-13 seam). Both fields are OPTIONAL and
+ * carried together so the reasoning cap is scoped to reasoning-enabled providers ONLY:
+ * a non-reasoning provider (openai `gpt-4o`) returns `{}` and is spread into
+ * `streamText` with NO `maxOutputTokens`, so it keeps the SDK's own (large) default —
+ * never silently capped by the reasoning ceiling.
+ */
+export type ReasoningOptions = {
+  /** The provider's `providerOptions` enabling its reasoning channel (omitted when none). */
+  readonly providerOptions?: Record<string, unknown>;
+  /** The output-token ceiling — set ONLY where a thinking budget needs headroom. */
+  readonly maxOutputTokens?: number;
+};
+
+/**
+ * Pure per-provider streaming options enabling the model's REASONING channel where the
+ * provider supports it (Story 5.4, AR-13 seam):
+ *  - anthropic → thinking `providerOptions` + `maxOutputTokens` (> the thinking budget)
+ *  - google    → `thinkingConfig.includeThoughts` + `maxOutputTokens`
+ *  - openai    → `{}` (gpt-4o emits no reasoning AND takes NO cap — an EMPTY channel,
+ *                 never an error, and never a silent output ceiling)
+ * Deterministic and network-free — the channel-routing is the real deliverable; a
+ * provider that emits nothing simply leaves the reasoning channel empty. The `default`
+ * branch is a compile-time exhaustiveness guard: a future 4th {@link ProviderKind}
+ * fails to type-check here rather than silently returning no options.
+ */
+export function reasoningProviderOptions(provider: ProviderKind): ReasoningOptions {
+  switch (provider) {
+    case "anthropic":
+      return {
+        providerOptions: {
+          anthropic: { thinking: { type: "enabled", budgetTokens: REASONING_BUDGET_TOKENS } },
+        },
+        maxOutputTokens: REASONING_MAX_OUTPUT_TOKENS,
+      };
+    case "google":
+      return {
+        providerOptions: { google: { thinkingConfig: { includeThoughts: true } } },
+        maxOutputTokens: REASONING_MAX_OUTPUT_TOKENS,
+      };
+    case "openai":
+      return {};
+    default: {
+      const _exhaustive: never = provider;
+      return {};
+    }
+  }
+}

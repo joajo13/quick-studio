@@ -5,35 +5,40 @@
  * caller (AR-6 / R5). This module resolves the requested provider's key in Ring 1,
  * introspects the single live connection's schema, assembles a typed, inspectable,
  * SCHEMA-ONLY payload (schema + a distinct `rowSample` field that is always `null`
- * in this story — zero rows leave the machine), and runs one non-streaming
- * `generateText` call, returning the answer plus a schema-only context summary.
+ * — zero rows leave the machine), and opens one STREAMING provider call (Story 5.4),
+ * yielding a typed `ChatStreamChunk` sequence: `reasoning-delta` / `text-delta`
+ * tokens then a terminal `done` (Core-extracted `query` + schema-only context).
  *
  * `buildSchemaContext`/`assemblePayload` are pure (no rows, deterministic) so the
- * assembly is unit-tested with no network. `createChatResponder` takes an INJECTED
- * `generate` (defaulting to a thin `generateText` wrapper) so the full I/O matrix —
- * validation, not-configured, no-connection, SDK-throw — is exercised with no real
- * key and no network. The raw key is NEVER returned, logged, or placed in a `detail`.
+ * assembly is unit-tested with no network. The validate→key→schema→model→payload→
+ * system-prompt pipeline is extracted into ONE shared `prepareRequest` helper so the
+ * streaming path cannot drift from the schema-only invariant. `createChatResponder`
+ * takes an INJECTED `generateStream` (defaulting to a thin `streamText` wrapper) so
+ * the full I/O matrix — validation, not-configured, no-connection, mid-stream throw —
+ * is exercised with no real key and no network. The raw key is NEVER returned, logged,
+ * or placed in any chunk or `detail`.
  *
- * Story 5.3 extends the responder to turn the answer into a runnable query: the
- * system prompt (`buildChatSystemPrompt`, pure) instructs the model to emit one SQL
- * statement in a fenced block when appropriate, and `extractQuery` (pure, dumb — no
- * validation/classification) pulls it out into a distinct `query` field on the
- * result. The outbound payload is UNCHANGED — schema-only, `rowSample: null` — this
- * story only shapes what comes back, never what goes out.
+ * Story 5.3 turns the answer into a runnable query: the system prompt
+ * (`buildChatSystemPrompt`, pure) instructs the model to emit one SQL statement in a
+ * fenced block when appropriate, and `extractQuery` (pure, dumb — no validation/
+ * classification) runs once over the fully-accumulated answer at end-of-stream into a
+ * distinct `query` on the terminal `done` chunk. The outbound payload is UNCHANGED —
+ * schema-only, `rowSample: null` — streaming only shapes what comes back.
  */
 
-import { generateText } from "ai";
+import { streamText } from "ai";
 import type { LanguageModel } from "ai";
 import type {
-  ChatAskResult,
   ChatContextSummary,
   ChatProviderPayload,
+  ChatStreamChunk,
   DatabaseSchema,
   ProviderKind,
   SchemaForModel,
   SchemaTableInfo,
 } from "../shared/contract.ts";
 import { PROVIDER_KINDS } from "../shared/contract.ts";
+import { reasoningProviderOptions } from "./ai-provider.ts";
 import type { ResolveModelResult } from "./ai-provider.ts";
 import type { RegistryResult } from "./provider-registry.ts";
 
@@ -123,18 +128,58 @@ export function assemblePayload(schema: DatabaseSchema): ChatProviderPayload {
   return { schema: forModel, rowSample: null };
 }
 
-/** The non-streaming generate seam — narrowed to exactly what the responder needs. */
-export type GenerateFn = (args: {
+/**
+ * One part of the provider's streamed response, narrowed to exactly what the
+ * responder reads. The Vercel AI SDK's `fullStream` yields many part `type`s; the
+ * responder routes only `text-delta`/`reasoning-delta` (both carry `.text`) and
+ * observes `error` (a mid-stream failure the SDK surfaces as a part rather than a
+ * throw). Every other part type is ignored.
+ */
+export type ChatStreamPart = {
+  readonly type: string;
+  readonly text?: string;
+  readonly error?: unknown;
+};
+
+/**
+ * The STREAMING generate seam — narrowed to exactly what the responder needs. Returns
+ * synchronously (mirrors `streamText`); `fullStream` is consumed with `for await`.
+ * `providerOptions` enables the reasoning channel where supported; `maxOutputTokens`
+ * (OPTIONAL — only set for reasoning-enabled providers) gives the model room beyond
+ * any thinking budget, so a non-reasoning provider keeps the SDK's own default ceiling.
+ * `abortSignal` (OPTIONAL) tears the provider stream down on a client disconnect so the
+ * Core never pulls a billable stream to completion after the reader is gone.
+ */
+export type GenerateStreamFn = (args: {
   model: LanguageModel;
   system: string;
   prompt: string;
-}) => Promise<{ text: string }>;
+  providerOptions?: Record<string, unknown>;
+  maxOutputTokens?: number;
+  abortSignal?: AbortSignal;
+}) => { fullStream: AsyncIterable<ChatStreamPart> };
 
-/** The default `generate`: a thin, non-streaming `generateText` wrapper (Ring 1 only). */
-const defaultGenerate: GenerateFn = ({ model, system, prompt }) =>
-  generateText({ model, system, prompt });
+/** The default `generateStream`: a thin `streamText` wrapper (Ring 1 only). */
+const defaultGenerateStream: GenerateStreamFn = ({
+  model,
+  system,
+  prompt,
+  providerOptions,
+  maxOutputTokens,
+  abortSignal,
+}) => {
+  const result = streamText({
+    model,
+    system,
+    prompt,
+    providerOptions: providerOptions as never,
+    maxOutputTokens,
+    abortSignal,
+  });
+  return { fullStream: result.fullStream as unknown as AsyncIterable<ChatStreamPart> };
+};
 
-/** Dependencies for {@link createChatResponder}. `generate` is the test-injection seam. */
+/** Dependencies for {@link createChatResponder}. `generateStream` is the test seam. */
 export type ChatResponderDeps = {
   /** The single live schema source (memoized `connectionManager.getSchema`). */
   readonly getSchema: () => Promise<DatabaseSchema>;
@@ -142,23 +187,114 @@ export type ChatResponderDeps = {
   readonly getKey: (provider: ProviderKind) => RegistryResult<string | null>;
   /** Map a kind + key to a model handle (pure construction, no network). */
   readonly resolveModel: (provider: ProviderKind, apiKey: string) => ResolveModelResult;
-  /** Non-streaming generate. Defaults to a `generateText` wrapper; injected in tests. */
-  readonly generate?: GenerateFn;
+  /** Streaming generate. Defaults to a `streamText` wrapper; injected in tests. */
+  readonly generateStream?: GenerateStreamFn;
 };
 
 /** The live chat responder handle. */
 export type ChatResponder = {
   /**
-   * Answer one `chat.ask`. Validates the request, resolves the key in Ring 1,
-   * introspects the live schema, assembles the schema-only payload, and runs one
-   * non-streaming generate. Total — returns a typed {@link RegistryResult}; the raw
-   * key is never returned nor placed in any error `detail`.
+   * Stream one chat response (Story 5.4). Runs the shared request-prep (validate →
+   * key → schema → model → payload → system-prompt), opens ONE streaming provider
+   * call, and yields a typed {@link ChatStreamChunk} sequence: `reasoning-delta` /
+   * `text-delta` tokens, then a terminal `done` carrying the Core-extracted `query`
+   * plus the schema-only `context`. A pre-flight failure OR a mid-stream throw yields
+   * a single redacted `error` chunk (the raw key never appears in any chunk). Total —
+   * never throws to the caller. An optional `signal` is threaded into the provider
+   * stream so a client disconnect tears the (billable) provider call down promptly.
    */
-  answer(params: unknown): Promise<RegistryResult<ChatAskResult>>;
+  answerStream(params: unknown, signal?: AbortSignal): AsyncGenerator<ChatStreamChunk>;
 };
 
 function badRequest(message: string, detail: string): RegistryResult<never> {
   return { ok: false, code: "bad_request", message, detail };
+}
+
+/** The fully-prepared, schema-only request handed to the single streaming call. */
+type PreparedRequest = {
+  readonly provider: ProviderKind;
+  readonly apiKey: string;
+  readonly model: LanguageModel;
+  readonly system: string;
+  readonly prompt: string;
+  readonly tables: number;
+};
+
+/**
+ * The SHARED request-prep pipeline (Story 5.4): validate params, resolve the key in
+ * Ring 1, introspect the live schema, construct the model handle, assemble the
+ * SCHEMA-ONLY payload (`rowSample: null` — zero rows leave), and compose the system
+ * prompt. Extracted so the streaming path CANNOT drift from the schema-only invariant.
+ * Total — returns a typed {@link RegistryResult}; the raw key never appears in a
+ * `detail`. `deps` are the responder's injected seams.
+ */
+function prepareRequest(
+  deps: Pick<ChatResponderDeps, "getSchema" | "getKey" | "resolveModel">,
+  params: unknown,
+): Promise<RegistryResult<PreparedRequest>> {
+  return (async () => {
+    const p =
+      typeof params === "object" && params !== null && !Array.isArray(params)
+        ? (params as Record<string, unknown>)
+        : null;
+
+    // Unknown / missing provider kind → bad_request (nothing sent).
+    const provider = p?.provider;
+    if (!isProviderKind(provider)) {
+      return badRequest("invalid provider", "field=provider");
+    }
+
+    // Blank / non-string message → bad_request (no outbound call).
+    const message = p?.message;
+    if (typeof message !== "string" || message.trim().length === 0) {
+      return badRequest("message required", "field=message");
+    }
+
+    // Resolve the key in Ring 1. A registry failure (store unavailable) propagates
+    // its own code; an unconfigured provider (null) is a clean not_found.
+    const keyResult = deps.getKey(provider);
+    if (!keyResult.ok) return keyResult;
+    if (keyResult.value === null) {
+      return {
+        ok: false,
+        code: "not_found",
+        message: "provider not configured",
+        detail: `provider=${provider}`,
+      };
+    }
+    const apiKey = keyResult.value;
+
+    // Introspect the single live connection's schema. No live connection (or a
+    // connect failure) surfaces here as a throw → a neutral no-connection error
+    // (never a key/secret in the detail).
+    let schema: DatabaseSchema;
+    try {
+      schema = await deps.getSchema();
+    } catch {
+      return badRequest("no active connection", "schema=unavailable");
+    }
+
+    // Construct the model handle (pure; no network, no key validation).
+    const resolved = deps.resolveModel(provider, apiKey);
+    if (!resolved.ok) {
+      // Only reachable via an unchecked cast; provider was already validated above.
+      return badRequest("invalid provider", resolved.detail);
+    }
+
+    // Assemble the schema-only payload (rowSample: null — zero rows leave).
+    const payload = assemblePayload(schema);
+    return {
+      ok: true,
+      value: {
+        provider,
+        apiKey,
+        model: resolved.model,
+        system: buildChatSystemPrompt(payload),
+        prompt: message,
+        tables: payload.schema.tables,
+      },
+    };
+  })();
 }
 
 /**
@@ -166,87 +302,71 @@ function badRequest(message: string, detail: string): RegistryResult<never> {
  * only; no key ever crosses back to a caller or into an error `detail`.
  */
 export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
-  const generate = deps.generate ?? defaultGenerate;
+  const generateStream = deps.generateStream ?? defaultGenerateStream;
 
   return {
-    async answer(params: unknown): Promise<RegistryResult<ChatAskResult>> {
-      const p =
-        typeof params === "object" && params !== null && !Array.isArray(params)
-          ? (params as Record<string, unknown>)
-          : null;
-
-      // Unknown / missing provider kind → bad_request (nothing sent).
-      const provider = p?.provider;
-      if (!isProviderKind(provider)) {
-        return badRequest("invalid provider", "field=provider");
+    async *answerStream(params: unknown, signal?: AbortSignal): AsyncGenerator<ChatStreamChunk> {
+      // Shared prep — a pre-flight failure is mapped to a single terminal error chunk
+      // (no delta, no streaming bubble committed) and the generator ends.
+      const prepared = await prepareRequest(deps, params);
+      if (!prepared.ok) {
+        yield { type: "error", code: prepared.code, message: prepared.message };
+        return;
       }
-
-      // Blank / non-string message → bad_request (no outbound call).
-      const message = p?.message;
-      if (typeof message !== "string" || message.trim().length === 0) {
-        return badRequest("message required", "field=message");
-      }
-
-      // Resolve the key in Ring 1. A registry failure (store unavailable) propagates
-      // its own code; an unconfigured provider (null) is a clean not_found.
-      const keyResult = deps.getKey(provider);
-      if (!keyResult.ok) return keyResult;
-      if (keyResult.value === null) {
-        return {
-          ok: false,
-          code: "not_found",
-          message: "provider not configured",
-          detail: `provider=${provider}`,
-        };
-      }
-      const apiKey = keyResult.value;
-
-      // Introspect the single live connection's schema. No live connection (or a
-      // connect failure) surfaces here as a throw → a neutral no-connection error
-      // (never a key/secret in the detail).
-      let schema: DatabaseSchema;
-      try {
-        schema = await deps.getSchema();
-      } catch {
-        return badRequest("no active connection", "schema=unavailable");
-      }
-
-      // Construct the model handle (pure; no network, no key validation).
-      const resolved = deps.resolveModel(provider, apiKey);
-      if (!resolved.ok) {
-        // Only reachable via an unchecked cast; provider was already validated above.
-        return badRequest("invalid provider", resolved.detail);
-      }
-
-      // Assemble the schema-only payload (rowSample: null — zero rows leave).
-      const payload = assemblePayload(schema);
-
-      // The single outbound provider call. A network/auth throw is caught: the raw
-      // cause goes to stderr ONLY (never the client detail), and a neutral typed
-      // internal_error is returned — the key never appears in any of this.
-      let text: string;
-      try {
-        const result = await generate({
-          model: resolved.model,
-          system: buildChatSystemPrompt(payload),
-          prompt: message,
-        });
-        text = result.text;
-      } catch (err) {
-        // Redact the key from the cause before logging: a provider auth error can
-        // echo the credential, and the spec forbids the key ever being logged.
-        const rawCause = err instanceof Error ? err.message : String(err);
-        const cause = apiKey.length > 0 ? rawCause.split(apiKey).join("***") : rawCause;
-        process.stderr.write(`[chat] provider call failed: ${cause}\n`);
-        return { ok: false, code: "internal_error", message: "provider call failed" };
-      }
+      const { provider, apiKey, model, system, prompt, tables } = prepared.value;
 
       const context: ChatContextSummary = {
         policy: "schema-only",
-        tables: payload.schema.tables,
+        tables,
         rowsIncluded: 0,
       };
-      return { ok: true, value: { answer: text, query: extractQuery(text), context } };
+
+      // Accumulate the ANSWER channel only; `extractQuery` runs once on the full text
+      // at end-of-stream. Reasoning tokens are routed to their own channel and never
+      // fed to the extractor.
+      let full = "";
+      try {
+        // Spread the per-provider reasoning options: a reasoning-enabled provider gets
+        // both its thinking `providerOptions` AND the output ceiling; a non-reasoning
+        // provider (openai gpt-4o) gets neither — no silent `maxOutputTokens` cap.
+        const { fullStream } = generateStream({
+          model,
+          system,
+          prompt,
+          ...reasoningProviderOptions(provider),
+          abortSignal: signal,
+        });
+        for await (const part of fullStream) {
+          if (part.type === "text-delta") {
+            const text = part.text ?? "";
+            full += text;
+            yield { type: "text-delta", text };
+          } else if (part.type === "reasoning-delta") {
+            yield { type: "reasoning-delta", text: part.text ?? "" };
+          } else if (part.type === "error") {
+            // The SDK surfaced a mid-stream failure as a part (not a throw): redact
+            // and terminate with an error chunk, exactly as the catch below does.
+            throw part.error instanceof Error ? part.error : new Error(String(part.error));
+          }
+          // Every other part type (start/end/step/tool/…) is ignored.
+        }
+      } catch (err) {
+        // A client disconnect aborts the provider stream, surfacing here as a throw —
+        // but that is a deliberate teardown, not a provider failure. Stay silent: no
+        // spurious "stream failed" log, and no misleading `error` chunk (the caller is
+        // already gone and the controller is dead, so it could not be delivered anyway).
+        if (signal?.aborted) return;
+        // Redact the key from the cause before logging: a provider auth error can echo
+        // the credential, and the spec forbids the key ever being logged or sent.
+        const rawCause = err instanceof Error ? err.message : String(err);
+        const cause = apiKey.length > 0 ? rawCause.split(apiKey).join("***") : rawCause;
+        process.stderr.write(`[chat] provider stream failed: ${cause}\n`);
+        yield { type: "error", code: "internal_error", message: "provider call failed" };
+        return;
+      }
+
+      // Terminal frame: extract the query once over the fully-accumulated answer.
+      yield { type: "done", query: extractQuery(full), context };
     },
   };
 }

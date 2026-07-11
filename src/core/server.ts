@@ -12,9 +12,8 @@
  * to the RPC dispatcher. The token — not loopback — is the real gate (AD-12).
  */
 
-import type { ChatAskResult, ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
+import type { ChatStreamChunk, ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
 import { errorReply, okReply } from "../shared/contract.ts";
-import { generateText } from "ai";
 import { resolveModel } from "./ai-provider.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
@@ -242,27 +241,84 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     quoteIdent: (ident) => connectionManager.quoteIdent(ident),
   });
 
-  // Chat responder (Story 5.2): the SOLE outbound provider caller. Closes over the
-  // single live schema source, the Core-internal `getKey`, the unified model resolver,
-  // and the non-streaming `generateText` — every `ai`/`@ai-sdk/*` touch stays in Ring 1.
+  // Chat responder (Story 5.2, streamed in Story 5.4): the SOLE outbound provider
+  // caller. Closes over the single live schema source, the Core-internal `getKey`, and
+  // the unified model resolver; the streaming call defaults to `streamText`, so every
+  // `ai`/`@ai-sdk/*` touch stays in Ring 1 (chat.ts). Schema-only, zero rows leave.
   const chatResponder = createChatResponder({
     getSchema: () => connectionManager.getSchema(),
     getKey: (provider) => providerRegistry.getKey(provider),
     resolveModel,
-    generate: ({ model, system, prompt }) => generateText({ model, system, prompt }),
   });
 
+  const sseHeaders = {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    connection: "keep-alive",
+  } as const;
+
   /**
-   * Chat Q&A capability (Story 5.2): delegate to the responder and map its
-   * {@link RegistryResult} onto the wire (mirroring `toReply`). A validation/domain
-   * failure rides as its own `bad_request`/`not_found`/`internal_error`; the raw key
-   * never crosses this boundary nor appears in any `detail`.
+   * Chat streaming capability (Story 5.4): pump `responder.answerStream(params, signal)`
+   * as a `text/event-stream` — one `data: <json ChatStreamChunk>\n\n` per part. The
+   * generator is total (a pre-flight failure / mid-stream throw is itself a redacted
+   * `error` chunk), so this only closes the stream when the generator ends. The raw
+   * key never appears in any chunk (redacted, stderr-only in Core).
+   *
+   * Controller-safe on client disconnect (P1/P2): `req.signal` is threaded into the
+   * generator so the (billable) provider stream is torn down instead of pulled to
+   * completion; a live reference to the async iterator lets `cancel()` (and a `finally`)
+   * close it promptly; and every `enqueue`/`close` on a possibly-dead controller is
+   * guarded — once the reader is gone we STOP pumping (never re-enqueue a fallback on a
+   * dead controller), so no unhandled rejection escapes per aborted stream.
    */
-  async function chat(params: unknown): Promise<RpcReply<ChatAskResult>> {
-    const result = await chatResponder.answer(params);
-    return result.ok
-      ? okReply(result.value)
-      : errorReply(result.code, result.message, result.detail);
+  function chatStreamResponse(params: unknown, signal: AbortSignal): Response {
+    const encoder = new TextEncoder();
+    // Hold the live iterator so a client disconnect can close it (via `cancel()` and
+    // the `finally`), stopping provider-stream iteration promptly.
+    const iterator = chatResponder.answerStream(params, signal);
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for await (const chunk of iterator) {
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+            } catch {
+              // The controller is dead (client gone): stop pumping. The `finally`
+              // closes the generator — do NOT re-enqueue on a dead controller.
+              break;
+            }
+          }
+        } catch {
+          // Defense-in-depth: `answerStream` is total, but if it ever throws, close
+          // with a neutral redacted error frame rather than a dangling stream. Guard
+          // the enqueue too — the controller may already be dead.
+          try {
+            const fallback: ChatStreamChunk = {
+              type: "error",
+              code: "internal_error",
+              message: "stream failed",
+            };
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify(fallback)}\n\n`));
+          } catch {
+            // Controller already dead — nothing to flush.
+          }
+        } finally {
+          // Always release the generator (closes the provider stream on any exit path).
+          await iterator.return?.(undefined);
+        }
+        try {
+          controller.close();
+        } catch {
+          // Controller already closed/errored (client gone) — nothing to close.
+        }
+      },
+      // Client disconnected: stop pulling the provider's stream promptly.
+      async cancel() {
+        await iterator.return?.(undefined);
+      },
+    });
+    return new Response(stream, { status: 200, headers: sseHeaders });
   }
 
   const server = Bun.serve({
@@ -288,8 +344,6 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         tableRows,
         // Guarded SQL execution (the single risk classifier + composer).
         execute: (params) => executor.execute(params),
-        // Chat Q&A (Core is the sole provider caller; schema-only, zero rows leave).
-        chat,
       };
 
       // --- Static UI assets ---------------------------------------------
@@ -313,6 +367,38 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
             "x-content-type-options": "nosniff",
           },
         });
+      }
+
+      // --- Gated chat streaming endpoint (Story 5.4) --------------------
+      // Same two gates as `/rpc` (Origin/Host then token), then an SSE stream of
+      // `ChatStreamChunk`s. Kept off `/rpc` because a streaming `ReadableStream`
+      // Response cannot ride the single-JSON dispatch envelope.
+      if (url.pathname === "/chat/stream") {
+        if (req.method !== "POST") {
+          return jsonResponse(
+            errorReply("method_not_allowed", "Chat stream endpoint accepts POST only"),
+            405,
+          );
+        }
+        const origin = req.headers.get("origin");
+        const host = req.headers.get("host");
+        if (!validateOrigin(origin, host, bindHost, boundPort)) {
+          return jsonResponse(errorReply("forbidden_origin", "Foreign Origin or Host header"), 403);
+        }
+        const provided = req.headers.get(TOKEN_HEADER);
+        if (!validateToken(provided, token)) {
+          return jsonResponse(errorReply("unauthorized", "Missing or invalid session token"), 403);
+        }
+        let params: unknown;
+        try {
+          params = await req.json();
+        } catch {
+          return jsonResponse(errorReply("bad_request", "Body is not valid JSON"), 400);
+        }
+        // Validation of `params` (provider/message) happens INSIDE `answerStream` and
+        // rides as a terminal `error` chunk, so the response is always a 200 stream.
+        // `req.signal` (Bun aborts it on client disconnect) tears down the provider call.
+        return chatStreamResponse(params, req.signal);
       }
 
       // --- Gated RPC endpoint -------------------------------------------

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import type {
-  ChatAskResult,
   ConnectResult,
   ConnectionSummary,
   ExecuteResult,
@@ -127,16 +126,6 @@ function stubCtx(
       ctx.executeCalls++;
       return executeReply;
     },
-    async chat(): Promise<RpcReply<ChatAskResult>> {
-      return {
-        ok: true,
-        result: {
-          answer: "",
-          query: null,
-          context: { policy: "schema-only", tables: 0, rowsIncluded: 0 },
-        },
-      };
-    },
   };
   return ctx;
 }
@@ -182,7 +171,6 @@ describe("rpc dispatch", () => {
       "providers.remove",
       "table.rows",
       "execute",
-      "chat.ask",
     ]);
   });
 
