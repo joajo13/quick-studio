@@ -8,6 +8,8 @@ import type {
   WorkspaceSnapshot,
 } from "../shared/contract.ts";
 import type { ConnectionRegistry } from "./connection-registry.ts";
+import { createProviderRegistry } from "./provider-registry.ts";
+import { openProviderKeyStore } from "./provider-key-store.ts";
 import { dispatch, methodNames, type RpcContext } from "./rpc.ts";
 import type { WorkspaceRegistry } from "./workspace-registry.ts";
 
@@ -108,6 +110,7 @@ function stubCtx(
     executeCalls: 0,
     connections: fakeRegistry(),
     workspace: fakeWorkspaceRegistry(),
+    providers: createProviderRegistry({ openStore: () => openProviderKeyStore({ mode: "ephemeral" }) }),
     requestShutdown() {
       ctx.calls++;
     },
@@ -163,6 +166,9 @@ describe("rpc dispatch", () => {
       "connections.remove",
       "workspace.load",
       "workspace.save",
+      "providers.list",
+      "providers.set",
+      "providers.remove",
       "table.rows",
       "execute",
     ]);

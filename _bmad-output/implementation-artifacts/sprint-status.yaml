@@ -92,7 +92,7 @@ development_status:
 
   # Epic 5: AI Chat with Executable-JS Sandbox
   epic-5: backlog
-  5-1-configure-ai-providers: backlog           # Story 5.1: Configure AI Providers with user-supplied API keys
+  5-1-configure-ai-providers: done           # Story 5.1: Configure AI Providers with user-supplied API keys
   5-2-chat-qa-schema-only: backlog              # Story 5.2: Chat Q&A with the Core as sole Provider caller, schema-only by default
   5-3-nl-to-query-execution: backlog            # Story 5.3: Natural-language to query + execution from chat
   5-4-streaming-reasoning: backlog              # Story 5.4: Streaming responses with visible reasoning

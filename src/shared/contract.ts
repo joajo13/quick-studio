@@ -399,6 +399,59 @@ export type RemoveConnectionResult = {
 };
 
 /* ------------------------------------------------------------------ *
+ * AI provider-key contract (Story 5.1) — secret-free by design
+ * ------------------------------------------------------------------ */
+
+/**
+ * The AI providers quick-studio can hold a user-supplied API key for — the SINGLE
+ * source of truth (Core validation and the UI's `providers-model.ts` both import
+ * this, so they can never drift). Identity is the provider kind: at most one key
+ * per kind. Order matches the Settings-panel listing order.
+ */
+export const PROVIDER_KINDS = ["anthropic", "openai", "google"] as const;
+
+/** A provider kind, derived from {@link PROVIDER_KINDS} (not hand-duplicated). */
+export type ProviderKind = (typeof PROVIDER_KINDS)[number];
+
+/**
+ * Params for `providers.set`. The `apiKey` is the user's own secret, sent UI→Core
+ * on submit ONLY — it is never returned. `providers.set` upserts by `provider`.
+ */
+export type SetProviderParams = {
+  readonly provider: ProviderKind;
+  readonly apiKey: string;
+};
+
+/** Params for `providers.remove`. Idempotent by design. */
+export type RemoveProviderParams = {
+  readonly provider: ProviderKind;
+};
+
+/**
+ * A secret-free view of a configured provider sent Core→UI. It carries ONLY the
+ * provider kind and a `keyPreview` — the last few characters of the key (never the
+ * raw key, never the whole key). The trust boundary is one-directional: the key
+ * travels UI→Core on submit only and stays in Ring 1.
+ */
+export type ProviderSummary = {
+  readonly provider: ProviderKind;
+  readonly keyPreview: string;
+};
+
+/** Result of `providers.list`: only the CONFIGURED providers as secret-free summaries. */
+export type ListProvidersResult = {
+  readonly providers: ReadonlyArray<ProviderSummary>;
+};
+
+/** Result of `providers.set`: the secret-free summary of the stored key. */
+export type SetProviderResult = ProviderSummary;
+
+/** Result of `providers.remove`: idempotent success. */
+export type RemoveProviderResult = {
+  readonly removed: true;
+};
+
+/* ------------------------------------------------------------------ *
  * Workspace-state persistence contract (Story 2.5) — credential-free
  * ------------------------------------------------------------------ */
 

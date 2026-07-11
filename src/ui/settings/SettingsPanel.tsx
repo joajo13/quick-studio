@@ -14,6 +14,7 @@
 import { useEffect, useState } from "react";
 import type { ConnectionSummary, RpcErrorEnvelope } from "../../shared/contract.ts";
 import { rpc } from "../rpc/client.ts";
+import { ProvidersPanel } from "./ProvidersPanel.tsx";
 import {
   applyAdded,
   applyEdited,
@@ -25,6 +26,9 @@ import {
   type ConnectionsState,
   type Draft,
 } from "./connections-model.ts";
+
+/** Which Settings section is active — connections management or AI provider keys. */
+type SettingsSection = "connections" | "providers";
 
 /** A terse mono field-error or RPC-envelope banner. */
 function ErrorLine({ text }: { text: string }): React.JSX.Element {
@@ -210,6 +214,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
   const [error, setError] = useState<string | null>(null);
   const [addDraft, setAddDraft] = useState<Draft>(emptyDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [section, setSection] = useState<SettingsSection>("connections");
 
   // Load the list once on mount via the proven token-gated channel.
   useEffect(() => {
@@ -294,9 +299,28 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
       className="flex h-full flex-col bg-background"
     >
       <header className="flex shrink-0 items-center justify-between border-b border-border bg-card px-4 py-2">
-        <div className="flex items-baseline gap-2">
+        <div className="flex items-baseline gap-3">
           <span className="text-sm font-semibold text-foreground">settings</span>
-          <span className="font-mono text-xs lowercase text-muted-foreground">connections</span>
+          <nav className="flex items-baseline gap-2">
+            <button
+              type="button"
+              onClick={() => setSection("connections")}
+              className={`font-mono text-xs lowercase transition-colors ${
+                section === "connections" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              connections
+            </button>
+            <button
+              type="button"
+              onClick={() => setSection("providers")}
+              className={`font-mono text-xs lowercase transition-colors ${
+                section === "providers" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              ai providers
+            </button>
+          </nav>
         </div>
         <button
           type="button"
@@ -308,6 +332,9 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
         </button>
       </header>
 
+      {section === "providers" ? (
+        <ProvidersPanel />
+      ) : (
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
         {error !== null ? (
           <div className="rounded-[var(--radius)] border border-red-700 bg-red-950/40 px-3 py-2">
@@ -376,6 +403,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
           )}
         </div>
       </div>
+      )}
     </section>
   );
 }

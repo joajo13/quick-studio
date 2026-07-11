@@ -19,6 +19,7 @@ import {
   type TableRowsResult,
 } from "../shared/contract.ts";
 import type { ConnectionRegistry, RegistryResult } from "./connection-registry.ts";
+import type { ProviderRegistry } from "./provider-registry.ts";
 import type { WorkspaceRegistry } from "./workspace-registry.ts";
 
 /**
@@ -38,6 +39,13 @@ export type RpcContext = {
   readonly connections: ConnectionRegistry;
   /** Workspace-state registry: load/save the Panel-sizes + open-Tabs snapshot. */
   readonly workspace: WorkspaceRegistry;
+  /**
+   * AI provider-key registry (Story 5.1): list/set/remove user-supplied API keys
+   * over the encrypted provider-key store, mode-gated exactly like `connections`.
+   * Replies are secret-free (a last-4 `keyPreview` at most) — the raw key never
+   * crosses this boundary; `getKey` is Core-internal and deliberately un-dispatched.
+   */
+  readonly providers: ProviderRegistry;
   /**
    * Browse a table's rows (Story 3.2): validate the request against the live
    * schema, compose the Core-owned read-only SELECT/COUNT, and return exactly one
@@ -174,6 +182,31 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
    */
   "workspace.load": (_params, ctx): Preformed => preformed(toReply(ctx.workspace.load())),
   "workspace.save": (params, ctx): Preformed => preformed(toReply(ctx.workspace.save(params))),
+  /**
+   * AI provider-key CRUD (Story 5.1). Each entry shape-checks its `params` →
+   * `bad_request` on a missing/ill-typed field, then delegates to the registry and
+   * maps its {@link RegistryResult} to a reply. The registry owns semantic validation
+   * (unknown provider kind, blank key) and `internal_error` on a store failure. The
+   * raw apiKey travels UI→Core here only and is NEVER echoed back (list/set replies
+   * carry a secret-free summary).
+   */
+  "providers.list": (_params, ctx): Preformed => preformed(toReply(ctx.providers.list())),
+  "providers.set": (params, ctx): Preformed => {
+    const p = asParamsObject(params);
+    if (p === null || typeof p.provider !== "string" || typeof p.apiKey !== "string") {
+      return preformed(errorReply("bad_request", "providers.set requires { provider, apiKey }"));
+    }
+    return preformed(
+      toReply(ctx.providers.set({ provider: p.provider as never, apiKey: p.apiKey })),
+    );
+  },
+  "providers.remove": (params, ctx): Preformed => {
+    const p = asParamsObject(params);
+    if (p === null || typeof p.provider !== "string") {
+      return preformed(errorReply("bad_request", "providers.remove requires { provider }"));
+    }
+    return preformed(toReply(ctx.providers.remove({ provider: p.provider as never })));
+  },
   /**
    * Browse rows (Story 3.2). The capability itself validates against the live
    * schema and composes the read-only SELECT, returning a fully-formed reply

@@ -21,6 +21,7 @@ import { createConnectionRegistry } from "./connection-registry.ts";
 import type { DriverFactory } from "./driver.ts";
 import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
+import { createProviderRegistry } from "./provider-registry.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
 import { planTableRows, readTotal } from "./table-rows.ts";
@@ -193,6 +194,12 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // pure in-memory no-op, never touching the app dir).
   const workspaceRegistry = createWorkspaceRegistry({ storeDeps: { mode } });
 
+  // AI provider-key registry (Story 5.1): the sole provider-key-store holder for
+  // the AI-providers Settings surface. Same lazy-open, mode-gated posture as the
+  // connection registry — Ephemeral stays a hard no-write (its store open is a pure
+  // in-memory no-op), and the raw key never leaves Ring 1 (summaries are secret-free).
+  const providerRegistry = createProviderRegistry({ storeDeps: { mode } });
+
   /**
    * Browse-rows capability (Story 3.2): validate the request against the live
    * introspected schema, compose the Core-owned read-only SELECT/COUNT (identifiers
@@ -249,6 +256,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         connections: connectionRegistry,
         // Workspace-state registry (lazily opens the store on first call).
         workspace: workspaceRegistry,
+        // AI provider-key registry (lazily opens the store on first call).
+        providers: providerRegistry,
         // Browse-rows read path (composes the Core-owned SELECT on the live conn).
         tableRows,
         // Guarded SQL execution (the single risk classifier + composer).
