@@ -480,10 +480,11 @@ export type SchemaForModel = {
 
 /**
  * The outbound provider payload assembled Core-side. `schema` and `rowSample` are
- * DISTINCT fields so the AR-6 separation is structural, not incidental: in Story 5.2
- * `rowSample` is ALWAYS `null` (zero rows leave the machine). Story 5.3's per-query
- * row opt-in is what will ever populate `rowSample` — this shape wires that seam now
- * without shipping any row-sending path.
+ * DISTINCT fields so the AR-6 separation is structural, not incidental: `rowSample`
+ * is ALWAYS `null` through Story 5.3 (zero rows leave the machine — 5.3 produces and
+ * runs queries but sends no result rows outbound). A FUTURE per-query row opt-in is
+ * what would ever populate `rowSample` — this shape wires that seam now without
+ * shipping any row-sending path.
  */
 export type ChatProviderPayload = {
   readonly schema: SchemaForModel;
@@ -501,9 +502,15 @@ export type ChatContextSummary = {
   readonly rowsIncluded: 0;
 };
 
-/** Result of `chat.ask`: the model's answer plus the schema-only context summary. */
+/**
+ * Result of `chat.ask`: the model's answer, a distinct extracted `query` (Story
+ * 5.3's Core-side, pure fenced-block extraction — `null` when the answer carried no
+ * SQL block), and the schema-only context summary. The UI never parses/classifies
+ * `answer` for SQL itself (AR-3) — it sends `query` verbatim to `execute` when set.
+ */
 export type ChatAskResult = {
   readonly answer: string;
+  readonly query: string | null;
   readonly context: ChatContextSummary;
 };
 

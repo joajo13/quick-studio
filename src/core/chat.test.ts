@@ -13,7 +13,13 @@ import { describe, expect, test } from "bun:test";
 import type { DatabaseSchema } from "../shared/contract.ts";
 import type { ResolveModelResult } from "./ai-provider.ts";
 import type { RegistryResult } from "./provider-registry.ts";
-import { assemblePayload, buildSchemaContext, createChatResponder } from "./chat.ts";
+import {
+  assemblePayload,
+  buildChatSystemPrompt,
+  buildSchemaContext,
+  createChatResponder,
+  extractQuery,
+} from "./chat.ts";
 
 const SECRET = "sk-super-secret-key-1234";
 
@@ -97,16 +103,72 @@ describe("buildSchemaContext / assemblePayload", () => {
   });
 });
 
+describe("buildChatSystemPrompt", () => {
+  test("composes the SQL-emitting instruction with the engine and the schema stanzas", () => {
+    const prompt = buildChatSystemPrompt(assemblePayload(SCHEMA));
+    expect(prompt).toContain("postgres database");
+    expect(prompt).toContain("```sql fenced block");
+    expect(prompt).toContain("do not invent tables or columns");
+    expect(prompt).toContain("table public.customers");
+    expect(prompt).toContain("table public.orders");
+  });
+});
+
+describe("extractQuery", () => {
+  test("extracts a ```sql fenced block, trimmed", () => {
+    const text = "here you go:\n```sql\nSELECT * FROM customers;\n```\nlet me know.";
+    expect(extractQuery(text)).toBe("SELECT * FROM customers;");
+  });
+
+  test("extracts a bare ``` fenced block when no `sql` tag is present", () => {
+    const text = "```\nSELECT 1;\n```";
+    expect(extractQuery(text)).toBe("SELECT 1;");
+  });
+
+  test("a non-`sql` language tag (```postgresql) is consumed, not captured into the query", () => {
+    expect(extractQuery("```postgresql\nSELECT 1;\n```")).toBe("SELECT 1;");
+    expect(extractQuery("```mysql\nSELECT 2;\n```")).toBe("SELECT 2;");
+  });
+
+  test("prose-only answer (no fenced block) -> null", () => {
+    expect(extractQuery("there are 2 tables: customers and orders.")).toBeNull();
+  });
+
+  test("multiple fenced blocks -> the first one wins", () => {
+    const text = "```sql\nSELECT 1;\n```\nand also\n```sql\nSELECT 2;\n```";
+    expect(extractQuery(text)).toBe("SELECT 1;");
+  });
+
+  test("an empty fenced block -> null", () => {
+    expect(extractQuery("```sql\n\n```")).toBeNull();
+  });
+});
+
 describe("createChatResponder — I/O matrix", () => {
-  test("happy path returns the answer + schema-only context (rowsIncluded 0)", async () => {
+  test("happy path returns the answer + query + schema-only context (rowsIncluded 0)", async () => {
     const { responder, calls } = makeResponder({});
     const r = await responder.answer({ provider: "anthropic", message: "how many tables?" });
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.value.answer).toBe("answered: how many tables?");
+      expect(r.value.query).toBeNull();
       expect(r.value.context).toEqual({ policy: "schema-only", tables: 2, rowsIncluded: 0 });
     }
     expect(calls()).toBe(1);
+  });
+
+  test("a fenced-SQL answer surfaces the extracted query with zero rows in the payload", async () => {
+    const { responder } = makeResponder({
+      generate: async () => ({
+        text: "you can find that with:\n```sql\nSELECT count(*) FROM customers;\n```",
+      }),
+    });
+    const r = await responder.answer({ provider: "anthropic", message: "how many customers?" });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.value.query).toBe("SELECT count(*) FROM customers;");
+      expect(r.value.context.rowsIncluded).toBe(0);
+    }
   });
 
   test("provider not configured -> not_found, no outbound call, no secret", async () => {

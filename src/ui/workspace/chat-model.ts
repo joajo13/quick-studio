@@ -13,10 +13,21 @@
 
 import type { ChatContextSummary, ProviderKind } from "../../shared/contract.ts";
 
-/** One entry in the message log. An assistant answer carries its schema-only context. */
+/**
+ * One entry in the message log. An assistant answer carries its schema-only
+ * context plus the Core-extracted `query` (Story 5.3) — the SQL statement the
+ * model emitted in a fenced block, or `null` when the answer was prose-only. The
+ * UI never derives `query` itself (AR-3); it is whatever Core's `extractQuery`
+ * returned, rendered read-only with a run action.
+ */
 export type ChatMessage =
   | { readonly role: "user"; readonly text: string }
-  | { readonly role: "assistant"; readonly text: string; readonly context: ChatContextSummary };
+  | {
+      readonly role: "assistant";
+      readonly text: string;
+      readonly query: string | null;
+      readonly context: ChatContextSummary;
+    };
 
 /** The chat Tab's session state. Immutable — reducers return new values. */
 export type ChatState = {
@@ -64,11 +75,12 @@ export function appendUserMessage(state: ChatState, text: string): ChatState {
   return { ...state, messages: [...state.messages, { role: "user", text }] };
 }
 
-/** Append an assistant answer (with its schema-only context) to the log. */
+/** Append an assistant answer (with its extracted `query` and schema-only context) to the log. */
 export function appendAnswer(
   state: ChatState,
   text: string,
   context: ChatContextSummary,
+  query: string | null,
 ): ChatState {
-  return { ...state, messages: [...state.messages, { role: "assistant", text, context }] };
+  return { ...state, messages: [...state.messages, { role: "assistant", text, query, context }] };
 }

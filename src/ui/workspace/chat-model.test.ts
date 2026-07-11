@@ -61,16 +61,28 @@ describe("reducers", () => {
     expect(s1.provider).toBe("anthropic");
   });
 
-  test("appendAnswer appends the assistant entry with its context", () => {
+  test("appendAnswer appends the assistant entry with its context and a null query", () => {
     const s0 = appendUserMessage(setProvider(emptyChatState(), "anthropic"), "hi");
-    const s1 = appendAnswer(s0, "there are 3 tables", CONTEXT);
+    const s1 = appendAnswer(s0, "there are 3 tables", CONTEXT, null);
     expect(s1.messages).toHaveLength(2);
     expect(s1.messages[1]).toEqual({
       role: "assistant",
       text: "there are 3 tables",
+      query: null,
       context: CONTEXT,
     });
     // Prior state untouched.
     expect(s0.messages).toHaveLength(1);
+  });
+
+  test("appendAnswer carries a non-null extracted query", () => {
+    const s0 = appendUserMessage(setProvider(emptyChatState(), "anthropic"), "how many customers?");
+    const s1 = appendAnswer(s0, "run this:", CONTEXT, "SELECT count(*) FROM customers;");
+    expect(s1.messages[1]).toEqual({
+      role: "assistant",
+      text: "run this:",
+      query: "SELECT count(*) FROM customers;",
+      context: CONTEXT,
+    });
   });
 });

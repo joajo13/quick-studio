@@ -130,7 +130,11 @@ function stubCtx(
     async chat(): Promise<RpcReply<ChatAskResult>> {
       return {
         ok: true,
-        result: { answer: "", context: { policy: "schema-only", tables: 0, rowsIncluded: 0 } },
+        result: {
+          answer: "",
+          query: null,
+          context: { policy: "schema-only", tables: 0, rowsIncluded: 0 },
+        },
       };
     },
   };

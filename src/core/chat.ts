@@ -13,6 +13,13 @@
  * `generate` (defaulting to a thin `generateText` wrapper) so the full I/O matrix —
  * validation, not-configured, no-connection, SDK-throw — is exercised with no real
  * key and no network. The raw key is NEVER returned, logged, or placed in a `detail`.
+ *
+ * Story 5.3 extends the responder to turn the answer into a runnable query: the
+ * system prompt (`buildChatSystemPrompt`, pure) instructs the model to emit one SQL
+ * statement in a fenced block when appropriate, and `extractQuery` (pure, dumb — no
+ * validation/classification) pulls it out into a distinct `query` field on the
+ * result. The outbound payload is UNCHANGED — schema-only, `rowSample: null` — this
+ * story only shapes what comes back, never what goes out.
  */
 
 import { generateText } from "ai";
@@ -63,6 +70,42 @@ function serializeTable(table: SchemaTableInfo): string {
  */
 export function buildSchemaContext(schema: DatabaseSchema): string {
   return schema.tables.map(serializeTable).join("\n\n");
+}
+
+/**
+ * Compose the system prompt from the live schema: an instruction stanza (answer
+ * using only this `{engine}` schema; when a query answers the question, emit
+ * EXACTLY ONE statement in a ```sql fenced block; never invent tables/columns) plus
+ * the existing row-free {@link buildSchemaContext} stanzas. Pure and deterministic —
+ * no network, so the composed shape is unit-testable with no live model.
+ */
+export function buildChatSystemPrompt(payload: ChatProviderPayload): string {
+  const instruction = [
+    `you are a sql assistant for a ${payload.schema.engine} database. use only the schema below.`,
+    "when a query answers the question, output exactly one statement in a ```sql fenced block.",
+    "do not invent tables or columns.",
+  ].join("\n");
+  return `${instruction}\n\n${payload.schema.text}`;
+}
+
+/**
+ * Extract the first fenced code block from `text` — preferring a ` ```sql ` fence,
+ * falling back to a bare ` ``` ` fence — trimmed, or `null` when none is present.
+ * When multiple blocks exist, the FIRST one wins. Pure and dumb by design (Design
+ * Notes): it does not validate or classify the extracted SQL — the guarded `execute`
+ * path remains the sole read/mutate classifier (AR-3), so this stays Ring-2-safe to
+ * hand the extracted string to verbatim.
+ */
+export function extractQuery(text: string): string | null {
+  const sqlFence = /```sql[ \t]*\r?\n([\s\S]*?)```/i;
+  // Any other ```<lang> tag (```postgresql, ```mysql, ...): consume the language
+  // token on the fence line so it never leaks into the extracted statement.
+  const langFence = /```[a-z0-9_+-]+[ \t]*\r?\n([\s\S]*?)```/i;
+  const bareFence = /```[ \t]*\r?\n?([\s\S]*?)```/;
+  const match = sqlFence.exec(text) ?? langFence.exec(text) ?? bareFence.exec(text);
+  if (match === null) return null;
+  const body = match[1]?.trim() ?? "";
+  return body.length > 0 ? body : null;
 }
 
 /**
@@ -185,7 +228,7 @@ export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
       try {
         const result = await generate({
           model: resolved.model,
-          system: payload.schema.text,
+          system: buildChatSystemPrompt(payload),
           prompt: message,
         });
         text = result.text;
@@ -203,7 +246,7 @@ export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
         tables: payload.schema.tables,
         rowsIncluded: 0,
       };
-      return { ok: true, value: { answer: text, context } };
+      return { ok: true, value: { answer: text, query: extractQuery(text), context } };
     },
   };
 }
