@@ -46,6 +46,8 @@ import { ChatTabView } from "./ChatTabView.tsx";
 import { emptyChatState, type ChatState } from "./chat-model.ts";
 import { ErdTabView } from "./ErdTabView.tsx";
 import { QueryTabView } from "./QueryTabView.tsx";
+import { ReportTabView } from "../report/ReportTabView.tsx";
+import { emptyReport, type ReportState, type ReportStateUpdate } from "../report/report-state.ts";
 import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
 
 /** Short human blurb per Tab kind for the (non-table) placeholder body. */
@@ -347,6 +349,8 @@ export function TabContent({
   onQueryDraftChange,
   chatState,
   onChatStateChange,
+  reportState,
+  onReportStateChange,
   erdLayout,
   onErdLayoutChange,
 }: {
@@ -365,6 +369,10 @@ export function TabContent({
   chatState?: ChatState;
   /** Update the active chat tab's session state. */
   onChatStateChange?: (next: ChatState) => void;
+  /** The active report tab's session-only state (Story 6.1; never persisted). */
+  reportState?: ReportState;
+  /** Update the active report tab's session state. */
+  onReportStateChange?: (next: ReportStateUpdate) => void;
   /** The active ERD tab's persisted layout (Story 4.2), or undefined for dagre fallback. */
   erdLayout?: ErdTabLayout;
   /** Report the active ERD tab's captured geometry up, keyed by tab id (Story 4.2). */
@@ -427,6 +435,19 @@ export function TabContent({
         tables={tables ?? []}
         savedLayout={erdLayout}
         onLayoutChange={(layout) => onErdLayoutChange?.(tab.id, layout)}
+      />
+    );
+  }
+
+  if (tab.kind === "report") {
+    // Keyed by tab id (mirroring the query/chat branches) so each report Tab owns an
+    // isolated builder+preview instance; the lifted state keeps its blocks across Tab
+    // switches. Never persisted to the workspace snapshot (Story 6.1).
+    return (
+      <ReportTabView
+        key={tab.id}
+        state={reportState ?? emptyReport()}
+        onStateChange={onReportStateChange ?? (() => {})}
       />
     );
   }

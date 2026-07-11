@@ -20,6 +20,7 @@ import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
 import type { ChatState } from "./chat-model.ts";
+import type { ReportState, ReportStateUpdate } from "../report/report-state.ts";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
 import { TAB_KINDS, type TabKind, type WorkspaceState } from "./workspace-state.ts";
@@ -140,6 +141,8 @@ export function Workspace({
   onQueryDraftChange,
   chatStates,
   onChatStateChange,
+  reportStates,
+  onReportStateChange,
   erdLayouts,
   onErdLayoutChange,
   onStop,
@@ -174,6 +177,10 @@ export function Workspace({
   chatStates: ReadonlyMap<number, ChatState>;
   /** Update the chat state for chat Tab `id`. */
   onChatStateChange: (id: number, next: ChatState) => void;
+  /** Session-only report state per report Tab id (Story 6.1; never persisted). */
+  reportStates: ReadonlyMap<number, ReportState>;
+  /** Update the report state for report Tab `id`. */
+  onReportStateChange: (id: number, next: ReportStateUpdate) => void;
   /** Persisted ERD layouts keyed by stringified tab id (Story 4.2). */
   erdLayouts: Readonly<Record<string, ErdTabLayout>>;
   /** Report an ERD tab's captured geometry up for the debounced persist. */
@@ -288,6 +295,10 @@ export function Workspace({
                   chatState={activeTab !== null ? chatStates.get(activeTab.id) : undefined}
                   onChatStateChange={(next) => {
                     if (activeTab !== null) onChatStateChange(activeTab.id, next);
+                  }}
+                  reportState={activeTab !== null ? reportStates.get(activeTab.id) : undefined}
+                  onReportStateChange={(next) => {
+                    if (activeTab !== null) onReportStateChange(activeTab.id, next);
                   }}
                   erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
                   onErdLayoutChange={onErdLayoutChange}

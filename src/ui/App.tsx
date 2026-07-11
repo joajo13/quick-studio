@@ -32,6 +32,7 @@ import type {
 } from "../shared/contract.ts";
 import { rpc } from "./rpc/client.ts";
 import type { ChatState } from "./workspace/chat-model.ts";
+import { emptyReport, type ReportState, type ReportStateUpdate } from "./report/report-state.ts";
 import { Workspace } from "./workspace/Workspace.tsx";
 import {
   activateTab,
@@ -246,6 +247,21 @@ export function App(): React.JSX.Element {
   const onChatStateChange = (tabId: number, next: ChatState): void =>
     setChatStates((cur) => new Map(cur).set(tabId, next));
 
+  // Session-only report state per report Tab id (Story 6.1), keyed by Tab id so each
+  // report Tab keeps its own ordered blocks + query results across Tab switches. Like the
+  // chat states, this is deliberately NEVER folded into `toWorkspaceSnapshot`/`workspace.save`
+  // — report content (prose + query results) never touches disk; a relaunch starts blank.
+  const [reportStates, setReportStates] = useState<ReadonlyMap<number, ReportState>>(new Map());
+  // Accept a functional updater so two query-block runs completing in the same React
+  // batch each fold against the LATEST report state (never a stale snapshot that clobbers
+  // the other block's just-stored result). FR-18.
+  const onReportStateChange = (tabId: number, next: ReportStateUpdate): void =>
+    setReportStates((cur) => {
+      const prev = cur.get(tabId) ?? emptyReport();
+      const resolved = typeof next === "function" ? next(prev) : next;
+      return new Map(cur).set(tabId, resolved);
+    });
+
   // Persisted ERD layouts per tab id (Story 4.2), keyed by stringified tab id to match
   // the snapshot shape. Unlike query drafts, this DOES ride into `toWorkspaceSnapshot`
   // (geometry only — positions + viewport, never credentials/rows/SQL). Seeded from the
@@ -415,6 +431,14 @@ export function App(): React.JSX.Element {
             next.delete(id);
             return next;
           });
+          // Reclaim the closed report Tab's session state (mirrors the chat cleanup;
+          // ids are monotonic so a closed Tab's entry would otherwise linger).
+          setReportStates((cur) => {
+            if (!cur.has(id)) return cur;
+            const next = new Map(cur);
+            next.delete(id);
+            return next;
+          });
           // Prune the closed tab's ERD layout so it stops being persisted (Story 4.2).
           setErdLayouts((cur) => {
             const key = String(id);
@@ -435,6 +459,8 @@ export function App(): React.JSX.Element {
         onQueryDraftChange={onQueryDraftChange}
         chatStates={chatStates}
         onChatStateChange={onChatStateChange}
+        reportStates={reportStates}
+        onReportStateChange={onReportStateChange}
         erdLayouts={erdLayouts}
         onErdLayoutChange={onErdLayoutChange}
         extraTables={createdTables}
