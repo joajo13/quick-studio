@@ -176,16 +176,24 @@ describe("ISO-8601 UTC enforcement", () => {
   });
 });
 
-describe("sandbox protocol guards (Story 5.5)", () => {
+describe("sandbox protocol guards (Story 5.5; widened in 5.6)", () => {
+  // A valid protocol-2 render frame: escaped Markdown + a validated chart naming real
+  // columns of `fixture` + the canonical FrozenData.
   const renderFrame: SandboxInbound = {
     type: "render",
     protocolVersion: SANDBOX_PROTOCOL_VERSION,
+    markdown: "# heading\n\nsome **prose**",
+    chart: { mark: "bar", x: "name", y: "id" },
     data: fixture,
   };
 
   describe("isSandboxInbound", () => {
-    test("accepts a valid render frame carrying valid FrozenData", () => {
+    test("accepts a valid render frame carrying markdown, a valid chart, and valid FrozenData", () => {
       expect(isSandboxInbound(renderFrame)).toBe(true);
+    });
+
+    test("accepts a chart-less render frame (chart: null)", () => {
+      expect(isSandboxInbound({ ...renderFrame, chart: null })).toBe(true);
     });
 
     test("rejects a wrong tag", () => {
@@ -195,7 +203,8 @@ describe("sandbox protocol guards (Story 5.5)", () => {
 
     test("rejects a wrong / absent protocol version", () => {
       expect(isSandboxInbound({ ...renderFrame, protocolVersion: 999 })).toBe(false);
-      expect(isSandboxInbound({ type: "render", data: fixture })).toBe(false);
+      expect(isSandboxInbound({ ...renderFrame, protocolVersion: 1 })).toBe(false); // old version
+      expect(isSandboxInbound({ type: "render", markdown: "", chart: null, data: fixture })).toBe(false);
     });
 
     test("rejects a non-object", () => {
@@ -204,15 +213,36 @@ describe("sandbox protocol guards (Story 5.5)", () => {
       expect(isSandboxInbound(undefined)).toBe(false);
     });
 
+    test("rejects a non-string or over-long markdown (untrusted text is length-capped)", () => {
+      expect(isSandboxInbound({ ...renderFrame, markdown: 7 })).toBe(false);
+      expect(isSandboxInbound({ ...renderFrame, markdown: undefined })).toBe(false);
+      expect(isSandboxInbound({ ...renderFrame, markdown: "x".repeat(20000) })).toBe(true);
+      expect(isSandboxInbound({ ...renderFrame, markdown: "x".repeat(20001) })).toBe(false);
+    });
+
+    test("rejects a chart naming a column absent from the pushed data", () => {
+      expect(isSandboxInbound({ ...renderFrame, chart: { mark: "bar", x: "nope", y: "id" } })).toBe(false);
+      expect(isSandboxInbound({ ...renderFrame, chart: { mark: "line", x: "name", y: "missing" } })).toBe(false);
+    });
+
+    test("rejects a malformed chart (unknown mark / not-an-object / absent field)", () => {
+      expect(isSandboxInbound({ ...renderFrame, chart: { mark: "pie", x: "name", y: "id" } })).toBe(false);
+      expect(isSandboxInbound({ ...renderFrame, chart: { x: "name", y: "id" } })).toBe(false);
+      expect(isSandboxInbound({ ...renderFrame, chart: "line" })).toBe(false);
+      // `chart` must be exactly null-or-valid — an absent (undefined) chart is not admissible.
+      expect(isSandboxInbound({ ...renderFrame, chart: undefined })).toBe(false);
+    });
+
     test("rejects a render frame whose data fails FrozenData decoding", () => {
       const ragged = {
         schemaVersion: FROZEN_SCHEMA_VERSION,
         columns: [{ name: "a", type: "number" }, { name: "b", type: "string" }],
         rows: [[{ kind: "number", value: 1 }]], // one cell for two columns
       };
-      expect(isSandboxInbound({ type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, data: ragged })).toBe(false);
-      expect(isSandboxInbound({ type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION })).toBe(false);
-      expect(isSandboxInbound({ type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, data: null })).toBe(false);
+      const base = { type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, markdown: "", chart: null };
+      expect(isSandboxInbound({ ...base, data: ragged })).toBe(false);
+      expect(isSandboxInbound({ ...base })).toBe(false); // no data
+      expect(isSandboxInbound({ ...base, data: null })).toBe(false);
     });
   });
 
@@ -234,7 +264,7 @@ describe("sandbox protocol guards (Story 5.5)", () => {
     });
 
     test("rejects a wrong / absent protocol version", () => {
-      expect(isSandboxOutbound({ ...ready, protocolVersion: 2 })).toBe(false);
+      expect(isSandboxOutbound({ ...ready, protocolVersion: 1 })).toBe(false); // old version
       expect(isSandboxOutbound({ type: "ready" })).toBe(false);
     });
 

@@ -34,13 +34,17 @@
  * partials, reasoning routing, done/error terminal) is unit-testable.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  MAX_SANDBOX_MARKDOWN_LENGTH,
   PROVIDER_KINDS,
   type ChatContextSummary,
   type ListProvidersResult,
   type ProviderKind,
+  type SandboxRenderDoc,
 } from "../../shared/contract.ts";
+import { extractChartFence, parseChartSpec } from "../../shared/chart-spec.ts";
+import { SandboxFrame } from "../sandbox/SandboxFrame.tsx";
 import { DataGrid } from "../data/DataGrid.tsx";
 import { rpc } from "../rpc/client.ts";
 import { streamChat } from "../rpc/rpc-stream.ts";
@@ -52,6 +56,7 @@ import {
   EMPTY_PARTIAL,
   setProvider,
   validateSend,
+  type ChatMessage,
   type ChatState,
   type StreamPartial,
 } from "./chat-model.ts";
@@ -191,6 +196,115 @@ export async function confirmChatQuery(
 /** Clear a pending confirm (or any prior result) without executing anything. */
 export function cancelChatQuery(entry: ChatRunEntry): ChatRunEntry {
   return { ...entry, outcome: null };
+}
+
+/**
+ * The trailing marker appended to prose truncated at {@link MAX_SANDBOX_MARKDOWN_LENGTH}.
+ */
+const TRUNCATION_MARKER = "\n\n…(truncated)";
+
+/**
+ * Truncate untrusted prose so a valid frame is ALWAYS sent (Story 5.6, P3). The guest's
+ * `isSandboxInbound` DROPS a frame whose `markdown` exceeds {@link MAX_SANDBOX_MARKDOWN_LENGTH}
+ * — silently blanking the iframe. Clamping host-side (reusing the exported limit) guarantees
+ * the length invariant holds, so an oversized answer degrades to a truncated-but-rendered
+ * block rather than a blank 120px frame. The result length is ≤ the limit (the guard accepts
+ * `length ≤ limit`). Pure and total.
+ */
+export function truncateMarkdown(md: string, limit = MAX_SANDBOX_MARKDOWN_LENGTH): string {
+  if (md.length <= limit) return md;
+  const keep = Math.max(0, limit - TRUNCATION_MARKER.length);
+  return md.slice(0, keep) + TRUNCATION_MARKER;
+}
+
+/**
+ * Compose the Ring 3 render doc for an assistant message (Story 5.6), or `null` when the
+ * message is not chart-bearing. A doc is produced ONLY when BOTH hold:
+ *  - the message's query run produced ROWS (`entry.outcome.kind === "rows"`) — the chart
+ *    needs real result data, and its channels are validated against THAT data's columns;
+ *  - the answer `text` carries a valid ` ```chart ` spec (`extractChartFence` yields a raw
+ *    spec that `parseChartSpec` accepts against the run's column names).
+ * The doc's `markdown` is the prose with the chart fence stripped (and length-clamped, P3);
+ * `chart` is the validated spec; `data` is the run's canonical {@link FrozenData}. Pure and
+ * total — a missing fence, malformed JSON, unknown mark, or a channel naming an absent column
+ * all yield `null`.
+ *
+ * P7: a `rows` outcome with ZERO rows still renders the prose but drops the chart
+ * (`chart: null`) — Plot must never be handed an empty/degenerate dataset.
+ */
+export function buildChartDoc(text: string, entry: ChatRunEntry): SandboxRenderDoc | null {
+  const outcome = entry.outcome;
+  if (outcome === null || outcome.kind !== "rows") return null;
+  const { markdown, rawChart } = extractChartFence(text);
+  if (rawChart === null) return null;
+  const columnNames = outcome.data.columns.map((c) => c.name);
+  const chart = parseChartSpec(rawChart, columnNames);
+  if (chart === null) return null;
+  // Zero-row result → render prose only; a chart over an empty dataset is degenerate (P7).
+  const finalChart = outcome.data.rows.length === 0 ? null : chart;
+  return { markdown: truncateMarkdown(markdown), chart: finalChart, data: outcome.data };
+}
+
+/**
+ * Decide how one message's PLAIN bubble renders (Story 5.6, P1). For a chart-bearing
+ * assistant message (its text carries a ` ```chart ` fence) the bubble shows the fence-
+ * STRIPPED prose — never the raw ```chart``` JSON — and is SUPPRESSED entirely once the
+ * sandbox is mounted (`chartDoc !== null`), so the rich block renders the prose (+ chart)
+ * exactly once instead of duplicating it. Net: before the query runs, the stripped prose
+ * shows as plain text; after it runs, the sandbox owns the prose+chart and the plain bubble
+ * is hidden. Non-chart / user messages are unchanged (`m.text`, always shown). Pure and total.
+ */
+export function decideMessageView(
+  message: ChatMessage,
+  chartDoc: SandboxRenderDoc | null,
+): { readonly bubbleText: string; readonly showBubble: boolean } {
+  if (message.role !== "assistant") {
+    return { bubbleText: message.text, showBubble: true };
+  }
+  // Show the fence-STRIPPED prose whenever a well-formed ```chart``` fence was present —
+  // `extractChartFence` returns `markdown === message.text` only when NO fence matched, so
+  // using `markdown` directly is correct in every case. Keying the bubble on the parsed
+  // spec (`rawChart !== null`) instead would leak the RAW ```chart``` block for a fence whose
+  // JSON is malformed (parse fails → rawChart null) — exactly the "invalid chart" edge the
+  // I/O matrix says must render Markdown only, never the raw JSON (P1).
+  const { markdown } = extractChartFence(message.text);
+  return { bubbleText: markdown, showBubble: chartDoc === null };
+}
+
+/** A memo entry pairing a composed doc with the (text, run-entry) inputs it was built from. */
+type ChartDocCacheEntry = {
+  readonly text: string;
+  readonly entry: ChatRunEntry;
+  readonly doc: SandboxRenderDoc | null;
+};
+
+/**
+ * Reconcile per-message chart docs against a previous cache, REUSING a prior doc's object
+ * identity when the message text AND its run entry are both unchanged (Story 5.6, P2).
+ * `buildChartDoc` returns a fresh object literal every call, so recomposing on every render
+ * (e.g. each keystroke in the prompt box) would hand `SandboxFrame` a new `doc` identity and
+ * refire its `useEffect([doc])` — re-posting the frame and re-running micromark + Plot. Keying
+ * on `(text, entry)` keeps identity stable across unrelated re-renders, so the guest is only
+ * re-pushed when a message's text or its query outcome actually changes. Pure over its inputs.
+ */
+export function reconcileChartDocs(
+  prev: ReadonlyMap<number, ChartDocCacheEntry>,
+  messages: ReadonlyArray<ChatMessage>,
+  entryFor: (i: number) => ChatRunEntry,
+): Map<number, ChartDocCacheEntry> {
+  const next = new Map<number, ChartDocCacheEntry>();
+  messages.forEach((m, i) => {
+    if (m.role !== "assistant") return;
+    const entry = entryFor(i);
+    const cached = prev.get(i);
+    // Same text + same run-entry identity → reuse the exact prior doc object (stable identity).
+    if (cached !== undefined && cached.text === m.text && cached.entry === entry) {
+      next.set(i, cached);
+      return;
+    }
+    next.set(i, { text: m.text, entry, doc: buildChartDoc(m.text, entry) });
+  });
+  return next;
 }
 
 /**
@@ -466,6 +580,24 @@ export function ChatTabView({
     setRuns((r) => ({ ...r, [i]: cancelChatQuery(runEntry(i)) }));
   };
 
+  // Per-message guest render errors surfaced via `SandboxFrame`'s `onError` (Story 5.6, P3):
+  // a guest failure is never swallowed — it is logged and shown as a small inline note.
+  const [sandboxErrors, setSandboxErrors] = useState<Readonly<Record<number, string>>>({});
+
+  // Memoized per-message chart docs (Story 5.6, P2): recomposed ONLY when the message list or
+  // a run outcome changes — NOT on unrelated re-renders (e.g. each keystroke in the prompt
+  // box). Keeping each doc's object identity stable stops `SandboxFrame`'s `useEffect([doc])`
+  // from refiring — no per-keystroke re-post / micromark + Plot rebuild. The prior cache is
+  // held in a ref so `reconcileChartDocs` can reuse unchanged docs' identities across renders.
+  const chartDocCacheRef = useRef<Map<number, ChartDocCacheEntry>>(new Map());
+  const chartDocs = useMemo(() => {
+    const next = reconcileChartDocs(chartDocCacheRef.current, state.messages, (i) => runs[i] ?? IDLE_RUN);
+    chartDocCacheRef.current = next;
+    return next;
+    // `runs`/`state.messages` are the only inputs; `input` (keystrokes) is deliberately absent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.messages, runs]);
+
   const hasProviders = configured.length > 0;
   const canSend = hasProviders && state.provider !== null && input.trim() !== "" && !busy;
 
@@ -522,7 +654,15 @@ export function ChatTabView({
           </div>
         ) : (
           <ul className="flex flex-col gap-3">
-            {state.messages.map((m, i) => (
+            {state.messages.map((m, i) => {
+              // A chart-bearing assistant message whose run produced rows composes a Ring 3
+              // render doc (memoized for stable identity, P2); everything else keeps the
+              // plain-text bubble (chartDoc === null).
+              const chartDoc = m.role === "assistant" ? chartDocs.get(i)?.doc ?? null : null;
+              // The plain bubble shows fence-STRIPPED prose (never raw ```chart``` JSON) and is
+              // suppressed once the sandbox renders the rich block — no duplicated prose (P1).
+              const { bubbleText, showBubble } = decideMessageView(m, chartDoc);
+              return (
               <li
                 key={i}
                 className={`flex flex-col gap-1 ${m.role === "user" ? "items-end" : "items-start"}`}
@@ -530,15 +670,17 @@ export function ChatTabView({
                 {m.role === "assistant" && m.reasoning !== null ? (
                   <ReasoningBlock text={m.reasoning} />
                 ) : null}
-                <div
-                  className={`max-w-[85%] rounded-[var(--radius)] border px-3 py-2 font-mono text-xs ${
-                    m.role === "user"
-                      ? "border-[var(--coral-line)] bg-[var(--coral-soft)] text-[var(--foreground)]"
-                      : "border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
-                  }`}
-                >
-                  <p className="whitespace-pre-wrap break-words">{m.text}</p>
-                </div>
+                {showBubble ? (
+                  <div
+                    className={`max-w-[85%] rounded-[var(--radius)] border px-3 py-2 font-mono text-xs ${
+                      m.role === "user"
+                        ? "border-[var(--coral-line)] bg-[var(--coral-soft)] text-[var(--foreground)]"
+                        : "border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap break-words">{bubbleText}</p>
+                  </div>
+                ) : null}
                 {m.role === "assistant" ? (
                   <>
                     <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
@@ -556,10 +698,31 @@ export function ChatTabView({
                         }
                       />
                     ) : null}
+                    {/* Story 5.6: a validated chart spec + query rows renders rich Markdown +
+                        an Observable Plot chart inside the Ring 3 sandbox iframe, beside the
+                        query run. Sized to its content via the guest's `height` signal. */}
+                    {chartDoc !== null ? (
+                      <div className="w-full max-w-[85%]">
+                        <SandboxFrame
+                          doc={chartDoc}
+                          onError={(message) => {
+                            // Never swallow a guest render error (P3): log it + show an inline note.
+                            console.error(`sandbox render error (message ${i}): ${message}`);
+                            setSandboxErrors((e) => ({ ...e, [i]: message }));
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                    {sandboxErrors[i] !== undefined ? (
+                      <p role="alert" className="font-mono text-[11px] lowercase text-amber-400">
+                        chart render failed: {sandboxErrors[i]}
+                      </p>
+                    ) : null}
                   </>
                 ) : null}
               </li>
-            ))}
+              );
+            })}
             {/* Live streaming bubble (Story 5.4): the in-flight reasoning + incremental
                 answer, coalesced per animation frame. Committed to a real message on
                 `done`; cleared on completion/error/unmount. */}

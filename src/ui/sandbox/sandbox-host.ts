@@ -8,7 +8,7 @@
  *
  * The cross-origin `targetOrigin` nuance (get this wrong and containment leaks): the
  * guest runs under `sandbox="allow-scripts"` WITHOUT `allow-same-origin`, so its origin
- * is OPAQUE ("null"). Therefore (1) `pushData` posts with `targetOrigin: "*"` — you
+ * is OPAQUE ("null"). Therefore (1) `pushDoc` posts with `targetOrigin: "*"` — you
  * cannot target an opaque origin, and `"*"` is safe because delivery is confined to
  * that ONE iframe window and the payload is only already-public frozen data (never a
  * secret); and (2) inbound is validated by window IDENTITY (`event.source ===
@@ -21,9 +21,9 @@
 import {
   SANDBOX_PROTOCOL_VERSION,
   isSandboxOutbound,
-  type FrozenData,
   type SandboxInbound,
   type SandboxOutbound,
+  type SandboxRenderDoc,
 } from "../../shared/contract.ts";
 
 /** The opaque origin a `sandbox="allow-scripts"` (no `allow-same-origin`) guest posts from. */
@@ -49,11 +49,14 @@ export type SandboxHostDeps = {
 };
 
 export type SandboxHost = {
-  /** Push a `render` frame carrying canonical frozen data INTO the guest window. */
-  pushData: (frozenData: FrozenData) => void;
+  /**
+   * Push a `render` frame carrying the render doc (escaped Markdown + optional validated
+   * chart + canonical frozen data) INTO the guest window (Story 5.6).
+   */
+  pushDoc: (doc: SandboxRenderDoc) => void;
   /** Route one inbound message to `onSignal` iff it is a real guest signal (else drop). */
   handleMessage: (event: HostMessageEvent) => void;
-  /** Detach: after this, `pushData`/`handleMessage` are inert (unmount safety). */
+  /** Detach: after this, `pushDoc`/`handleMessage` are inert (unmount safety). */
   dispose: () => void;
 };
 
@@ -78,7 +81,7 @@ export function buildSandboxIframeAttrs(sandboxOrigin: string): SandboxIframeAtt
 }
 
 /**
- * Create the host controller. `pushData` posts a `render` frame to the iframe window
+ * Create the host controller. `pushDoc` posts a `render` frame to the iframe window
  * with `targetOrigin: "*"` (mandatory against an opaque-origin guest). `handleMessage`
  * accepts a message ONLY when it comes from the exact iframe window (`event.source ===
  * iframeWindow`), from the opaque `"null"` origin, AND passes `isSandboxOutbound`;
@@ -89,12 +92,14 @@ export function createSandboxHost(deps: SandboxHostDeps): SandboxHost {
   const { iframeWindow, onSignal } = deps;
   let disposed = false;
 
-  function pushData(frozenData: FrozenData): void {
+  function pushDoc(doc: SandboxRenderDoc): void {
     if (disposed) return;
     const frame: SandboxInbound = {
       type: "render",
       protocolVersion: SANDBOX_PROTOCOL_VERSION,
-      data: frozenData,
+      markdown: doc.markdown,
+      chart: doc.chart,
+      data: doc.data,
     };
     // `"*"` is required: an opaque-origin guest cannot be addressed by origin string.
     // Delivery is still confined to this one iframe window; the payload is public data.
@@ -119,5 +124,5 @@ export function createSandboxHost(deps: SandboxHostDeps): SandboxHost {
     disposed = true;
   }
 
-  return { pushData, handleMessage, dispose };
+  return { pushDoc, handleMessage, dispose };
 }

@@ -23,7 +23,9 @@ const outPath = `${import.meta.dir}/../src/core/sandbox-bundle.generated.ts`;
 const result = await Bun.build({
   entrypoints: [entry],
   target: "browser",
-  minify: false,
+  // Minify the guest bundle: Observable Plot + micromark ship inside the compiled binary,
+  // so trimming the bundle keeps the served `/guest.js` (and the embedded module) lean.
+  minify: true,
   define: { "process.env.NODE_ENV": '"production"' },
 });
 

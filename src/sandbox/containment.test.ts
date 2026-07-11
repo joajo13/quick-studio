@@ -42,8 +42,17 @@ describe("(a) cross-origin server config — egress blocked, no data endpoints, 
       const doc = await fetch(`${server.origin}/`);
       expect(doc.status).toBe(200);
       const csp = doc.headers.get("content-security-policy") ?? "";
+      // Story 5.6 security invariant: the guest CSP is byte-for-byte the Story-5.5 string —
+      // rich rendering is done by the TRUSTED bundle over declarative inputs, so the boundary
+      // NEVER widens. Asserting EXACT equality (not just substrings) makes ANY accidental
+      // widening — a new source, a relaxed directive, an added `unsafe-eval` — fail here.
+      const STORY_5_5_GUEST_CSP =
+        "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'";
+      expect(csp).toBe(STORY_5_5_GUEST_CSP);
+      // Redundant explicit guards, kept for intent even though equality already implies them.
       expect(csp).toContain("default-src 'none'");
       expect(csp).toContain("connect-src 'none'"); // the egress block
+      expect(csp).not.toContain("unsafe-eval");
       const body = await doc.text();
       expect(body).not.toContain("__QS_TOKEN__");
       expect(body).not.toContain("x-qs-token");
@@ -86,7 +95,8 @@ describe("(c) guest router — inward capability & wrong-origin attempts drop wi
       { type: "run-query", sql: "SELECT secret FROM keys" },
       { type: "data-request", table: "keys" },
       { type: "execute", op: {} },
-      { type: "render", protocolVersion: 2, data: fixture }, // wrong version
+      { type: "render", protocolVersion: 1, markdown: "", chart: null, data: fixture }, // old/wrong version
+      { type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, chart: null, data: fixture }, // no markdown
       { type: "render" }, // no data
       { nope: true },
       null,
@@ -100,7 +110,7 @@ describe("(c) guest router — inward capability & wrong-origin attempts drop wi
     const { router, sent } = makeRouter();
     const pin: GuestMessageEvent = {
       origin: "http://127.0.0.1:4321",
-      data: { type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, data: fixture },
+      data: { type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, markdown: "", chart: null, data: fixture },
     };
     router.handleMessage(pin); // pins + emits ready/height
     sent.length = 0;

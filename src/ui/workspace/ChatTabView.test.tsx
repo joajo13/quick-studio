@@ -16,12 +16,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   errorReply,
   FROZEN_SCHEMA_VERSION,
+  MAX_SANDBOX_MARKDOWN_LENGTH,
   type ChatStreamChunk,
   type FrozenData,
   type ProviderKind,
   type RpcReply,
+  type SandboxRenderDoc,
 } from "../../shared/contract.ts";
-import type { StreamPartial } from "./chat-model.ts";
+import type { ChatMessage, StreamPartial } from "./chat-model.ts";
 import { appendAnswer, appendUserMessage, emptyChatState, setProvider } from "./chat-model.ts";
 import type { streamChat } from "../rpc/rpc-stream.ts";
 import type { ChatRunEntry } from "./ChatTabView.tsx";
@@ -42,6 +44,10 @@ const {
   runChatQuery,
   confirmChatQuery,
   cancelChatQuery,
+  buildChartDoc,
+  truncateMarkdown,
+  reconcileChartDocs,
+  decideMessageView,
 } = await import("./ChatTabView.tsx");
 
 beforeEach(() => {
@@ -263,6 +269,181 @@ describe("runChatQuery / confirmChatQuery / cancelChatQuery — I/O Matrix", () 
   });
 });
 
+/** A two-column FrozenData (month:string, revenue:number) with `n` rows. */
+function makeChartData(n: number): FrozenData {
+  return {
+    schemaVersion: FROZEN_SCHEMA_VERSION,
+    columns: [
+      { name: "month", type: "string" },
+      { name: "revenue", type: "number" },
+    ],
+    rows: Array.from({ length: n }, (_, i) => [
+      { kind: "string", value: `m${i}` },
+      { kind: "number", value: i * 10 },
+    ]),
+  };
+}
+
+const rowsEntry = (data: FrozenData): ChatRunEntry => ({
+  pendingSql: "select month, revenue from t",
+  busy: false,
+  outcome: { kind: "rows", data, truncated: false },
+  selectedRow: null,
+});
+
+describe("buildChartDoc (Story 5.6 chart-doc composition)", () => {
+  const answer =
+    "here is the trend:\n\n```chart\n{ \"mark\": \"line\", \"x\": \"month\", \"y\": \"revenue\", \"title\": \"revenue\" }\n```\n\n```sql\nSELECT month, revenue FROM t;\n```";
+
+  test("composes a render doc when a valid chart spec AND query rows are present", () => {
+    const data = makeChartData(3);
+    const composed = buildChartDoc(answer, rowsEntry(data));
+    expect(composed).not.toBeNull();
+    expect(composed!.chart).toEqual({ mark: "line", x: "month", y: "revenue", title: "revenue" });
+    expect(composed!.data).toEqual(data);
+    // The chart fence is stripped from the prose (the sql fence + prose stay intact).
+    expect(composed!.markdown).toContain("here is the trend");
+    expect(composed!.markdown).not.toContain("```chart");
+    expect(composed!.markdown).toContain("```sql");
+  });
+
+  test("returns null when the run produced no rows (nothing to chart yet)", () => {
+    expect(buildChartDoc(answer, IDLE_RUN)).toBeNull();
+    expect(buildChartDoc(answer, { ...IDLE_RUN, outcome: { kind: "ok", rowsAffected: 1 } })).toBeNull();
+  });
+
+  test("returns null when the answer has no chart fence (plain / chart-less message)", () => {
+    expect(buildChartDoc("just prose, no chart here", rowsEntry(makeChartData(2)))).toBeNull();
+  });
+
+  test("returns null when a chart channel names a column absent from the run's data", () => {
+    const bad = "```chart\n{ \"mark\": \"bar\", \"x\": \"month\", \"y\": \"nope\" }\n```";
+    expect(buildChartDoc(bad, rowsEntry(makeChartData(2)))).toBeNull();
+  });
+
+  test("P7: a ZERO-row rows outcome renders prose but drops the chart (chart:null)", () => {
+    const composed = buildChartDoc(answer, rowsEntry(makeChartData(0)));
+    expect(composed).not.toBeNull();
+    // Prose is still rendered, but Plot is never handed an empty dataset.
+    expect(composed!.chart).toBeNull();
+    expect(composed!.markdown).toContain("here is the trend");
+    expect(composed!.data.rows).toHaveLength(0);
+  });
+
+  test("P3: the composed prose is length-clamped to MAX_SANDBOX_MARKDOWN_LENGTH (valid frame always sent)", () => {
+    const huge = "x".repeat(30000);
+    const bigAnswer = `${huge}\n\n\`\`\`chart\n{ "mark": "line", "x": "month", "y": "revenue" }\n\`\`\``;
+    const composed = buildChartDoc(bigAnswer, rowsEntry(makeChartData(2)));
+    expect(composed).not.toBeNull();
+    // The guard drops markdown.length > MAX; clamping host-side keeps the frame valid.
+    expect(composed!.markdown.length).toBeLessThanOrEqual(MAX_SANDBOX_MARKDOWN_LENGTH);
+  });
+});
+
+describe("truncateMarkdown (Story 5.6, P3 boundary)", () => {
+  test("passes short prose through unchanged", () => {
+    expect(truncateMarkdown("hello", MAX_SANDBOX_MARKDOWN_LENGTH)).toBe("hello");
+  });
+
+  test("prose EXACTLY at the limit is unchanged (guard accepts length === limit)", () => {
+    const atLimit = "a".repeat(MAX_SANDBOX_MARKDOWN_LENGTH);
+    const out = truncateMarkdown(atLimit, MAX_SANDBOX_MARKDOWN_LENGTH);
+    expect(out).toBe(atLimit);
+    expect(out.length).toBe(MAX_SANDBOX_MARKDOWN_LENGTH);
+  });
+
+  test("prose ONE over the limit is clamped to ≤ limit with a trailing marker", () => {
+    const over = "a".repeat(MAX_SANDBOX_MARKDOWN_LENGTH + 1);
+    const out = truncateMarkdown(over, MAX_SANDBOX_MARKDOWN_LENGTH);
+    expect(out.length).toBeLessThanOrEqual(MAX_SANDBOX_MARKDOWN_LENGTH);
+    expect(out.endsWith("(truncated)")).toBe(true);
+  });
+});
+
+describe("reconcileChartDocs (Story 5.6, P2 — stable doc identity)", () => {
+  const chartAnswer =
+    "trend:\n\n```chart\n{ \"mark\": \"line\", \"x\": \"month\", \"y\": \"revenue\" }\n```";
+  const msg = (text: string): ChatMessage => ({
+    role: "assistant",
+    text,
+    query: null,
+    reasoning: null,
+    context: { policy: "schema-only", tables: 1, rowsIncluded: 0 },
+  });
+
+  test("reuses a prior doc's OBJECT IDENTITY when text + run entry are unchanged", () => {
+    const messages = [msg(chartAnswer)];
+    const entry = rowsEntry(makeChartData(3));
+    const entryFor = (): ChatRunEntry => entry;
+    const first = reconcileChartDocs(new Map(), messages, entryFor);
+    const second = reconcileChartDocs(first, messages, entryFor);
+    // Same inputs → the exact same doc object (so SandboxFrame's useEffect([doc]) never refires).
+    expect(second.get(0)!.doc).toBe(first.get(0)!.doc);
+    expect(second.get(0)).toBe(first.get(0));
+    expect(first.get(0)!.doc).not.toBeNull();
+  });
+
+  test("recomposes a FRESH doc when the run entry changes (new data → new identity)", () => {
+    const messages = [msg(chartAnswer)];
+    const first = reconcileChartDocs(new Map(), messages, () => rowsEntry(makeChartData(3)));
+    const second = reconcileChartDocs(first, messages, () => rowsEntry(makeChartData(5)));
+    expect(second.get(0)!.doc).not.toBe(first.get(0)!.doc);
+  });
+
+  test("skips non-assistant messages (no doc entry for a user message)", () => {
+    const messages: ChatMessage[] = [{ role: "user", text: "hi" }];
+    const out = reconcileChartDocs(new Map(), messages, () => IDLE_RUN);
+    expect(out.has(0)).toBe(false);
+  });
+});
+
+describe("decideMessageView (Story 5.6, P1 — no raw JSON, no duplicate prose)", () => {
+  const chartAnswer =
+    "here is the trend:\n\n```chart\n{ \"mark\": \"line\", \"x\": \"month\", \"y\": \"revenue\" }\n```\n\nthanks";
+  const chartMsg: ChatMessage = {
+    role: "assistant",
+    text: chartAnswer,
+    query: null,
+    reasoning: null,
+    context: { policy: "schema-only", tables: 1, rowsIncluded: 0 },
+  };
+  const composedDoc: SandboxRenderDoc = { markdown: "here is the trend:", chart: null, data: makeChartData(2) };
+
+  test("before the run (chartDoc null): shows fence-STRIPPED prose, never the raw ```chart``` JSON", () => {
+    const { bubbleText, showBubble } = decideMessageView(chartMsg, null);
+    expect(showBubble).toBe(true);
+    expect(bubbleText).toContain("here is the trend");
+    expect(bubbleText).toContain("thanks");
+    expect(bubbleText).not.toContain("```chart");
+    expect(bubbleText).not.toContain("\"mark\"");
+  });
+
+  test("a MALFORMED ```chart``` spec (JSON parse fails) still strips the fence — never the raw JSON (P1)", () => {
+    // A well-formed fence whose BODY is invalid JSON: the chart coerces to null, but the
+    // fence must still be stripped from the bubble — the old code keyed on parse success and
+    // leaked the raw ```chart``` block for exactly this "invalid chart" edge.
+    const badJson: ChatMessage = { ...chartMsg, text: "trend below:\n\n```chart\n{ mark: line, }\n```\n\ndone" };
+    const { bubbleText, showBubble } = decideMessageView(badJson, null);
+    expect(showBubble).toBe(true);
+    expect(bubbleText).toContain("trend below");
+    expect(bubbleText).toContain("done");
+    expect(bubbleText).not.toContain("```chart");
+    expect(bubbleText).not.toContain("mark: line");
+  });
+
+  test("after the run (chartDoc mounted): the plain bubble is SUPPRESSED (no duplicate prose)", () => {
+    const { showBubble } = decideMessageView(chartMsg, composedDoc);
+    expect(showBubble).toBe(false);
+  });
+
+  test("a non-chart assistant message is unchanged (full text, bubble shown)", () => {
+    const plain: ChatMessage = { ...chartMsg, text: "just a plain answer" };
+    const { bubbleText, showBubble } = decideMessageView(plain, null);
+    expect(bubbleText).toBe("just a plain answer");
+    expect(showBubble).toBe(true);
+  });
+});
+
 describe("static structure", () => {
   test("renders the always-visible schema-only indicator + empty prompt", () => {
     const html = renderToStaticMarkup(
@@ -304,6 +485,21 @@ describe("static structure", () => {
     const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
     expect(html).toContain("reasoning");
     expect(html).toContain("counting the tables in the schema");
+  });
+
+  test("a plain assistant answer mounts NO SandboxFrame (no iframe)", () => {
+    let state = setProvider(emptyChatState(), "anthropic");
+    state = appendUserMessage(state, "how many tables?");
+    state = appendAnswer(
+      state,
+      "there are 3 tables",
+      { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
+      null,
+    );
+    const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
+    // No chart spec + no run rows -> buildChartDoc is null -> no sandbox iframe mounted.
+    expect(html).not.toContain("<iframe");
   });
 
   test("an assistant answer with a query renders the SQL read-only + a run action", () => {

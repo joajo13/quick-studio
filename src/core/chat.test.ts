@@ -130,6 +130,16 @@ describe("buildChatSystemPrompt", () => {
     expect(prompt).toContain("table public.customers");
     expect(prompt).toContain("table public.orders");
   });
+
+  test("also instructs the ```chart fenced JSON spec with the whitelisted marks (Story 5.6)", () => {
+    const prompt = buildChatSystemPrompt(assemblePayload(SCHEMA));
+    // The chart directive rides alongside the (preserved) SQL-block behavior.
+    expect(prompt).toContain("```chart");
+    expect(prompt).toContain("line, bar, dot, area");
+    expect(prompt).toContain("markdown");
+    // SQL-block behavior is preserved (both directives coexist).
+    expect(prompt).toContain("```sql fenced block");
+  });
 });
 
 describe("extractQuery", () => {

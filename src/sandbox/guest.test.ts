@@ -2,17 +2,16 @@
  * quick-studio Sandbox (Ring 3) — guest runtime tests.
  *
  * No DOM at test runtime, so every real path is exercised through the pure,
- * injectable `createGuestRouter` (fed STUB `postToParent`/`render`), plus direct
- * unit tests of `buildFrozenHtml` and `resolveDatumClick`. The matrix:
+ * injectable `createGuestRouter` (fed STUB `postToParent`/`render`), plus a direct unit
+ * test of the injectable `composeRender` (fed a fake {@link RenderHost}). The matrix:
  *  - handshake: the first valid `render` frame pins the parent origin;
  *  - valid `render` -> `ready` then `height`, posted to the pinned origin;
  *  - wrong-origin (post-handshake) frame dropped, no outbound;
  *  - pre-handshake garbage frame dropped WITHOUT pinning;
  *  - `run-query` / `data-request` / unknown / malformed inbound dropped, no outbound;
  *  - a render throw becomes a terse `error` signal (never data);
- *  - `handleClick` emits `datum-clicked` for a cell and drops an off-grid / pre-pin click;
- *  - `resolveDatumClick` maps a cell to `{row,col}` and returns null off-grid;
- *  - `buildFrozenHtml` emits `data-row`/`data-col` cells and escapes markup.
+ *  - `composeRender` clears→prose→chart→measures, and a THROWING chart still measures
+ *    a height (prose + inline note rendered, `ready`+`height` never skipped).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -21,14 +20,9 @@ import {
   SANDBOX_PROTOCOL_VERSION,
   type FrozenData,
   type SandboxOutbound,
+  type SandboxRenderDoc,
 } from "../shared/contract.ts";
-import {
-  buildFrozenHtml,
-  createGuestRouter,
-  resolveDatumClick,
-  type DatumElement,
-  type GuestMessageEvent,
-} from "./guest.ts";
+import { composeRender, createGuestRouter, type GuestMessageEvent, type RenderHost } from "./guest.ts";
 
 const PARENT = "http://127.0.0.1:4321";
 
@@ -48,11 +42,11 @@ const fixture: FrozenData = {
  *  `isParentSource` accepts every sender by default (source is exercised separately). */
 function makeRouter(renderHeight = 240) {
   const sent: Array<{ frame: SandboxOutbound; targetOrigin: string }> = [];
-  const rendered: FrozenData[] = [];
+  const rendered: SandboxRenderDoc[] = [];
   const router = createGuestRouter({
     postToParent: (frame, targetOrigin) => sent.push({ frame, targetOrigin }),
-    render: (data) => {
-      rendered.push(data);
+    render: (doc) => {
+      rendered.push(doc);
       return renderHeight;
     },
     isParentSource: () => true,
@@ -60,8 +54,18 @@ function makeRouter(renderHeight = 240) {
   return { router, sent, rendered };
 }
 
+/** A valid protocol-2 render frame (escaped markdown + a validated chart naming real columns). */
 function renderEvent(origin: string, data: FrozenData): GuestMessageEvent {
-  return { origin, data: { type: "render", protocolVersion: SANDBOX_PROTOCOL_VERSION, data } };
+  return {
+    origin,
+    data: {
+      type: "render",
+      protocolVersion: SANDBOX_PROTOCOL_VERSION,
+      markdown: "# hi",
+      chart: { mark: "bar", x: "name", y: "id" },
+      data,
+    },
+  };
 }
 
 describe("createGuestRouter — handshake + render", () => {
@@ -73,7 +77,8 @@ describe("createGuestRouter — handshake + render", () => {
 
     expect(router.pinnedOrigin()).toBe(PARENT);
     expect(rendered).toHaveLength(1);
-    expect(rendered[0]).toEqual(fixture);
+    // The router forwards the whole validated render doc (markdown + chart + data).
+    expect(rendered[0]).toEqual({ markdown: "# hi", chart: { mark: "bar", x: "name", y: "id" }, data: fixture });
     // ready first, then height — both posted to the pinned origin (never "*").
     expect(sent.map((s) => s.frame.type)).toEqual(["ready", "height"]);
     expect(sent.every((s) => s.targetOrigin === PARENT)).toBe(true);
@@ -162,116 +167,60 @@ describe("createGuestRouter — handshake + render", () => {
   });
 });
 
-describe("createGuestRouter — handleClick", () => {
-  /** A minimal element carrying data-row/data-col (and an optional parent chain). */
-  function cell(row: string | null, col: string | null, parent: DatumElement | null = null): DatumElement {
-    return {
-      getAttribute: (name) => (name === "data-row" ? row : name === "data-col" ? col : null),
-      parentElement: parent,
+describe("composeRender — clear → prose → chart(-or-error) → measure", () => {
+  /** A fake {@link RenderHost} recording the compose sequence; `chartThrows` forces a Plot throw. */
+  function makeHost(chartThrows = false, measured = 321) {
+    const calls: string[] = [];
+    let proseHtml: string | null = null;
+    let errorNote: string | null = null;
+    const host: RenderHost = {
+      reset: () => calls.push("reset"),
+      appendProse: (html) => {
+        calls.push("prose");
+        proseHtml = html;
+      },
+      appendChartNode: () => {
+        calls.push("chart");
+        if (chartThrows) throw new TypeError("bad channel type");
+      },
+      appendErrorNote: (message) => {
+        calls.push("error-note");
+        errorNote = message;
+      },
+      measure: () => {
+        calls.push("measure");
+        return measured;
+      },
     };
+    return { host, calls, proseHtml: () => proseHtml, errorNote: () => errorNote };
   }
 
-  test("a cell click after handshake emits datum-clicked to the pinned origin", () => {
-    const { router, sent } = makeRouter();
-    router.handleMessage(renderEvent(PARENT, fixture));
-    sent.length = 0;
+  const chartDoc: SandboxRenderDoc = {
+    markdown: "# hi",
+    chart: { mark: "bar", x: "name", y: "id" },
+    data: fixture,
+  };
 
-    router.handleClick(cell("1", "0"));
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.frame).toEqual({
-      type: "datum-clicked",
-      protocolVersion: SANDBOX_PROTOCOL_VERSION,
-      row: 1,
-      col: 0,
-    });
-    expect(sent[0]!.targetOrigin).toBe(PARENT);
+  test("composes clear → prose → chart → measure for a valid chart, returning the height", () => {
+    const { host, calls, proseHtml } = makeHost(false, 500);
+    const px = composeRender(chartDoc, host);
+    expect(px).toBe(500);
+    expect(calls).toEqual(["reset", "prose", "chart", "measure"]);
+    expect(proseHtml()).toContain("<h1>hi</h1>"); // escaped-markdown prose
   });
 
-  test("an off-grid click emits nothing", () => {
-    const { router, sent } = makeRouter();
-    router.handleMessage(renderEvent(PARENT, fixture));
-    sent.length = 0;
-    router.handleClick(cell(null, null));
-    router.handleClick(null);
-    expect(sent).toHaveLength(0);
+  test("prose-only doc (chart:null) skips the chart node entirely", () => {
+    const { host, calls } = makeHost();
+    composeRender({ markdown: "just prose", chart: null, data: fixture }, host);
+    expect(calls).toEqual(["reset", "prose", "measure"]);
   });
 
-  test("a click before any handshake is dropped (no parent pinned)", () => {
-    const { router, sent } = makeRouter();
-    router.handleClick(cell("0", "0"));
-    expect(sent).toHaveLength(0);
-  });
-});
-
-describe("resolveDatumClick", () => {
-  function el(attrs: Record<string, string>, parent: DatumElement | null = null): DatumElement {
-    return { getAttribute: (name) => attrs[name] ?? null, parentElement: parent };
-  }
-
-  test("maps a data-cell element to its {row,col}", () => {
-    expect(resolveDatumClick(el({ "data-row": "3", "data-col": "2" }))).toEqual({ row: 3, col: 2 });
-  });
-
-  test("walks up to an ancestor cell when the click lands on a descendant", () => {
-    const parent = el({ "data-row": "5", "data-col": "1" });
-    const child = el({}, parent);
-    expect(resolveDatumClick(child)).toEqual({ row: 5, col: 1 });
-  });
-
-  test("returns null off-grid (no data attributes anywhere up the chain)", () => {
-    expect(resolveDatumClick(el({}))).toBeNull();
-    expect(resolveDatumClick(null)).toBeNull();
-  });
-
-  test("returns null for a malformed coordinate", () => {
-    expect(resolveDatumClick(el({ "data-row": "x", "data-col": "2" }))).toBeNull();
-    expect(resolveDatumClick(el({ "data-row": "-1", "data-col": "0" }))).toBeNull();
-  });
-
-  test("rejects empty and hex-like attrs (no bogus 0 / 31 coercion)", () => {
-    // Strict decimal-only parse: `""`→0 and `"0x1f"`→31 must NOT forge a cell.
-    expect(resolveDatumClick(el({ "data-row": "", "data-col": "0" }))).toBeNull();
-    expect(resolveDatumClick(el({ "data-row": "0", "data-col": "" }))).toBeNull();
-    expect(resolveDatumClick(el({ "data-row": "0x1f", "data-col": "0" }))).toBeNull();
-    expect(resolveDatumClick(el({ "data-row": "1", "data-col": " 2 " }))).toBeNull();
-    // A clean decimal pair still resolves.
-    expect(resolveDatumClick(el({ "data-row": "0", "data-col": "0" }))).toEqual({ row: 0, col: 0 });
-  });
-});
-
-describe("buildFrozenHtml", () => {
-  test("emits a data-row/data-col cell for every datum", () => {
-    const html = buildFrozenHtml(fixture);
-    expect(html).toContain('<td data-row="0" data-col="0">1</td>');
-    expect(html).toContain('<td data-row="0" data-col="1">alpha</td>');
-    expect(html).toContain('<td data-row="1" data-col="0">2</td>');
-    expect(html).toContain('<td data-row="1" data-col="1">beta</td>');
-    // Column headers render (no data-* on the header row).
-    expect(html).toContain("<th>id</th>");
-    expect(html).toContain("<th>name</th>");
-  });
-
-  test("HTML-escapes cell + column text so a value can never inject markup", () => {
-    const data: FrozenData = {
-      schemaVersion: FROZEN_SCHEMA_VERSION,
-      columns: [{ name: "<script>", type: "string" }],
-      rows: [[{ kind: "string", value: "</td><img src=x>" }]],
-    };
-    const html = buildFrozenHtml(data);
-    expect(html).not.toContain("<script>");
-    expect(html).not.toContain("<img src=x>");
-    expect(html).toContain("&lt;script&gt;");
-    expect(html).toContain("&lt;/td&gt;&lt;img src=x&gt;");
-  });
-
-  test("renders a null cell as an empty cell and a date as its iso string", () => {
-    const data: FrozenData = {
-      schemaVersion: FROZEN_SCHEMA_VERSION,
-      columns: [{ name: "at", type: "date" }, { name: "gone", type: "null" }],
-      rows: [[{ kind: "date", iso: "2026-07-06T12:00:00Z" }, { kind: "null" }]],
-    };
-    const html = buildFrozenHtml(data);
-    expect(html).toContain('<td data-row="0" data-col="0">2026-07-06T12:00:00Z</td>');
-    expect(html).toContain('<td data-row="0" data-col="1"></td>');
+  test("a THROWING chart (P4) still measures a height — prose + an inline note render, height never skipped", () => {
+    const { host, calls, errorNote } = makeHost(true, 240);
+    const px = composeRender(chartDoc, host);
+    // The Plot throw did NOT bubble out: the frame gets a measured height so ready+height fire.
+    expect(px).toBe(240);
+    expect(calls).toEqual(["reset", "prose", "chart", "error-note", "measure"]);
+    expect(errorNote()).toContain("bad channel type");
   });
 });

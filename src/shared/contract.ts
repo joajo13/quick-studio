@@ -11,6 +11,8 @@
  *  - Every RPC reply is a typed result OR a single error envelope.
  */
 
+import { parseChartSpec, type ChartSpec } from "./chart-spec.ts";
+
 /* ------------------------------------------------------------------ *
  * Frozen-data schema — versioned, typed cell values
  * ------------------------------------------------------------------ */
@@ -524,19 +526,37 @@ export type ChatStreamChunk =
  * carry the version so a mismatched host and guest reject each other's frames
  * rather than mis-parsing them.
  */
-export const SANDBOX_PROTOCOL_VERSION = 1 as const;
+export const SANDBOX_PROTOCOL_VERSION = 2 as const;
 export type SandboxProtocolVersion = typeof SANDBOX_PROTOCOL_VERSION;
+
+/** Upper bound on the (UNTRUSTED, model-authored) Markdown pushed to the guest. */
+export const MAX_SANDBOX_MARKDOWN_LENGTH = 20000;
+
+/**
+ * The render-frame payload (Story 5.6): the trusted guest bundle draws exactly this —
+ * escaped Markdown prose, an optional validated {@link ChartSpec}, and the canonical
+ * {@link FrozenData} the chart channels reference. Carries no code, no secret, no handle.
+ */
+export type SandboxRenderDoc = {
+  readonly markdown: string;
+  readonly chart: ChartSpec | null;
+  readonly data: FrozenData;
+};
 
 /**
  * A frame pushed Ring 2 -> guest (host -> Ring 3). One-way for DATA: the ONLY
  * inbound frame is `render`, which carries already-public canonical
- * {@link FrozenData}. There is deliberately NO inbound frame that can hand the
- * guest a secret, a live handle, or a capability, and none that asks the guest to
- * request data or trigger a query — that separation is structural, not policy.
+ * {@link FrozenData} plus escaped Markdown and an optional validated {@link ChartSpec}
+ * (Story 5.6). There is deliberately NO inbound frame that can hand the guest a secret,
+ * a live handle, or a capability, and none that asks the guest to request data or trigger
+ * a query — that separation is structural, not policy. `markdown` is untrusted text
+ * (length-capped); `chart` is `null` or a spec whose channels name existing `data` columns.
  */
 export type SandboxInbound = {
   readonly type: "render";
   readonly protocolVersion: SandboxProtocolVersion;
+  readonly markdown: string;
+  readonly chart: ChartSpec | null;
   readonly data: FrozenData;
 };
 
@@ -565,21 +585,39 @@ export type SandboxOutbound =
   | { readonly type: "error"; readonly protocolVersion: SandboxProtocolVersion; readonly message: string };
 
 /**
- * Pure runtime guard for an inbound frame. Accepts ONLY a `render` frame at the
- * current protocol version whose `data` is valid {@link FrozenData} (delegated to
- * the existing {@link decode}, so the guest never re-derives the schema rules).
- * Rejects a wrong tag, a wrong/absent version, a non-object, and invalid data.
- * Total: never throws (a `decode` throw is swallowed into `false`).
+ * Pure runtime guard for an inbound frame (Story 5.6). Accepts ONLY a `render` frame at
+ * the current protocol version whose:
+ *  - `markdown` is a string capped at {@link MAX_SANDBOX_MARKDOWN_LENGTH} (untrusted text);
+ *  - `data` is valid {@link FrozenData} (delegated to {@link decode}, so the guest never
+ *    re-derives the schema rules);
+ *  - `chart` is `null` OR a {@link ChartSpec} that passes {@link parseChartSpec} against
+ *    the decoded `data`'s column names (so no channel can reference an absent column).
+ * Rejects a wrong tag, a wrong/absent version, a non-object, bad markdown, an invalid
+ * chart, and invalid data. Total: never throws (a `decode` throw is swallowed into `false`).
  */
 export function isSandboxInbound(value: unknown): value is SandboxInbound {
   if (typeof value !== "object" || value === null) return false;
-  const frame = value as { readonly type?: unknown; readonly protocolVersion?: unknown; readonly data?: unknown };
+  const frame = value as {
+    readonly type?: unknown;
+    readonly protocolVersion?: unknown;
+    readonly markdown?: unknown;
+    readonly chart?: unknown;
+    readonly data?: unknown;
+  };
   if (frame.type !== "render") return false;
   if (frame.protocolVersion !== SANDBOX_PROTOCOL_VERSION) return false;
+  if (typeof frame.markdown !== "string" || frame.markdown.length > MAX_SANDBOX_MARKDOWN_LENGTH) return false;
+  let data: FrozenData;
   try {
-    decode(frame.data as FrozenData);
+    data = decode(frame.data as FrozenData);
   } catch {
     return false;
+  }
+  // `chart` MUST be exactly `null` or a spec valid against the pushed columns. `undefined`
+  // (an absent field) is not admissible — the frame must carry an explicit chart-or-null.
+  if (frame.chart !== null) {
+    const columnNames = data.columns.map((c) => c.name);
+    if (parseChartSpec(frame.chart, columnNames) === null) return false;
   }
   return true;
 }

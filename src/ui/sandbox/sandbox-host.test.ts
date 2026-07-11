@@ -19,6 +19,7 @@ import {
   SANDBOX_PROTOCOL_VERSION,
   type FrozenData,
   type SandboxOutbound,
+  type SandboxRenderDoc,
 } from "../../shared/contract.ts";
 import {
   buildSandboxIframeAttrs,
@@ -29,8 +30,17 @@ import {
 
 const fixture: FrozenData = {
   schemaVersion: FROZEN_SCHEMA_VERSION,
-  columns: [{ name: "id", type: "number" }],
-  rows: [[{ kind: "number", value: 1 }]],
+  columns: [
+    { name: "id", type: "number" },
+    { name: "name", type: "string" },
+  ],
+  rows: [[{ kind: "number", value: 1 }, { kind: "string", value: "a" }]],
+};
+
+const docFixture: SandboxRenderDoc = {
+  markdown: "# hi",
+  chart: { mark: "bar", x: "name", y: "id" },
+  data: fixture,
 };
 
 /** A stub iframe window recording every posted (message, targetOrigin) pair. */
@@ -42,16 +52,18 @@ function makeIframe(): PostMessageTarget & { posts: Array<{ message: unknown; ta
   };
 }
 
-describe("createSandboxHost — pushData", () => {
-  test("posts a render frame to the iframe window with targetOrigin '*'", () => {
+describe("createSandboxHost — pushDoc", () => {
+  test("posts a render frame carrying {markdown,chart,data} with targetOrigin '*'", () => {
     const iframe = makeIframe();
     const host = createSandboxHost({ iframeWindow: iframe, onSignal: () => {} });
-    host.pushData(fixture);
+    host.pushDoc(docFixture);
     expect(iframe.posts).toHaveLength(1);
     expect(iframe.posts[0]!.targetOrigin).toBe("*");
     expect(iframe.posts[0]!.message).toEqual({
       type: "render",
       protocolVersion: SANDBOX_PROTOCOL_VERSION,
+      markdown: "# hi",
+      chart: { mark: "bar", x: "name", y: "id" },
       data: fixture,
     });
   });
@@ -111,12 +123,12 @@ describe("createSandboxHost — handleMessage", () => {
     expect(signals).toHaveLength(0);
   });
 
-  test("after dispose(), handleMessage and pushData are inert", () => {
+  test("after dispose(), handleMessage and pushDoc are inert", () => {
     const iframe = makeIframe();
     const signals: SandboxOutbound[] = [];
     const host = createSandboxHost({ iframeWindow: iframe, onSignal: (s) => signals.push(s) });
     host.dispose();
-    host.pushData(fixture);
+    host.pushDoc(docFixture);
     host.handleMessage({ source: iframe, origin: "null", data: ready });
     expect(iframe.posts).toHaveLength(0);
     expect(signals).toHaveLength(0);

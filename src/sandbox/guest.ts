@@ -2,28 +2,31 @@
  * quick-studio Sandbox (Ring 3) — the untrusted guest runtime.
  *
  * This is the ONLY code that runs inside the cross-origin `sandbox="allow-scripts"`
- * iframe. It receives already-public {@link FrozenData} pushed in by Ring 2, draws a
- * minimal deterministic table, and emits back ONLY render-lifecycle / interaction
- * signals ({@link SandboxOutbound}). It has no expressible way to request data or
- * trigger a query — the inbound union carries a single `render` frame and nothing else.
+ * iframe. It receives a validated {@link SandboxRenderDoc} pushed in by Ring 2, draws
+ * escaped Markdown + an optional Observable Plot chart, and emits back ONLY render-
+ * lifecycle signals ({@link SandboxOutbound}). It has no expressible way to request data
+ * or trigger a query — the inbound union carries a single `render` frame and nothing else.
  *
- * Ring discipline (sacred): this module imports ONLY from `src/shared/` — never
- * `src/core`, `src/ui`, `ai`, `@ai-sdk/*`, or anything holding a secret. Data flows
- * outward only; capability never flows inward.
+ * Ring discipline (sacred): this module imports ONLY from `src/shared/` + the render libs
+ * (`@observablehq/plot`, `micromark`, via `./render.ts`) — never `src/core`, `src/ui`,
+ * `ai`, `@ai-sdk/*`, or anything holding a secret. Data flows outward only; capability
+ * never flows inward.
  *
  * House testing style (no DOM at test runtime): all real logic lives in the pure,
- * exported, injectable `createGuestRouter` / `buildFrozenHtml` / `resolveDatumClick`;
- * `document`/`window` are touched only in the thin {@link bootstrap} seam, which runs
- * exclusively inside a real browser (guarded by a `typeof document` check).
+ * exported, injectable `createGuestRouter` / `composeRender`; `document`/`window` are
+ * touched only in the thin {@link bootstrap} seam, which runs exclusively inside a real
+ * browser (guarded by a `typeof document` check).
  */
 
 import {
   SANDBOX_PROTOCOL_VERSION,
   isSandboxInbound,
-  type FrozenCell,
-  type FrozenData,
   type SandboxOutbound,
+  type SandboxRenderDoc,
 } from "../shared/contract.ts";
+import type { PlotOptions } from "@observablehq/plot";
+import { buildPlotOptions, renderMarkdownToHtml } from "./render.ts";
+import * as Plot from "@observablehq/plot";
 
 /* ------------------------------------------------------------------ *
  * Pure guest router — handshake, guard, render, signal-out
@@ -37,12 +40,6 @@ export type GuestMessageEvent = {
   readonly data: unknown;
 };
 
-/** The minimal element shape `resolveDatumClick` walks: attributes + parent chain. */
-export type DatumElement = {
-  readonly getAttribute: (name: string) => string | null;
-  readonly parentElement?: DatumElement | null;
-};
-
 /** The seams the pure router needs from its host environment. */
 export type GuestRouterDeps = {
   /**
@@ -52,10 +49,11 @@ export type GuestRouterDeps = {
    */
   readonly postToParent: (frame: SandboxOutbound, targetOrigin: string) => void;
   /**
-   * Draw the frozen data and return the measured content height in CSS px. Pure in
-   * tests (a stub); in the real bootstrap it writes the HTML and reads `scrollHeight`.
+   * Draw the render doc (escaped Markdown + optional validated chart + its data) and
+   * return the measured content height in CSS px. Pure in tests (a stub); in the real
+   * bootstrap it composes the DOM (clear -> markdown -> chart) and reads `scrollHeight`.
    */
-  readonly render: (data: FrozenData) => number;
+  readonly render: (doc: SandboxRenderDoc) => number;
   /**
    * True iff `source` (a message's `event.source`) is the guest's real parent window.
    * Threaded in so the parent identity is checkable without touching `window` in the
@@ -68,8 +66,6 @@ export type GuestRouterDeps = {
 export type GuestRouter = {
   /** Handle one inbound `postMessage`: handshake-pin, guard, render, emit signals. */
   handleMessage: (event: GuestMessageEvent) => void;
-  /** Handle a click on a rendered element: emit `datum-clicked` when it hits a cell. */
-  handleClick: (target: DatumElement | null) => void;
   /** The pinned parent origin, or `null` before the first valid handshake frame. */
   pinnedOrigin: () => string | null;
 };
@@ -102,7 +98,11 @@ export function createGuestRouter(deps: GuestRouterDeps): GuestRouter {
     }
     const target = pinned;
     try {
-      const px = deps.render(event.data.data);
+      const px = deps.render({
+        markdown: event.data.markdown,
+        chart: event.data.chart,
+        data: event.data.data,
+      });
       deps.postToParent({ type: "ready", protocolVersion: SANDBOX_PROTOCOL_VERSION }, target);
       deps.postToParent({ type: "height", protocolVersion: SANDBOX_PROTOCOL_VERSION, px }, target);
     } catch (err) {
@@ -117,102 +117,52 @@ export function createGuestRouter(deps: GuestRouterDeps): GuestRouter {
     }
   }
 
-  function handleClick(target: DatumElement | null): void {
-    if (pinned === null) return; // no parent pinned yet — nothing to signal
-    const hit = resolveDatumClick(target);
-    if (hit === null) return; // click landed off the grid
-    deps.postToParent(
-      { type: "datum-clicked", protocolVersion: SANDBOX_PROTOCOL_VERSION, row: hit.row, col: hit.col },
-      pinned,
-    );
-  }
-
-  return { handleMessage, handleClick, pinnedOrigin: () => pinned };
+  return { handleMessage, pinnedOrigin: () => pinned };
 }
 
 /* ------------------------------------------------------------------ *
- * Pure minimal draw — a compact clickable table
+ * Pure render compose — clear → prose → chart(-or-error) → measure
  * ------------------------------------------------------------------ */
 
-/** Escape the five HTML-significant characters so a cell value can never inject markup. */
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-/** Render one tagged {@link FrozenCell} as its display text (never its raw object). */
-function cellText(cell: FrozenCell): string {
-  switch (cell.kind) {
-    case "null":
-      return "";
-    case "string":
-      return cell.value;
-    case "number":
-      return String(cell.value);
-    case "boolean":
-      return String(cell.value);
-    case "date":
-      return cell.iso;
-    default: {
-      const _exhaustive: never = cell;
-      return String(_exhaustive);
-    }
-  }
-}
+/**
+ * The minimal DOM surface {@link composeRender} needs, injected so the compose ORDER +
+ * error handling are unit-testable with a fake host (no real DOM). The real bootstrap
+ * wires these to `document`; a test wires them to spies (incl. a THROWING
+ * `appendChartNode`, to prove a Plot throw still yields a measured height).
+ */
+export type RenderHost = {
+  /** Clear the prior draw (`document.body.replaceChildren()` in the real seam). */
+  readonly reset: () => void;
+  /** Append the escaped-Markdown prose node (its `innerHTML` set from `html`). */
+  readonly appendProse: (html: string) => void;
+  /** Build + append the Observable Plot node from `options` (MAY throw on a bad channel). */
+  readonly appendChartNode: (options: PlotOptions) => void;
+  /** Append a small inline note when the chart failed to render (never data). */
+  readonly appendErrorNote: (message: string) => void;
+  /** Measure the composed content height in CSS px (`scrollHeight` in the real seam). */
+  readonly measure: () => number;
+};
 
 /**
- * Build the minimal deterministic draw of `data`: a compact HTML table whose body
- * cells carry `data-row`/`data-col` grid coordinates so a click resolves to a datum.
- * Pure and total; every value is HTML-escaped. This is the 5.5 proof-of-loop draw —
- * Story 5.6 replaces the internals with MDX + Observable Plot; the channel is unchanged.
+ * Compose one render into `host`: clear the prior draw, append the escaped-Markdown prose,
+ * then (when a validated chart is present) append the Plot node. RESILIENT to a `Plot.plot`
+ * throw (Story 5.6, P4): a type-mismatched channel makes Plot throw, but instead of bubbling
+ * out — which would skip the height signal and freeze the frame at its old size — we append a
+ * small inline error note and STILL return the measured height. So `ready`+`height` are always
+ * emitted once prose rendered. Returns the measured content height. Pure over its injected host.
  */
-export function buildFrozenHtml(data: FrozenData): string {
-  const head = data.columns.map((c) => `<th>${escapeHtml(c.name)}</th>`).join("");
-  const body = data.rows
-    .map((row, r) => {
-      const cells = row
-        .map((cell, c) => `<td data-row="${r}" data-col="${c}">${escapeHtml(cellText(cell))}</td>`)
-        .join("");
-      return `<tr>${cells}</tr>`;
-    })
-    .join("");
-  return `<table class="qs-frozen"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-}
-
-/**
- * Resolve a clicked element to its `{row,col}` datum by reading `data-row`/`data-col`,
- * walking up the parent chain (a click can land on a descendant of the cell). Returns
- * `null` when no ancestor carries a well-formed non-negative-integer coordinate pair
- * (a click off the grid). Both attributes are matched against a strict decimal-only
- * pattern BEFORE `Number(...)`, so `""`→`0` or `"0x1f"`→`31` coercions can never forge
- * a bogus cell. Pure and total — never throws.
- */
-const DECIMAL_ATTR_RE = /^\d+$/;
-
-export function resolveDatumClick(el: DatumElement | null): { readonly row: number; readonly col: number } | null {
-  let node: DatumElement | null | undefined = el;
-  while (node) {
-    const rowAttr = node.getAttribute("data-row");
-    const colAttr = node.getAttribute("data-col");
-    if (rowAttr !== null && colAttr !== null) {
-      // Reject empty / non-decimal / hex-like attrs before `Number` coerces them.
-      if (!DECIMAL_ATTR_RE.test(rowAttr) || !DECIMAL_ATTR_RE.test(colAttr)) {
-        return null; // a data-cell with a malformed coordinate is off-grid
-      }
-      const row = Number(rowAttr);
-      const col = Number(colAttr);
-      if (Number.isInteger(row) && Number.isInteger(col) && row >= 0 && col >= 0) {
-        return { row, col };
-      }
-      return null; // a data-cell with a malformed coordinate is off-grid
+export function composeRender(renderDoc: SandboxRenderDoc, host: RenderHost): number {
+  host.reset();
+  host.appendProse(renderMarkdownToHtml(renderDoc.markdown));
+  if (renderDoc.chart !== null) {
+    try {
+      host.appendChartNode(buildPlotOptions(renderDoc.chart, renderDoc.data));
+    } catch (err) {
+      // A Plot throw must NOT skip the height measurement — render prose + a note instead.
+      host.appendErrorNote(err instanceof Error ? err.message : "chart failed to render");
     }
-    node = node.parentElement ?? null;
   }
-  return null;
+  return host.measure();
 }
 
 /* ------------------------------------------------------------------ *
@@ -221,25 +171,46 @@ export function resolveDatumClick(el: DatumElement | null): { readonly row: numb
 
 /**
  * Wire the pure router to a real browser window/document: install the `message`
- * listener, draw into `document.body` and measure `scrollHeight`, and forward body
- * clicks. Exported for symmetry, but never invoked under `bun test` (no DOM) — the
- * module-level guard below runs it exclusively inside the guest iframe.
+ * listener and draw into `document.body`, measuring `scrollHeight`. Exported for
+ * symmetry, but never invoked under `bun test` (no DOM) — the module-level guard below
+ * runs it exclusively inside the guest iframe.
  */
 export function bootstrap(win: Window, doc: Document): void {
   const router = createGuestRouter({
     postToParent: (frame, targetOrigin) => win.parent.postMessage(frame, targetOrigin),
-    render: (data) => {
-      doc.body.innerHTML = buildFrozenHtml(data);
-      return doc.body.scrollHeight;
-    },
+    // Compose the draw from validated declarative inputs (Story 5.6) via the pure
+    // {@link composeRender}: clear the prior draw, append the escaped-Markdown prose node,
+    // then (if a validated chart is present) append the Observable Plot node — falling back
+    // to a small inline note if Plot throws — and finally measure `scrollHeight`.
+    // `replaceChildren()` is what clears a stale draw when an empty frame is pushed.
+    render: (renderDoc) =>
+      composeRender(renderDoc, {
+        reset: () => doc.body.replaceChildren(),
+        appendProse: (html) => {
+          const prose = doc.createElement("div");
+          prose.className = "qs-prose";
+          // micromark output is HTML-escaped (raw HTML disabled) and the CSP blocks inline
+          // handlers, so writing it to innerHTML cannot execute model-authored markup.
+          prose.innerHTML = html;
+          doc.body.appendChild(prose);
+        },
+        appendChartNode: (options) => {
+          const chartNode = Plot.plot(options);
+          doc.body.appendChild(chartNode as unknown as Node);
+        },
+        appendErrorNote: (message) => {
+          const note = doc.createElement("p");
+          note.className = "qs-chart-error";
+          note.textContent = `chart failed to render: ${message}`;
+          doc.body.appendChild(note);
+        },
+        measure: () => doc.body.scrollHeight,
+      }),
     // Only the real embedder (`win.parent`) may drive the guest — a message from any
     // other window (e.g. an `opener` or a sibling frame) is not the parent and drops.
     isParentSource: (source) => source === win.parent,
   });
   win.addEventListener("message", (event: MessageEvent) => router.handleMessage(event));
-  doc.body.addEventListener("click", (event: MouseEvent) =>
-    router.handleClick(event.target as unknown as DatumElement | null),
-  );
 }
 
 // Browser-only seam: run the bootstrap when a real DOM is present (inside the guest

@@ -87,7 +87,10 @@ export function buildSchemaContext(schema: DatabaseSchema): string {
 export function buildChatSystemPrompt(payload: ChatProviderPayload): string {
   const instruction = [
     `you are a sql assistant for a ${payload.schema.engine} database. use only the schema below.`,
+    "write your prose as markdown.",
     "when a query answers the question, output exactly one statement in a ```sql fenced block.",
+    "when a chart helps, also emit exactly one ```chart fenced block containing a json object with:",
+    `  "mark" (one of line, bar, dot, area), "x" and "y" set to result column names, an optional "series" column, and an optional "title".`,
     "do not invent tables or columns.",
   ].join("\n");
   return `${instruction}\n\n${payload.schema.text}`;
