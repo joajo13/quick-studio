@@ -166,6 +166,7 @@ describe("connect RPC through the gate (Story 1.3)", () => {
         name: "widgets",
         columns: [{ name: "id", dataType: "integer", nullable: false }],
         primaryKey: ["id"],
+        indexes: [],
       },
     ],
   };

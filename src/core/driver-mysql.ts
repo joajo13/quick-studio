@@ -19,6 +19,7 @@ import {
   type Driver,
   type DriverQueryResult,
   type IntrospectedColumn,
+  type IntrospectedIndex,
 } from "./driver.ts";
 
 /** One row of the MySQL `information_schema.columns` introspection query. */
@@ -34,6 +35,16 @@ type MysqlColumnRow = {
 type MysqlPkRow = {
   readonly table_schema: string;
   readonly table_name: string;
+  readonly column_name: string;
+};
+
+/** One (index, column) row of the MySQL index introspection query (statistics). */
+type MysqlIndexRow = {
+  readonly table_schema: string;
+  readonly table_name: string;
+  readonly index_name: string;
+  /** `information_schema.statistics.NON_UNIQUE`: 0 for a unique index, 1 otherwise. */
+  readonly non_unique: number;
   readonly column_name: string;
 };
 
@@ -206,6 +217,37 @@ export function createMysqlDriver(url: string): Driver {
         ),
       );
 
+      // Index metadata (Story 3.5) from `information_schema.statistics`: one row per
+      // (index, column), ordered by `SEQ_IN_INDEX` so the assembler folds columns in
+      // INDEX order. `unique = (NON_UNIQUE = 0)`. The PK-backing index (`PRIMARY`) is
+      // intentionally NOT filtered out. Same db/system-schema scoping as the columns
+      // query; column names are aliased lowercase so they match the row type. A MySQL 8
+      // functional key part has a NULL `column_name` (the expression lives in `EXPRESSION`);
+      // `column_name IS NOT NULL` drops those parts — the analog of Postgres's `attnum > 0`
+      // expression-column filter — so no null ever leaks into the folded columns list.
+      const idxScope =
+        database !== null
+          ? "table_schema = ?"
+          : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
+      const idxWhere = `${idxScope} AND column_name IS NOT NULL`;
+      const idxParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
+      const [idxRows] = await connection.query(
+        `SELECT table_schema, table_name, index_name, non_unique, column_name
+         FROM information_schema.statistics
+         WHERE ${idxWhere}
+         ORDER BY table_schema, table_name, index_name, seq_in_index`,
+        idxParams,
+      );
+      const indexes: IntrospectedIndex[] = (idxRows as unknown as readonly MysqlIndexRow[]).map(
+        (r) => ({
+          schema: r.table_schema,
+          table: r.table_name,
+          indexName: r.index_name,
+          unique: Number(r.non_unique) === 0,
+          column: r.column_name,
+        }),
+      );
+
       const columns: IntrospectedColumn[] = (rows as unknown as readonly MysqlColumnRow[]).map(
         (r) => ({
           schema: r.table_schema,
@@ -216,7 +258,7 @@ export function createMysqlDriver(url: string): Driver {
           isPrimaryKey: pkSet.has(pkKey(r.table_schema, r.table_name, r.column_name)),
         }),
       );
-      return assembleSchema("mysql", columns);
+      return assembleSchema("mysql", columns, indexes);
     },
 
     async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {

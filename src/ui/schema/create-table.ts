@@ -147,5 +147,9 @@ export function synthesizeSchemaTable(draft: CreateTableDraft): SchemaTableInfo 
     name: draft.table.trim(),
     columns,
     primaryKey: draft.columns.filter((col) => col.primaryKey).map((col) => col.name.trim()),
+    // A freshly-created table has no introspected index metadata (the memoized
+    // connect-time schema cannot be re-introspected without a Core change); it shows
+    // "0 indexes" until the next reconnect supersedes this optimistic entry (Story 3.5).
+    indexes: [],
   };
 }

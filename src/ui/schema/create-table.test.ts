@@ -134,7 +134,14 @@ describe("synthesizeSchemaTable", () => {
         { name: "label", dataType: "TEXT", nullable: true },
       ],
       primaryKey: ["id"],
+      // Story 3.5: an optimistically-synthesized table has no introspected indexes.
+      indexes: [],
     });
+  });
+
+  test("synthesizes an empty `indexes` array (Story 3.5 optimistic append stays type-correct)", () => {
+    const table = synthesizeSchemaTable(validDraft);
+    expect(table.indexes).toEqual([]);
   });
 
   test("nullable is the inverse of notNull; a PK-less table yields an empty primaryKey", () => {

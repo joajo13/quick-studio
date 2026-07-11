@@ -226,18 +226,37 @@ export type SchemaColumnInfo = {
 };
 
 /**
+ * One index of a table, in the engine-neutral shape both rings share (Story 3.5).
+ * `name` is the index's own name verbatim (`<table>_pkey` / `PRIMARY` for the
+ * PK-backing index — it is NOT filtered out); `columns` lists the indexed columns
+ * in INDEX ORDER (Postgres `indkey` position, MySQL `SEQ_IN_INDEX`), not table or
+ * alphabetical order; `unique` is true iff the index is a unique index. Only these
+ * three facets are surfaced — method/type, partial predicates, sort direction,
+ * covering columns, and expression columns are deliberately out of scope.
+ */
+export type SchemaIndexInfo = {
+  readonly name: string;
+  readonly columns: ReadonlyArray<string>;
+  readonly unique: boolean;
+};
+
+/**
  * One table (or view) of the introspected schema. `schema` is the owning
  * namespace/database as the engine reports it; `name` and `columns` mirror the
  * live database verbatim, ordered as introspected (schema/table/ordinal).
  * `primaryKey` lists the primary-key column names in column order (empty when
  * the table has none) — the deterministic browse ORDER-BY key and the source of
- * the grid's PK key-icon (Story 3.2). It is the ONLY constraint info introspected.
+ * the grid's PK key-icon (Story 3.2). `indexes` lists the table's indexes
+ * (Story 3.5), each with its ordered columns and uniqueness (empty when the table
+ * has none) — mirroring how `primaryKey` is always present. Both are introspected
+ * eagerly at connect time and folded in the assembler.
  */
 export type SchemaTableInfo = {
   readonly schema: string;
   readonly name: string;
   readonly columns: ReadonlyArray<SchemaColumnInfo>;
   readonly primaryKey: ReadonlyArray<string>;
+  readonly indexes: ReadonlyArray<SchemaIndexInfo>;
 };
 
 /**

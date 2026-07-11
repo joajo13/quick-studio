@@ -41,14 +41,15 @@ function schemaFor(engine: DbEngine): DatabaseSchema {
         name: "users",
         columns: [col("id"), col("name"), col("status")],
         primaryKey: ["id"],
+        indexes: [],
       },
       // Composite primary key — an update/delete addressing one of its columns must reject.
-      { schema: "public", name: "events", columns: [col("a"), col("b")], primaryKey: ["a", "b"] },
+      { schema: "public", name: "events", columns: [col("a"), col("b")], primaryKey: ["a", "b"], indexes: [] },
       // No primary key at all.
-      { schema: "public", name: "logs", columns: [col("msg")], primaryKey: [] },
+      { schema: "public", name: "logs", columns: [col("msg")], primaryKey: [], indexes: [] },
       // Same table name in two schemas — an unqualified update/delete is ambiguous.
-      { schema: "s1", name: "dup", columns: [col("id")], primaryKey: ["id"] },
-      { schema: "s2", name: "dup", columns: [col("id")], primaryKey: ["id"] },
+      { schema: "s1", name: "dup", columns: [col("id")], primaryKey: ["id"], indexes: [] },
+      { schema: "s2", name: "dup", columns: [col("id")], primaryKey: ["id"], indexes: [] },
     ],
   };
 }
@@ -648,7 +649,7 @@ describe("structured createTable — fixed allowlist, no raw-text fallback", () 
     const schema: DatabaseSchema = {
       engine: "postgres",
       tables: [
-        { schema: "public", name: "widgets", columns: [{ name: "id", dataType: "int", nullable: false }], primaryKey: ["id"] },
+        { schema: "public", name: "widgets", columns: [{ name: "id", dataType: "int", nullable: false }], primaryKey: ["id"], indexes: [] },
       ],
     };
     const { exec, queryCalls } = makeExecutor({ engine: "postgres", schema });

@@ -15,7 +15,7 @@
 
 import { useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import type { ExposureInfo, SchemaTableInfo } from "../../shared/contract.ts";
+import type { ExposureInfo, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
 import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
@@ -133,6 +133,7 @@ export function Workspace({
   onActivateTable,
   onSchemaLoaded,
   primaryKeys,
+  indexes,
   onStop,
   stopping,
   connectionIndicator,
@@ -153,6 +154,8 @@ export function Workspace({
   onSchemaLoaded: (tables: ReadonlyArray<SchemaTableInfo>) => void;
   /** PK column names of the active table tab's bound table (grid key-icon). */
   primaryKeys: ReadonlyArray<string>;
+  /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
+  indexes: ReadonlyArray<SchemaIndexInfo>;
   onStop: () => void;
   stopping: boolean;
   connectionIndicator: React.ReactNode;
@@ -251,7 +254,7 @@ export function Workspace({
             <div className="flex h-full flex-col">
               <TabBar state={state} onActivate={onActivate} onClose={onClose} />
               <div className="min-h-0 flex-1 overflow-auto">
-                <TabContent tab={activeTab} primaryKeys={primaryKeys} />
+                <TabContent tab={activeTab} primaryKeys={primaryKeys} indexes={indexes} />
               </div>
             </div>
           )}

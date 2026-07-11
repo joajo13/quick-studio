@@ -9,8 +9,15 @@
  */
 
 import { useEffect, useState } from "react";
-import type { ExecuteResult, FrozenRow, StructuredOp, TableRowsResult } from "../../shared/contract.ts";
+import type {
+  ExecuteResult,
+  FrozenRow,
+  SchemaIndexInfo,
+  StructuredOp,
+  TableRowsResult,
+} from "../../shared/contract.ts";
 import { DataGrid } from "../data/DataGrid.tsx";
+import { IndexList } from "../data/IndexList.tsx";
 import {
   applyPage,
   canNext,
@@ -59,10 +66,16 @@ function EmptyState(): React.JSX.Element {
 function TableTabView({
   table,
   primaryKeys,
+  indexes,
 }: {
   table: TableRef;
   primaryKeys: ReadonlyArray<string>;
+  /** The bound table's introspected indexes (already in the schema payload; no fetch). */
+  indexes: ReadonlyArray<SchemaIndexInfo>;
 }): React.JSX.Element {
+  // The `rows | indexes` sub-view. Indexes are already in hand (schema payload), so
+  // switching is a pure local toggle — no rpc, no SQL composed in the UI.
+  const [view, setView] = useState<"rows" | "indexes">("rows");
   const [page, setPage] = useState(1);
   const [data, setData] = useState<TableRowsResult["data"] | null>(null);
   const [grid, setGrid] = useState<DataGridState>(() => createDataGridState());
@@ -198,30 +211,55 @@ function TableTabView({
         <span className="text-[var(--foreground)]">
           {table.schema.trim() === "" ? table.name : `${table.schema}.${table.name}`}
         </span>
-        <span className="ml-auto lowercase text-[var(--muted-foreground)]">
-          {loading ? "loading…" : rowRangeSummary(grid)}
-        </span>
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            disabled={!canPrev(grid) || loading || error !== null}
-            onClick={() => setPage(prevPage(grid))}
-            className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            prev
-          </button>
-          <button
-            type="button"
-            disabled={!canNext(grid) || loading || error !== null}
-            onClick={() => setPage(nextPage(grid))}
-            className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            next
-          </button>
+        {/* rows | indexes sub-view toggle (Story 3.5). Read-only, no round-trip. */}
+        <div className="flex items-center gap-0.5" role="tablist" aria-label="table sub-view">
+          {(["rows", "indexes"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              role="tab"
+              aria-selected={view === v}
+              onClick={() => setView(v)}
+              className={`rounded-[var(--radius)] border px-2 py-0.5 lowercase transition-colors ${
+                view === v
+                  ? "border-[var(--coral-line)] bg-[var(--coral-soft)] text-[var(--foreground)]"
+                  : "border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
+              }`}
+            >
+              {v}
+            </button>
+          ))}
         </div>
+        <span className="ml-auto lowercase text-[var(--muted-foreground)]">
+          {view === "indexes"
+            ? `${indexes.length} ${indexes.length === 1 ? "index" : "indexes"}`
+            : loading
+              ? "loading…"
+              : rowRangeSummary(grid)}
+        </span>
+        {view === "rows" ? (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              disabled={!canPrev(grid) || loading || error !== null}
+              onClick={() => setPage(prevPage(grid))}
+              className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              prev
+            </button>
+            <button
+              type="button"
+              disabled={!canNext(grid) || loading || error !== null}
+              onClick={() => setPage(nextPage(grid))}
+              className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              next
+            </button>
+          </div>
+        ) : null}
       </div>
 
-      {error !== null ? (
+      {view === "rows" && error !== null ? (
         <div className="flex items-center gap-3 border-b border-red-700 bg-red-950/40 px-3 py-2">
           <p role="alert" className="font-mono text-xs lowercase text-red-400">
             {error}
@@ -237,7 +275,7 @@ function TableTabView({
         </div>
       ) : null}
 
-      {mutationError !== null ? (
+      {view === "rows" && mutationError !== null ? (
         <div className="flex items-center gap-3 border-b border-amber-700 bg-amber-950/40 px-3 py-2">
           <p role="alert" className="font-mono text-xs lowercase text-amber-400">
             {mutationError}
@@ -252,7 +290,11 @@ function TableTabView({
         </div>
       ) : null}
 
-      {data !== null ? (
+      {view === "indexes" ? (
+        // Indexes ride in the schema payload already held in props — render directly,
+        // no fetch, no dependence on the rows load state.
+        <IndexList indexes={indexes} />
+      ) : data !== null ? (
         <DataGrid
           data={data}
           primaryKeys={primaryKeys}
@@ -292,10 +334,13 @@ function SelectTablePrompt(): React.JSX.Element {
 export function TabContent({
   tab,
   primaryKeys,
+  indexes,
 }: {
   tab: WorkspaceTab | null;
   /** PK column names of the active table tab's bound table (for the grid key icon). */
   primaryKeys?: ReadonlyArray<string>;
+  /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
+  indexes?: ReadonlyArray<SchemaIndexInfo>;
 }): React.JSX.Element {
   if (tab === null) {
     return <EmptyState />;
@@ -309,6 +354,7 @@ export function TabContent({
         key={`${tab.table.schema}.${tab.table.name}`}
         table={tab.table}
         primaryKeys={primaryKeys ?? []}
+        indexes={indexes ?? []}
       />
     ) : (
       <SelectTablePrompt />

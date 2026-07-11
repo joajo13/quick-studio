@@ -19,6 +19,7 @@ const SAMPLE_SCHEMA: DatabaseSchema = {
       name: "users",
       columns: [{ name: "id", dataType: "integer", nullable: false }],
       primaryKey: ["id"],
+      indexes: [],
     },
   ],
 };

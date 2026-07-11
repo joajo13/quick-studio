@@ -24,6 +24,7 @@ import type {
   RpcErrorEnvelope,
   RpcReply,
   SaveWorkspaceResult,
+  SchemaIndexInfo,
   SchemaTableInfo,
   ShutdownResult,
   WorkspaceSnapshot,
@@ -259,6 +260,17 @@ export function App(): React.JSX.Element {
     return match?.primaryKey ?? [];
   }, [workspace, allTables]);
 
+  // Introspected indexes of the active table tab's bound table (Story 3.5), from the
+  // same `allTables` lookup that yields `primaryKeys` — already in hand via the
+  // memoized connect payload, so the index sub-view needs no round-trip.
+  const indexes = useMemo<ReadonlyArray<SchemaIndexInfo>>(() => {
+    const active = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? null;
+    if (active === null || active.kind !== "table" || active.table === undefined) return [];
+    const ref = active.table;
+    const match = allTables.find((t) => t.schema === ref.schema && t.name === ref.name);
+    return match?.indexes ?? [];
+  }, [workspace, allTables]);
+
   useEffect(() => {
     let alive = true;
     void callHealth().then((s) => {
@@ -360,6 +372,7 @@ export function App(): React.JSX.Element {
         }
         onSchemaLoaded={setSchemaTables}
         primaryKeys={primaryKeys}
+        indexes={indexes}
         extraTables={createdTables}
         schemas={schemas}
         onTableCreated={onTableCreated}

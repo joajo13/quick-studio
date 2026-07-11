@@ -16,6 +16,7 @@ import {
   assembleSchema,
   classifyConnectionError,
   createDriver,
+  type IntrospectedIndex,
 } from "./driver.ts";
 import { buildMysqlConfig, createMutex } from "./driver-mysql.ts";
 
@@ -107,6 +108,86 @@ describe("assembleSchema", () => {
 
   test("an empty column set yields an empty table list", () => {
     expect(assembleSchema("mysql", [])).toEqual({ engine: "mysql", tables: [] });
+  });
+
+  test("a table with no indexes still carries an empty `indexes` array", () => {
+    const schema = assembleSchema("postgres", [
+      { schema: "public", table: "logs", column: "msg", dataType: "text", nullable: true },
+    ]);
+    expect(schema.tables[0]?.indexes).toEqual([]);
+  });
+});
+
+describe("assembleSchema — index folding (Story 3.5)", () => {
+  test("groups flat index rows by name, preserves column order, and derives unique", () => {
+    const indexes: IntrospectedIndex[] = [
+      // PK-backing index (unique) — must appear, not be filtered out.
+      { schema: "public", table: "users", indexName: "users_pkey", unique: true, column: "id" },
+      // Single-column unique secondary index.
+      { schema: "public", table: "users", indexName: "users_email_key", unique: true, column: "email" },
+      // Composite non-unique index on (b, a) — columns arrive in INDEX order b, a.
+      { schema: "public", table: "users", indexName: "ix_users_ba", unique: false, column: "b" },
+      { schema: "public", table: "users", indexName: "ix_users_ba", unique: false, column: "a" },
+    ];
+    const schema = assembleSchema(
+      "postgres",
+      [
+        { schema: "public", table: "users", column: "id", dataType: "integer", nullable: false },
+        { schema: "public", table: "users", column: "email", dataType: "text", nullable: true },
+        { schema: "public", table: "users", column: "a", dataType: "integer", nullable: true },
+        { schema: "public", table: "users", column: "b", dataType: "integer", nullable: true },
+      ],
+      indexes,
+    );
+
+    expect(schema.tables[0]?.indexes).toEqual([
+      { name: "users_pkey", columns: ["id"], unique: true },
+      { name: "users_email_key", columns: ["email"], unique: true },
+      { name: "ix_users_ba", columns: ["b", "a"], unique: false },
+    ]);
+  });
+
+  test("attaches indexes to the correct table when several tables are present", () => {
+    const schema = assembleSchema(
+      "mysql",
+      [
+        { schema: "db", table: "orders", column: "id", dataType: "int", nullable: false },
+        { schema: "db", table: "items", column: "id", dataType: "int", nullable: false },
+      ],
+      [
+        { schema: "db", table: "orders", indexName: "PRIMARY", unique: true, column: "id" },
+        { schema: "db", table: "items", indexName: "ix_items_sku", unique: false, column: "sku" },
+      ],
+    );
+    const orders = schema.tables.find((t) => t.name === "orders");
+    const items = schema.tables.find((t) => t.name === "items");
+    expect(orders?.indexes).toEqual([{ name: "PRIMARY", columns: ["id"], unique: true }]);
+    expect(items?.indexes).toEqual([{ name: "ix_items_sku", columns: ["sku"], unique: false }]);
+  });
+
+  test("omitting the indexes argument leaves every table with an empty `indexes`", () => {
+    const schema = assembleSchema("postgres", [
+      { schema: "public", table: "t", column: "c", dataType: "text", nullable: true },
+    ]);
+    expect(schema.tables[0]?.indexes).toEqual([]);
+  });
+
+  test("index rows for a table absent from the column list never spawn a phantom table", () => {
+    // Postgres surfaces indexes from the system catalogs (pg_toast toast indexes,
+    // materialized-view indexes) for relations that `information_schema.columns` never
+    // lists. Those index rows must be dropped, not materialized into a column-less table.
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "users", column: "id", dataType: "integer", nullable: false }],
+      [
+        { schema: "public", table: "users", indexName: "users_pkey", unique: true, column: "id" },
+        // No `pg_toast.pg_toast_16384` / matview table exists in the column list:
+        { schema: "pg_toast", table: "pg_toast_16384", indexName: "pg_toast_16384_index", unique: true, column: "chunk_id" },
+        { schema: "public", table: "mv_report", indexName: "mv_report_idx", unique: false, column: "day" },
+      ],
+    );
+    expect(schema.tables.map((t) => `${t.schema}.${t.name}`)).toEqual(["public.users"]);
+    expect(schema.tables[0]?.indexes).toEqual([{ name: "users_pkey", columns: ["id"], unique: true }]);
   });
 });
 

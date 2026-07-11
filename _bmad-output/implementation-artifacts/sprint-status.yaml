@@ -80,7 +80,7 @@ development_status:
   3-2-browse-rows-pagination: done              # Story 3.2: Browse table rows with pagination
   3-3-edit-insert-delete-rows: done          # Story 3.3: Edit, insert, and delete rows
   3-4-create-tables: done                    # Story 3.4: Create tables
-  3-5-inspect-indexes: backlog                  # Story 3.5: Inspect indexes
+  3-5-inspect-indexes: done                  # Story 3.5: Inspect indexes
   3-6-run-adhoc-sql: backlog                    # Story 3.6: Run ad-hoc SQL in a query Tab
   epic-3-retrospective: optional
 
