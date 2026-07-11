@@ -14,6 +14,7 @@ import type {
   ExecuteResult,
   FrozenRow,
   SchemaIndexInfo,
+  SchemaTableInfo,
   StructuredOp,
   TableRowsResult,
 } from "../../shared/contract.ts";
@@ -40,6 +41,7 @@ import {
 } from "../data/row-mutations.ts";
 import { rpc } from "../rpc/client.ts";
 import { envelopeText } from "../rpc/envelope-text.ts";
+import { ErdTabView } from "./ErdTabView.tsx";
 import { QueryTabView } from "./QueryTabView.tsx";
 import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
 
@@ -337,6 +339,7 @@ export function TabContent({
   tab,
   primaryKeys,
   indexes,
+  tables,
   queryDraft,
   onQueryDraftChange,
 }: {
@@ -345,6 +348,8 @@ export function TabContent({
   primaryKeys?: ReadonlyArray<string>;
   /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
   indexes?: ReadonlyArray<SchemaIndexInfo>;
+  /** All tables (introspected + optimistically-created) — the ERD data source (Story 4.1). */
+  tables?: ReadonlyArray<SchemaTableInfo>;
   /** The active query tab's session-only draft SQL (Story 3.6; never persisted). */
   queryDraft?: string;
   /** Update the active query tab's draft SQL. */
@@ -381,6 +386,13 @@ export function TabContent({
         onDraftChange={onQueryDraftChange ?? (() => {})}
       />
     );
+  }
+
+  if (tab.kind === "erd") {
+    // Keyed by tab id (mirroring the query branch) so each ERD Tab owns an isolated
+    // React Flow instance. Fed App's live `allTables`, so a table created via Epic 3's
+    // builder appears without a manual refresh.
+    return <ErdTabView key={tab.id} tables={tables ?? []} />;
   }
 
   return (

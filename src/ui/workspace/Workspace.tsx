@@ -134,6 +134,7 @@ export function Workspace({
   onSchemaLoaded,
   primaryKeys,
   indexes,
+  allTables,
   queryDrafts,
   onQueryDraftChange,
   onStop,
@@ -158,6 +159,8 @@ export function Workspace({
   primaryKeys: ReadonlyArray<string>;
   /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
   indexes: ReadonlyArray<SchemaIndexInfo>;
+  /** All tables (introspected + optimistically-created) — the ERD data source (Story 4.1). */
+  allTables: ReadonlyArray<SchemaTableInfo>;
   /** Session-only draft SQL per query Tab id (Story 3.6; never persisted). */
   queryDrafts: ReadonlyMap<number, string>;
   /** Update the draft SQL for query Tab `id`. */
@@ -264,6 +267,7 @@ export function Workspace({
                   tab={activeTab}
                   primaryKeys={primaryKeys}
                   indexes={indexes}
+                  tables={allTables}
                   queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
                   onQueryDraftChange={(sql) => {
                     if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);

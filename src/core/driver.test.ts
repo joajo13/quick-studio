@@ -16,6 +16,7 @@ import {
   assembleSchema,
   classifyConnectionError,
   createDriver,
+  type IntrospectedForeignKey,
   type IntrospectedIndex,
 } from "./driver.ts";
 import { buildMysqlConfig, createMutex } from "./driver-mysql.ts";
@@ -188,6 +189,134 @@ describe("assembleSchema — index folding (Story 3.5)", () => {
     );
     expect(schema.tables.map((t) => `${t.schema}.${t.name}`)).toEqual(["public.users"]);
     expect(schema.tables[0]?.indexes).toEqual([{ name: "users_pkey", columns: ["id"], unique: true }]);
+  });
+});
+
+describe("assembleSchema — foreign-key folding (Story 4.1)", () => {
+  test("groups flat FK rows by constraint name and attaches them to the owning table", () => {
+    const foreignKeys: IntrospectedForeignKey[] = [
+      {
+        schema: "public",
+        table: "orders",
+        constraintName: "orders_user_id_fkey",
+        column: "user_id",
+        referencedSchema: "public",
+        referencedTable: "users",
+        referencedColumn: "id",
+      },
+    ];
+    const schema = assembleSchema(
+      "postgres",
+      [
+        { schema: "public", table: "orders", column: "id", dataType: "integer", nullable: false },
+        { schema: "public", table: "orders", column: "user_id", dataType: "integer", nullable: false },
+        { schema: "public", table: "users", column: "id", dataType: "integer", nullable: false },
+      ],
+      [],
+      foreignKeys,
+    );
+    const orders = schema.tables.find((t) => t.name === "orders");
+    const users = schema.tables.find((t) => t.name === "users");
+    expect(orders?.foreignKeys).toEqual([
+      { columns: ["user_id"], referencedSchema: "public", referencedTable: "users", referencedColumns: ["id"] },
+    ]);
+    // A table with no outbound FK still carries an empty `foreignKeys` array.
+    expect(users?.foreignKeys).toEqual([]);
+  });
+
+  test("a COMPOSITE FK folds into ONE entry with position-aligned columns (not one per column)", () => {
+    const foreignKeys: IntrospectedForeignKey[] = [
+      // Two rows sharing one constraint name → one composite FK, in key order.
+      {
+        schema: "public",
+        table: "line_items",
+        constraintName: "line_items_op_fkey",
+        column: "order_id",
+        referencedSchema: "public",
+        referencedTable: "order_products",
+        referencedColumn: "order_id",
+      },
+      {
+        schema: "public",
+        table: "line_items",
+        constraintName: "line_items_op_fkey",
+        column: "product_id",
+        referencedSchema: "public",
+        referencedTable: "order_products",
+        referencedColumn: "product_id",
+      },
+    ];
+    const schema = assembleSchema(
+      "postgres",
+      [
+        { schema: "public", table: "line_items", column: "order_id", dataType: "integer", nullable: false },
+        { schema: "public", table: "line_items", column: "product_id", dataType: "integer", nullable: false },
+        { schema: "public", table: "order_products", column: "order_id", dataType: "integer", nullable: false },
+      ],
+      [],
+      foreignKeys,
+    );
+    expect(schema.tables.find((t) => t.name === "line_items")?.foreignKeys).toEqual([
+      {
+        columns: ["order_id", "product_id"],
+        referencedSchema: "public",
+        referencedTable: "order_products",
+        referencedColumns: ["order_id", "product_id"],
+      },
+    ]);
+  });
+
+  test("a SELF-referential FK references its own table", () => {
+    const schema = assembleSchema(
+      "mysql",
+      [
+        { schema: "app", table: "employees", column: "id", dataType: "int", nullable: false },
+        { schema: "app", table: "employees", column: "manager_id", dataType: "int", nullable: true },
+      ],
+      [],
+      [
+        {
+          schema: "app",
+          table: "employees",
+          constraintName: "fk_manager",
+          column: "manager_id",
+          referencedSchema: "app",
+          referencedTable: "employees",
+          referencedColumn: "id",
+        },
+      ],
+    );
+    expect(schema.tables[0]?.foreignKeys).toEqual([
+      { columns: ["manager_id"], referencedSchema: "app", referencedTable: "employees", referencedColumns: ["id"] },
+    ]);
+  });
+
+  test("FK rows for a table absent from the column list never spawn a phantom table", () => {
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "users", column: "id", dataType: "integer", nullable: false }],
+      [],
+      [
+        {
+          schema: "public",
+          table: "ghost",
+          constraintName: "ghost_fk",
+          column: "x",
+          referencedSchema: "public",
+          referencedTable: "users",
+          referencedColumn: "id",
+        },
+      ],
+    );
+    expect(schema.tables.map((t) => `${t.schema}.${t.name}`)).toEqual(["public.users"]);
+    expect(schema.tables[0]?.foreignKeys).toEqual([]);
+  });
+
+  test("omitting the foreignKeys argument leaves every table with an empty `foreignKeys`", () => {
+    const schema = assembleSchema("postgres", [
+      { schema: "public", table: "t", column: "c", dataType: "text", nullable: true },
+    ]);
+    expect(schema.tables[0]?.foreignKeys).toEqual([]);
   });
 });
 

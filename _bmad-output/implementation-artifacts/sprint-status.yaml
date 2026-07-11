@@ -86,7 +86,7 @@ development_status:
 
   # Epic 4: Interactive ERD
   epic-4: backlog
-  4-1-render-erd: backlog                       # Story 4.1: Render and navigate the relational ERD
+  4-1-render-erd: done                       # Story 4.1: Render and navigate the relational ERD
   4-2-persist-erd-layout: backlog               # Story 4.2: Persist and restore ERD layout
   epic-4-retrospective: optional
 

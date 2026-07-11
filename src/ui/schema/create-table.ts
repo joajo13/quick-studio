@@ -151,5 +151,9 @@ export function synthesizeSchemaTable(draft: CreateTableDraft): SchemaTableInfo 
     // connect-time schema cannot be re-introspected without a Core change); it shows
     // "0 indexes" until the next reconnect supersedes this optimistic entry (Story 3.5).
     indexes: [],
+    // The create-table builder emits no foreign keys (Story 4.1), so the optimistic
+    // entry carries none — it appears in the ERD as an edge-less node until the next
+    // reconnect supersedes it with introspected truth.
+    foreignKeys: [],
   };
 }

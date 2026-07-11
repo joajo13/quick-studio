@@ -42,14 +42,15 @@ function schemaFor(engine: DbEngine): DatabaseSchema {
         columns: [col("id"), col("name"), col("status")],
         primaryKey: ["id"],
         indexes: [],
+        foreignKeys: [],
       },
       // Composite primary key — an update/delete addressing one of its columns must reject.
-      { schema: "public", name: "events", columns: [col("a"), col("b")], primaryKey: ["a", "b"], indexes: [] },
+      { schema: "public", name: "events", columns: [col("a"), col("b")], primaryKey: ["a", "b"], indexes: [], foreignKeys: [] },
       // No primary key at all.
-      { schema: "public", name: "logs", columns: [col("msg")], primaryKey: [], indexes: [] },
+      { schema: "public", name: "logs", columns: [col("msg")], primaryKey: [], indexes: [], foreignKeys: [] },
       // Same table name in two schemas — an unqualified update/delete is ambiguous.
-      { schema: "s1", name: "dup", columns: [col("id")], primaryKey: ["id"], indexes: [] },
-      { schema: "s2", name: "dup", columns: [col("id")], primaryKey: ["id"], indexes: [] },
+      { schema: "s1", name: "dup", columns: [col("id")], primaryKey: ["id"], indexes: [], foreignKeys: [] },
+      { schema: "s2", name: "dup", columns: [col("id")], primaryKey: ["id"], indexes: [], foreignKeys: [] },
     ],
   };
 }
@@ -649,7 +650,7 @@ describe("structured createTable — fixed allowlist, no raw-text fallback", () 
     const schema: DatabaseSchema = {
       engine: "postgres",
       tables: [
-        { schema: "public", name: "widgets", columns: [{ name: "id", dataType: "int", nullable: false }], primaryKey: ["id"], indexes: [] },
+        { schema: "public", name: "widgets", columns: [{ name: "id", dataType: "int", nullable: false }], primaryKey: ["id"], indexes: [], foreignKeys: [] },
       ],
     };
     const { exec, queryCalls } = makeExecutor({ engine: "postgres", schema });

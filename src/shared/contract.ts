@@ -241,6 +241,22 @@ export type SchemaIndexInfo = {
 };
 
 /**
+ * One foreign key of a table, in the engine-neutral shape both rings share
+ * (Story 4.1) — the ONLY source of ERD edges. A composite FK is ONE entry whose
+ * `columns` and `referencedColumns` are position-aligned (local column `columns[i]`
+ * references `referencedColumns[i]`), listed in constraint/key-position order.
+ * `referencedSchema`/`referencedTable` name the referenced relation verbatim as the
+ * engine reports it; a self-referential FK simply names its own table. Edges come
+ * ONLY from these real introspected constraints — never inferred from column names.
+ */
+export type SchemaForeignKeyInfo = {
+  readonly columns: ReadonlyArray<string>;
+  readonly referencedSchema: string;
+  readonly referencedTable: string;
+  readonly referencedColumns: ReadonlyArray<string>;
+};
+
+/**
  * One table (or view) of the introspected schema. `schema` is the owning
  * namespace/database as the engine reports it; `name` and `columns` mirror the
  * live database verbatim, ordered as introspected (schema/table/ordinal).
@@ -248,8 +264,10 @@ export type SchemaIndexInfo = {
  * the table has none) — the deterministic browse ORDER-BY key and the source of
  * the grid's PK key-icon (Story 3.2). `indexes` lists the table's indexes
  * (Story 3.5), each with its ordered columns and uniqueness (empty when the table
- * has none) — mirroring how `primaryKey` is always present. Both are introspected
- * eagerly at connect time and folded in the assembler.
+ * has none) — mirroring how `primaryKey` is always present. `foreignKeys` lists the
+ * table's outbound foreign keys (Story 4.1) — the ERD's edge source (empty when the
+ * table has none). All three are introspected eagerly at connect time and folded in
+ * the assembler.
  */
 export type SchemaTableInfo = {
   readonly schema: string;
@@ -257,6 +275,7 @@ export type SchemaTableInfo = {
   readonly columns: ReadonlyArray<SchemaColumnInfo>;
   readonly primaryKey: ReadonlyArray<string>;
   readonly indexes: ReadonlyArray<SchemaIndexInfo>;
+  readonly foreignKeys: ReadonlyArray<SchemaForeignKeyInfo>;
 };
 
 /**

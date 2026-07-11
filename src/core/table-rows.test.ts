@@ -29,6 +29,7 @@ const SCHEMA: DatabaseSchema = {
       ],
       primaryKey: ["id"],
       indexes: [],
+      foreignKeys: [],
     },
     {
       schema: "public",
@@ -39,6 +40,7 @@ const SCHEMA: DatabaseSchema = {
       ],
       primaryKey: [],
       indexes: [],
+      foreignKeys: [],
     },
     {
       schema: "reporting",
@@ -46,6 +48,7 @@ const SCHEMA: DatabaseSchema = {
       columns: [{ name: "id", dataType: "integer", nullable: false }],
       primaryKey: ["id"],
       indexes: [],
+      foreignKeys: [],
     },
   ],
 };
@@ -192,7 +195,7 @@ describe("planTableRows — offset bound (P1)", () => {
 describe("planTableRows — keyless ORDER BY skips unorderable types (P2)", () => {
   const schemaWith = (columns: DatabaseSchema["tables"][number]["columns"]): DatabaseSchema => ({
     engine: "postgres",
-    tables: [{ schema: "public", name: "t", columns, primaryKey: [], indexes: [] }],
+    tables: [{ schema: "public", name: "t", columns, primaryKey: [], indexes: [], foreignKeys: [] }],
   });
 
   test("only-unorderable columns → SELECT composed with NO ORDER BY", () => {

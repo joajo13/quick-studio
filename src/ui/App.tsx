@@ -391,6 +391,7 @@ export function App(): React.JSX.Element {
         onSchemaLoaded={setSchemaTables}
         primaryKeys={primaryKeys}
         indexes={indexes}
+        allTables={allTables}
         queryDrafts={queryDrafts}
         onQueryDraftChange={onQueryDraftChange}
         extraTables={createdTables}

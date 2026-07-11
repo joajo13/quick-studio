@@ -136,6 +136,7 @@ describe("synthesizeSchemaTable", () => {
       primaryKey: ["id"],
       // Story 3.5: an optimistically-synthesized table has no introspected indexes.
       indexes: [],
+      foreignKeys: [],
     });
   });
 

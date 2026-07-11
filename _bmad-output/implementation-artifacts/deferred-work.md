@@ -162,3 +162,19 @@ Append-only ledger of issues surfaced during review that are intentionally defer
   summary: Bind bigint/int8/numeric columns without JS `Number` precision loss on both the write value and the PK address — a value beyond `Number.MAX_SAFE_INTEGER` is silently truncated on edit/insert, and a lossy PK read makes `WHERE pk = <lossy>` address the wrong row (or none) on update/delete.
   evidence: `row-mutations.ts` `coerceValue("number")` uses `Number(raw)` and `pkForRow`/`cellToValue` read the PK from `FrozenCell` as a JS `number` (`cell.value`). The precision loss originates upstream in Story 3.2's `FrozenCell` number representation (bigint already arrives as a lossy JS number from the browse read); Story 3.3 is the first to WRITE with it, exposing a silent wrong-value / wrong-row data-corruption path with no error surfaced. Story 3.3 explicitly scopes DB-type-aware editors via `SchemaColumnInfo` out (deferred) and documents the kind-inference limitation, so the durable fix (thread column types + carry wide integers as strings/bigint across the wire) belongs with that deferred type-threading work, not the 3.3 UI. Two independent review passes flagged it as the highest-consequence item in the diff.
   reviewer_severity: high
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
+  summary: Reset `createdTables` on connect/disconnect so optimistically-created tables don't accumulate across reconnects and shadow the re-introspected schema.
+  evidence: `src/ui/App.tsx` only ever appends to `createdTables` (never clears it), so after a reconnect a created table appears in both `schemaTables` and `createdTables`, and after connecting to a different database a stale phantom table survives. Pre-existing Epic-3 lifecycle behavior masked by SchemaTree's dedup; the ERD's new dedup patch prevents the duplicate-id crash but the stale phantom node remains until this root cause is fixed.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
+  summary: Exclude inherited partition FK constraints (`pg_constraint.conparentid <> 0`) from the Postgres FK introspection so partitioned schemas don't render N+1 redundant edges.
+  evidence: `src/core/driver-postgres.ts` filters only `contype='f'`; on a partitioned parent every partition carries an inherited copy of the FK, producing duplicate near-identical edges. Fix is a one-line `AND con.conparentid = 0` but carries a minor Postgres-version-compatibility consideration (conparentid exists in PG 11+), so it warrants focused attention.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
+  summary: Preserve ERD layout stability when a table is created (avoid a full dagre reshuffle of every node) — naturally addressed alongside Story 4.2 layout persistence.
+  evidence: `src/ui/workspace/ErdTabView.tsx` re-runs `schemaToGraph`+dagre whenever the `tables` identity changes, so creating a table via the Epic-3 builder jumps every node to a new position. Low severity (only pan/zoom context is preserved); best solved with the persisted-layout work in Story 4.2.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
+  summary: Decide how to signal cross-database MySQL foreign keys instead of silently dropping their edges in the ERD.
+  evidence: When a MySQL connection names a database, columns are scoped to that schema but a FK may reference a table in another database; `schemaToGraph` then drops the edge as an "absent table" with no user indication a real relationship was omitted. Defensible for v1 but an explicit product decision (dangling-edge affordance vs. note vs. silent) is preferable.

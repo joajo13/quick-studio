@@ -19,6 +19,7 @@ import {
   type Driver,
   type DriverQueryResult,
   type IntrospectedColumn,
+  type IntrospectedForeignKey,
   type IntrospectedIndex,
 } from "./driver.ts";
 
@@ -46,6 +47,17 @@ type MysqlIndexRow = {
   /** `information_schema.statistics.NON_UNIQUE`: 0 for a unique index, 1 otherwise. */
   readonly non_unique: number;
   readonly column_name: string;
+};
+
+/** One (constraint, column) row of the MySQL FK introspection query, pre-ordered by key position. */
+type MysqlFkRow = {
+  readonly table_schema: string;
+  readonly table_name: string;
+  readonly constraint_name: string;
+  readonly column_name: string;
+  readonly referenced_table_schema: string;
+  readonly referenced_table_name: string;
+  readonly referenced_column_name: string;
 };
 
 /** Set-membership key for a PK column: `schema table column`. */
@@ -248,6 +260,40 @@ export function createMysqlDriver(url: string): Driver {
         }),
       );
 
+      // Foreign keys (Story 4.1): one row per (constraint, column) from
+      // `key_column_usage`, filtered to FK rows by `referenced_table_name IS NOT NULL`
+      // (a non-FK key column has NULLs there). `ordinal_position` orders columns WITHIN
+      // the constraint, so a COMPOSITE FK's local and referenced columns stay
+      // position-aligned. Same db/system-schema scoping as the columns query; column
+      // names are aliased lowercase to match the row type. `assembleSchema` groups by
+      // `constraint_name` within the table and drops any FK whose owning table the
+      // column query never listed. MySQL FK names are not the fixed `PRIMARY`, so no
+      // special-casing is needed.
+      const fkScope =
+        database !== null
+          ? "table_schema = ?"
+          : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
+      const fkParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
+      const [fkRows] = await connection.query(
+        `SELECT table_schema, table_name, constraint_name, column_name,
+                referenced_table_schema, referenced_table_name, referenced_column_name
+         FROM information_schema.key_column_usage
+         WHERE referenced_table_name IS NOT NULL AND ${fkScope}
+         ORDER BY table_schema, table_name, constraint_name, ordinal_position`,
+        fkParams,
+      );
+      const foreignKeys: IntrospectedForeignKey[] = (fkRows as unknown as readonly MysqlFkRow[]).map(
+        (r) => ({
+          schema: r.table_schema,
+          table: r.table_name,
+          constraintName: r.constraint_name,
+          column: r.column_name,
+          referencedSchema: r.referenced_table_schema,
+          referencedTable: r.referenced_table_name,
+          referencedColumn: r.referenced_column_name,
+        }),
+      );
+
       const columns: IntrospectedColumn[] = (rows as unknown as readonly MysqlColumnRow[]).map(
         (r) => ({
           schema: r.table_schema,
@@ -258,7 +304,7 @@ export function createMysqlDriver(url: string): Driver {
           isPrimaryKey: pkSet.has(pkKey(r.table_schema, r.table_name, r.column_name)),
         }),
       );
-      return assembleSchema("mysql", columns, indexes);
+      return assembleSchema("mysql", columns, indexes, foreignKeys);
     },
 
     async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {
