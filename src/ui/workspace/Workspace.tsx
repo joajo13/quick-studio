@@ -16,6 +16,7 @@
 import { useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { ExposureInfo, SchemaTableInfo } from "../../shared/contract.ts";
+import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
 import { TabBar } from "./TabBar.tsx";
@@ -40,10 +41,14 @@ function LauncherRail({
   onOpen,
   settingsOpen,
   onToggleSettings,
+  createOpen,
+  onToggleCreate,
 }: {
   onOpen: (kind: TabKind) => void;
   settingsOpen: boolean;
   onToggleSettings: () => void;
+  createOpen: boolean;
+  onToggleCreate: () => void;
 }): React.JSX.Element {
   return (
     <nav aria-label="Open a new tab" className="flex h-full flex-col gap-1 p-2">
@@ -61,14 +66,30 @@ function LauncherRail({
         </button>
       ))}
 
-      {/* Bottom-pinned Settings control (mt-auto pushes it to the rail bottom). */}
+      {/* Create-table control (Story 3.4): a rail toggle mirroring Settings, pinned
+          to the rail bottom (mt-auto) just above it. Opens the CreateTablePanel. */}
+      <button
+        type="button"
+        aria-label="Create table"
+        aria-pressed={createOpen}
+        data-testid="create-table-toggle"
+        onClick={onToggleCreate}
+        className={`mt-auto flex items-center gap-2 rounded-[var(--radius)] px-3 py-2 text-left font-mono text-xs lowercase transition-colors hover:bg-accent hover:text-accent-foreground ${
+          createOpen ? "bg-accent text-accent-foreground" : "text-muted-foreground"
+        }`}
+      >
+        <span aria-hidden>＋</span>
+        <span>create table</span>
+      </button>
+
+      {/* Bottom-pinned Settings control. */}
       <button
         type="button"
         aria-label="Settings"
         aria-pressed={settingsOpen}
         data-testid="settings-toggle"
         onClick={onToggleSettings}
-        className={`mt-auto flex items-center gap-2 rounded-[var(--radius)] px-3 py-2 text-left font-mono text-xs lowercase transition-colors hover:bg-accent hover:text-accent-foreground ${
+        className={`flex items-center gap-2 rounded-[var(--radius)] px-3 py-2 text-left font-mono text-xs lowercase transition-colors hover:bg-accent hover:text-accent-foreground ${
           settingsOpen ? "bg-accent text-accent-foreground" : "text-muted-foreground"
         }`}
       >
@@ -118,6 +139,9 @@ export function Workspace({
   exposure,
   panelSizes,
   onLayout,
+  extraTables,
+  schemas,
+  onTableCreated,
 }: {
   state: WorkspaceState;
   onOpen: (kind: TabKind) => void;
@@ -137,6 +161,12 @@ export function Workspace({
   panelSizes: ReadonlyArray<number>;
   /** Fired by `PanelGroup` on every layout change (drag or programmatic). */
   onLayout: (sizes: number[]) => void;
+  /** Optimistically-created tables (Story 3.4), fed into the schema tree. */
+  extraTables: ReadonlyArray<SchemaTableInfo>;
+  /** Existing schema names for the create-table target selector (default + options). */
+  schemas: ReadonlyArray<string>;
+  /** Append a freshly-created table to the App-level list (tree + PK lookup). */
+  onTableCreated: (table: SchemaTableInfo) => void;
 }): React.JSX.Element {
   const activeTab =
     state.tabs.find((t) => t.id === state.activeTabId) ?? null;
@@ -147,6 +177,18 @@ export function Workspace({
   // the persisted Workspace snapshot (out of scope for Story 2.5's Panel-sizes +
   // Tabs restore; see the spec's Block-If).
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // The create-table surface (Story 3.4) shares the main Panel with Settings and is
+  // MUTUALLY EXCLUSIVE with it — opening one closes the other. Like Settings, it is
+  // React-memory-only (not part of the persisted Workspace snapshot).
+  const [createOpen, setCreateOpen] = useState(false);
+  const toggleSettings = (): void => {
+    setSettingsOpen((v) => !v);
+    setCreateOpen(false);
+  };
+  const toggleCreate = (): void => {
+    setCreateOpen((v) => !v);
+    setSettingsOpen(false);
+  };
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
@@ -178,7 +220,9 @@ export function Workspace({
               <LauncherRail
                 onOpen={onOpen}
                 settingsOpen={settingsOpen}
-                onToggleSettings={() => setSettingsOpen((v) => !v)}
+                onToggleSettings={toggleSettings}
+                createOpen={createOpen}
+                onToggleCreate={toggleCreate}
               />
             </div>
             <div className="min-w-0 flex-1">
@@ -186,6 +230,7 @@ export function Workspace({
                 activeTable={activeTable}
                 onActivate={onActivateTable}
                 onSchemaLoaded={onSchemaLoaded}
+                extraTables={extraTables}
               />
             </div>
           </div>
@@ -196,6 +241,12 @@ export function Workspace({
         <Panel defaultSize={panelSizes[1] ?? 80} minSize={30}>
           {settingsOpen ? (
             <SettingsPanel onClose={() => setSettingsOpen(false)} />
+          ) : createOpen ? (
+            <CreateTablePanel
+              schemas={schemas}
+              onCreated={onTableCreated}
+              onClose={() => setCreateOpen(false)}
+            />
           ) : (
             <div className="flex h-full flex-col">
               <TabBar state={state} onActivate={onActivate} onClose={onClose} />

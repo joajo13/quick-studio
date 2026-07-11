@@ -218,15 +218,46 @@ export function App(): React.JSX.Element {
   // The live introspected tables (from the schema tree's `connect`), kept so the
   // grid of the active table tab can look up its PK columns (for the key icon).
   const [schemaTables, setSchemaTables] = useState<ReadonlyArray<SchemaTableInfo>>([]);
+  // Tables created optimistically this session (Story 3.4). A createTable `ok`
+  // guarantees the table exists exactly as submitted, but the Core's connect-time
+  // schema is memoized and cannot be re-introspected — so we synthesize the
+  // `SchemaTableInfo` and append it here. This list is session-only (a fresh process
+  // resets it, and the reconnect reflects introspected truth).
+  const [createdTables, setCreatedTables] = useState<ReadonlyArray<SchemaTableInfo>>([]);
+  const onTableCreated = (table: SchemaTableInfo): void => setCreatedTables((cur) => [...cur, table]);
+
+  // The introspected tables plus the optimistically-created ones — the single source
+  // for both the PK lookup (so a freshly-created table is immediately editable per
+  // Story 3.3) and the create-form's schema selector.
+  const allTables = useMemo<ReadonlyArray<SchemaTableInfo>>(
+    () => [...schemaTables, ...createdTables],
+    [schemaTables, createdTables],
+  );
+
+  // Existing schema names (unique, introspection order) for the create-table target.
+  const schemas = useMemo<ReadonlyArray<string>>(() => {
+    const seen = new Set<string>();
+    const names: string[] = [];
+    for (const t of allTables) {
+      // Skip a blank schema (an optimistic entry created into the default namespace):
+      // it is never a selectable target and would render as an empty option.
+      if (t.schema.trim() === "") continue;
+      if (!seen.has(t.schema)) {
+        seen.add(t.schema);
+        names.push(t.schema);
+      }
+    }
+    return names;
+  }, [allTables]);
 
   // PK column names of the active table tab's bound table, or empty otherwise.
   const primaryKeys = useMemo<ReadonlyArray<string>>(() => {
     const active = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? null;
     if (active === null || active.kind !== "table" || active.table === undefined) return [];
     const ref = active.table;
-    const match = schemaTables.find((t) => t.schema === ref.schema && t.name === ref.name);
+    const match = allTables.find((t) => t.schema === ref.schema && t.name === ref.name);
     return match?.primaryKey ?? [];
-  }, [workspace, schemaTables]);
+  }, [workspace, allTables]);
 
   useEffect(() => {
     let alive = true;
@@ -329,6 +360,9 @@ export function App(): React.JSX.Element {
         }
         onSchemaLoaded={setSchemaTables}
         primaryKeys={primaryKeys}
+        extraTables={createdTables}
+        schemas={schemas}
+        onTableCreated={onTableCreated}
         onStop={onStop}
         stopping={stopping}
         connectionIndicator={<ConnectionIndicator status={status} />}

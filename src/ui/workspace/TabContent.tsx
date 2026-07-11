@@ -81,7 +81,13 @@ function TableTabView({
   // Exactly one PK column is the executor's `resolveSinglePkTable` precondition;
   // without it inline edit + delete are disabled (insert stays available).
   const canMutate = primaryKeys.length === 1;
-  const target = { schema: table.schema, table: table.name };
+  // A blank schema means "the connection's default namespace" (e.g. a table created
+  // into the default schema on an otherwise-empty DB, whose optimistic tree entry
+  // carries no known schema). Omit it entirely rather than sending `schema:""`, which
+  // the Core rejects as `bad_request` ("non-empty string when provided"). Omission
+  // lets the Core resolve the default, so browse AND structured mutations both work.
+  const effectiveSchema = table.schema.trim() === "" ? undefined : table.schema;
+  const target = { schema: effectiveSchema, table: table.name };
 
   // NOTE: per-table state (page/data/grid/error/loading) is reset by REMOUNTING —
   // the parent keys this component by the bound table identity, so a table switch
@@ -93,7 +99,7 @@ function TableTabView({
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    void rpc<TableRowsResult>("table.rows", { schema: table.schema, table: table.name, page }).then((reply) => {
+    void rpc<TableRowsResult>("table.rows", { schema: effectiveSchema, table: table.name, page }).then((reply) => {
       if (!alive) return;
       if (!reply.ok) {
         setError(envelopeText(reply.error));
@@ -190,7 +196,7 @@ function TableTabView({
         style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
       >
         <span className="text-[var(--foreground)]">
-          {table.schema}.{table.name}
+          {table.schema.trim() === "" ? table.name : `${table.schema}.${table.name}`}
         </span>
         <span className="ml-auto lowercase text-[var(--muted-foreground)]">
           {loading ? "loading…" : rowRangeSummary(grid)}

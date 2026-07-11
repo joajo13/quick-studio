@@ -27,10 +27,27 @@ type LoadState =
   | { readonly phase: "ready"; readonly schema: DatabaseSchema }
   | { readonly phase: "error"; readonly text: string };
 
+/**
+ * Merge the introspected tables with the optimistically-created ones, deduped by
+ * `schema.name` (introspected truth wins if the same table is somehow present both
+ * ways — e.g. after a reconnect that reset nothing). Preserves introspection order,
+ * appending only genuinely-new optimistic entries.
+ */
+function mergeTables(
+  loaded: ReadonlyArray<SchemaTableInfo>,
+  extra: ReadonlyArray<SchemaTableInfo>,
+): ReadonlyArray<SchemaTableInfo> {
+  if (extra.length === 0) return loaded;
+  const seen = new Set(loaded.map((t) => `${t.schema}.${t.name}`));
+  const appended = extra.filter((t) => !seen.has(`${t.schema}.${t.name}`));
+  return appended.length === 0 ? loaded : [...loaded, ...appended];
+}
+
 export function SchemaTree({
   activeTable,
   onActivate,
   onSchemaLoaded,
+  extraTables = [],
 }: {
   /** The currently-bound table (drives the single `.on` highlight), or null. */
   activeTable: TableRef | null;
@@ -38,6 +55,13 @@ export function SchemaTree({
   onActivate: (table: SchemaTableInfo) => void;
   /** Fired once when the schema resolves, so the parent can look up PK columns. */
   onSchemaLoaded?: (tables: ReadonlyArray<SchemaTableInfo>) => void;
+  /**
+   * Optimistically-created tables (Story 3.4) appended to the introspected list so a
+   * freshly-created table appears with no re-introspection (the Core's connect-time
+   * schema is memoized). Deduped by `schema.name` against the loaded tables; the fetch
+   * is otherwise unchanged.
+   */
+  extraTables?: ReadonlyArray<SchemaTableInfo>;
 }): React.JSX.Element {
   const [load, setLoad] = useState<LoadState>({ phase: "loading" });
 
@@ -63,6 +87,9 @@ export function SchemaTree({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The introspected tables plus any optimistically-created ones (Story 3.4).
+  const tables = load.phase === "ready" ? mergeTables(load.schema.tables, extraTables) : [];
+
   return (
     <nav
       aria-label="Schema tables"
@@ -73,7 +100,7 @@ export function SchemaTree({
         className="shrink-0 px-3 py-2 uppercase text-[var(--muted-foreground)]"
         style={{ fontSize: "var(--label-size)", letterSpacing: "0.11em" }}
       >
-        {load.phase === "ready" ? `${load.schema.engine} · ${load.schema.tables.length} tables` : "schema"}
+        {load.phase === "ready" ? `${load.schema.engine} · ${tables.length} tables` : "schema"}
       </div>
 
       <div className="min-h-0 flex-1">
@@ -83,11 +110,11 @@ export function SchemaTree({
           <p role="alert" className="px-3 py-2 text-xs lowercase text-red-400">
             {load.text}
           </p>
-        ) : load.schema.tables.length === 0 ? (
+        ) : tables.length === 0 ? (
           <p className="px-3 py-2 text-xs lowercase text-[var(--muted-foreground)]">no tables</p>
         ) : (
           <ul className="flex flex-col gap-0.5 px-1.5 py-1">
-            {load.schema.tables.map((table) => {
+            {tables.map((table) => {
               const on = activeTable?.schema === table.schema && activeTable?.name === table.name;
               const activate = (): void => onActivate(table);
               return (
