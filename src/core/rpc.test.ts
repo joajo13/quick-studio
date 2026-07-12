@@ -8,6 +8,7 @@ import type {
   WorkspaceSnapshot,
 } from "../shared/contract.ts";
 import type { ConnectionRegistry } from "./connection-registry.ts";
+import { createLiveReportRegistry } from "./live-report-registry.ts";
 import { createProviderRegistry } from "./provider-registry.ts";
 import { openProviderKeyStore } from "./provider-key-store.ts";
 import { dispatch, methodNames, type RpcContext } from "./rpc.ts";
@@ -130,6 +131,7 @@ function stubCtx(
       ctx.executeCalls++;
       return executeReply;
     },
+    liveReports: createLiveReportRegistry(),
   };
   return ctx;
 }
@@ -175,6 +177,7 @@ describe("rpc dispatch", () => {
       "providers.remove",
       "table.rows",
       "execute",
+      "livereport.publish",
     ]);
   });
 

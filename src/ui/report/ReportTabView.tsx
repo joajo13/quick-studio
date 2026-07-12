@@ -23,13 +23,14 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { ConnectionSummary, FrozenData } from "../../shared/contract.ts";
+import type { ConnectionSummary, FrozenData, LiveReportPublishResult } from "../../shared/contract.ts";
 import { MARK_KINDS, parseChartSpec, type MarkKind } from "../../shared/chart-spec.ts";
 import { DataGrid } from "../data/DataGrid.tsx";
 import { rpc } from "../rpc/client.ts";
 import { ConfirmRun } from "../workspace/ConfirmRun.tsx";
 import { runRawQuery } from "../workspace/run-raw-query.ts";
 import { runExport, triggerHtmlDownload } from "./export-snapshot.ts";
+import { runExport as runLiveExport } from "./export-live-report.ts";
 import { mapChart } from "./report-chart.ts";
 import { renderReportMarkdown } from "./report-markdown.ts";
 import { planRetarget } from "./retarget-plan.ts";
@@ -380,6 +381,56 @@ export function ReportTabView({
     }
   };
 
+  // Export-live-report state (Story 6.4): a SEPARATE in-flight flag + error surface from the
+  // snapshot export (so the two controls never share a busy/error state), plus a synchronous
+  // ref guard so a double-click cannot launch overlapping publishes/downloads.
+  const [exportingLive, setExportingLive] = useState(false);
+  const [exportLiveError, setExportLiveError] = useState<string | null>(null);
+  const exportingLiveRef = useRef(false);
+
+  /**
+   * Publish the CURRENT layout+SQL to the local Core, open the loopback live view, and download
+   * a portable, secret-free `.html` copy (Story 6.4). Reads Ring-2 state only — runs no query,
+   * bakes no data/token into the portable file. Guards concurrency and wraps the whole export in
+   * try/catch; on failure surfaces a message and never welds an error body into a file.
+   */
+  const handleExportLive = async (): Promise<void> => {
+    if (exportingLiveRef.current) return; // in-flight guard: ignore a synchronous double-click
+    exportingLiveRef.current = true;
+    setExportingLive(true);
+    setExportLiveError(null);
+    try {
+      await runLiveExport({
+        blocks: stateRef.current.blocks,
+        // Publish the layout+SQL doc to the LOCAL Core; only the loopback Core ever sees it.
+        rpc: (method, params) => rpc<LiveReportPublishResult>(method, params),
+        // Reserve the live-view tab SYNCHRONOUSLY inside the click gesture (runExport calls this
+        // before any await) so the browser's popup blocker honours it. `about:blank` is navigated
+        // to `/live/<id>` once publish resolves; `null` (blocked) surfaces an "allow popups" note.
+        reserveWindow: () => (typeof window !== "undefined" ? window.open("about:blank") : null),
+        navigate: (w, path) => {
+          w.location.href = path;
+        },
+        closeWindow: (w) => w.close(),
+        // Fetch the data-free runtime once, same-origin; a non-OK / empty body throws BEFORE any
+        // assembly, so nothing is ever downloaded on a failed fetch.
+        fetchRuntime: async () => {
+          const res = await fetch("/live-report-runtime.js");
+          if (!res.ok) throw new Error(`live report runtime unavailable (${res.status})`);
+          const js = await res.text();
+          if (js.length === 0) throw new Error("live report runtime is empty");
+          return js;
+        },
+        download: triggerHtmlDownload,
+      });
+    } catch (e) {
+      setExportLiveError(e instanceof Error ? e.message : "live export failed");
+    } finally {
+      exportingLiveRef.current = false;
+      setExportingLive(false);
+    }
+  };
+
   const handleRetarget = (target: string | null): void => {
     if (target === stateRef.current.targetConnectionId) return;
     onStateChange((prev) => setReportTarget(prev, target));
@@ -429,6 +480,11 @@ export function ReportTabView({
               {exportError}
             </span>
           ) : null}
+          {exportLiveError !== null ? (
+            <span role="alert" className="font-mono text-[11px] lowercase text-red-400">
+              {exportLiveError}
+            </span>
+          ) : null}
           <button
             type="button"
             className={ghostBtn}
@@ -437,6 +493,19 @@ export function ReportTabView({
             onClick={() => void handleExport()}
           >
             {exporting ? "exporting…" : "export snapshot"}
+          </button>
+          {/* Sibling quiet ghost/secondary export control (Story 6.4): publishes the current
+              layout+SQL to the local Core, opens the loopback live view, and downloads a
+              portable secret-free .html. Disabled while a live export is in flight so a
+              double-click cannot launch overlapping exports. Never mutates blocks. */}
+          <button
+            type="button"
+            className={ghostBtn}
+            disabled={exportingLive}
+            aria-label="export live report"
+            onClick={() => void handleExportLive()}
+          >
+            {exportingLive ? "exporting…" : "export live report"}
           </button>
           <button type="button" className={btn} onClick={() => onStateChange((prev) => addProseBlock(prev))}>
             + prose

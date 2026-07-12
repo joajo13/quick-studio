@@ -18,7 +18,9 @@ import {
   type ShutdownResult,
   type TableRowsResult,
 } from "../shared/contract.ts";
+import { isLiveReportDoc } from "../shared/live-report.ts";
 import type { ConnectionRegistry, RegistryResult } from "./connection-registry.ts";
+import type { LiveReportRegistry } from "./live-report-registry.ts";
 import type { ProviderRegistry } from "./provider-registry.ts";
 import type { WorkspaceRegistry } from "./workspace-registry.ts";
 
@@ -63,6 +65,12 @@ export type RpcContext = {
    * engine text).
    */
   readonly execute: (params: unknown) => Promise<RpcReply<ExecuteResult>>;
+  /**
+   * Live Report registry (Story 6.4): store a published layout+SQL {@link LiveReportDoc}
+   * (never data, never a credential) under an opaque id so the Core can serve it same-origin
+   * at `/live/<id>`. In-memory + session-only — nothing touches disk.
+   */
+  readonly liveReports: LiveReportRegistry;
 };
 
 /**
@@ -222,6 +230,19 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
    * `internal_error` (raw engine text never reaches the client `detail`).
    */
   execute: async (params, ctx): Promise<Preformed> => preformed(await ctx.execute(params)),
+  /**
+   * Publish a Live Report (Story 6.4). The UI ships the layout+SQL {@link LiveReportDoc} (no
+   * data, no credential, no token) to the LOCAL Core, which validates it and stores it under an
+   * opaque id, replying with the same-origin `/live/<id>` path to open. An invalid doc is a
+   * typed `bad_request` (never a throw through the envelope). Only the loopback Core sees it.
+   */
+  "livereport.publish": (params, ctx): Preformed => {
+    if (!isLiveReportDoc(params)) {
+      return preformed(errorReply("bad_request", "livereport.publish requires a valid live report document"));
+    }
+    const id = ctx.liveReports.publish(params);
+    return preformed(okReply({ path: `/live/${id}` }));
+  },
 };
 
 /**

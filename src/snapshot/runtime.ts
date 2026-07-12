@@ -22,68 +22,24 @@
 
 import * as Plot from "@observablehq/plot";
 import type { PlotOptions } from "@observablehq/plot";
-import type { FrozenCell, FrozenData } from "../shared/contract.ts";
 import { isSnapshotDoc, type SnapshotBlock } from "../shared/snapshot.ts";
 import { buildPlotOptions, renderMarkdownToHtml } from "../sandbox/render.ts";
+// The pure table renderer now lives in `shared/frozen-table` so the offline Snapshot and the
+// live Report draw tables through the SAME code (no third fork). Re-exported here so this
+// module's existing consumers/tests keep importing the names from `./runtime`.
+import {
+  escapeHtml,
+  formatCell,
+  NULL_PLACEHOLDER,
+  renderTableToHtml,
+  truncationNote,
+} from "../shared/frozen-table.ts";
 
-/** Neutral placeholder rendered for a SQL NULL cell. */
-export const NULL_PLACEHOLDER = "—";
+export { escapeHtml, formatCell, NULL_PLACEHOLDER, renderTableToHtml, truncationNote };
 
 /** The visible message shown for a corrupted / hand-edited / schema-drifted Snapshot. */
 export const FALLBACK_HTML =
   '<p class="qs-fallback">cannot open snapshot — the embedded data is missing, corrupted, or from an unsupported version.</p>';
-
-/** The 5-char HTML escape (`&`, `<`, `>`, `"`, `'`) applied to every cell + column name. */
-const HTML_ESCAPES: Record<string, string> = {
-  "&": "&amp;",
-  "<": "&lt;",
-  ">": "&gt;",
-  '"': "&quot;",
-  "'": "&#39;",
-};
-
-/** HTML-escape untrusted text so DB strings render inert (`</td><script>` stays visible text). */
-export function escapeHtml(text: string): string {
-  return text.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c] ?? c);
-}
-
-/** Format one {@link FrozenCell} as display text (per kind); a null cell → {@link NULL_PLACEHOLDER}. */
-export function formatCell(cell: FrozenCell): string {
-  switch (cell.kind) {
-    case "null":
-      return NULL_PLACEHOLDER;
-    case "string":
-      return cell.value;
-    case "number":
-      return String(cell.value);
-    case "boolean":
-      return String(cell.value);
-    case "date":
-      return cell.iso;
-    default: {
-      const _exhaustive: never = cell;
-      return String(_exhaustive);
-    }
-  }
-}
-
-/**
- * Render canonical {@link FrozenData} to an HTML `<table>` string. HTML-escapes EVERY column
- * name AND every cell value (frozen values are untrusted DB strings) so no markup can break
- * out. Pure and total.
- */
-export function renderTableToHtml(data: FrozenData): string {
-  const head = data.columns.map((c) => `<th>${escapeHtml(c.name)}</th>`).join("");
-  const body = data.rows
-    .map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(formatCell(cell))}</td>`).join("")}</tr>`)
-    .join("");
-  return `<table class="qs-frozen"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-}
-
-/** The visible "results truncated" affordance — so partial data is never shown as complete. */
-export function truncationNote(): string {
-  return '<p class="qs-truncated">results truncated — showing partial data only.</p>';
-}
 
 /** The visible affordance for a report exported with zero blocks — never a blank body. */
 export const EMPTY_REPORT_HTML = `<p class="qs-empty">${escapeHtml("This report has no blocks.")}</p>`;

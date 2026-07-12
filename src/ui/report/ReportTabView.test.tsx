@@ -59,6 +59,16 @@ describe("ReportTabView", () => {
     expect(html).toContain("export snapshot");
   });
 
+  test("renders a quiet Export live report ghost button alongside Export snapshot", () => {
+    // Story 6.4: the toolbar carries a sibling secondary/ghost "export live report" control.
+    // Click-driven publish/fetch/error coverage lives in `export-live-report.test.ts` via
+    // `runExport` (this repo has no jsdom).
+    const html = renderToStaticMarkup(<ReportTabView state={emptyReport()} onStateChange={() => {}} />);
+    expect(html).toContain('aria-label="export snapshot"');
+    expect(html).toContain('aria-label="export live report"');
+    expect(html).toContain("export live report");
+  });
+
   test("a static render never mutates block state (no onStateChange call)", () => {
     const onStateChange = mock((_next: unknown) => {});
     let s = addProseBlock(emptyReport());

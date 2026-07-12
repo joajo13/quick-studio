@@ -14,6 +14,7 @@
 
 import type { ChatStreamChunk, ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
 import { errorReply, okReply } from "../shared/contract.ts";
+import { assembleLiveReportHtml } from "../shared/live-report-html.ts";
 import { resolveModel } from "./ai-provider.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
@@ -24,6 +25,8 @@ import { createConnectionTargets } from "./connection-targets.ts";
 import type { DriverFactory } from "./driver.ts";
 import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
+import { createLiveReportRegistry } from "./live-report-registry.ts";
+import { liveReportBundle } from "./live-report-bundle.generated.ts";
 import { createProviderRegistry } from "./provider-registry.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
@@ -85,6 +88,21 @@ const htmlHeaders = {
   "content-type": "text/html; charset=utf-8",
   "cache-control": "no-store",
   "x-content-type-options": "nosniff",
+} as const;
+
+/**
+ * Headers for the token-bearing served Live Report page (`/live/<id>`). Extends the HTML-shell
+ * headers with a REAL HTTP anti-framing guard. The page's `<meta>` CSP carries
+ * `frame-ancestors 'none'`, but per the CSP spec that directive (like `sandbox`/`report-uri`)
+ * is silently ignored when delivered via `<meta>` — it is effective only as an HTTP response
+ * header. Since this is the one page that actually injects the per-boot session token AND can
+ * `POST /rpc`, the clickjacking guard the CSP asserts must be delivered here: `X-Frame-Options`
+ * for universal support plus a header-level `frame-ancestors 'none'` for modern browsers.
+ */
+const liveHtmlHeaders = {
+  ...htmlHeaders,
+  "x-frame-options": "DENY",
+  "content-security-policy": "frame-ancestors 'none'",
 } as const;
 
 /** Options controlling `startCore`'s behavior beyond the default binding. */
@@ -225,6 +243,11 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // connection registry — Ephemeral stays a hard no-write (its store open is a pure
   // in-memory no-op), and the raw key never leaves Ring 1 (summaries are secret-free).
   const providerRegistry = createProviderRegistry({ storeDeps: { mode } });
+
+  // Live Report registry (Story 6.4): holds published layout+SQL docs (never data, never a
+  // credential, never a token) so the Core can serve them same-origin at `/live/<id>`. In-memory
+  // + session-only — nothing touches disk (Persistent/Ephemeral-agnostic), and it dies with boot.
+  const liveReportRegistry = createLiveReportRegistry();
 
   /**
    * Browse-rows capability (Story 3.2): validate the request against the live
@@ -378,6 +401,8 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         tableRows,
         // Guarded SQL execution (the single risk classifier + composer).
         execute: (params) => executor.execute(params),
+        // Live Report registry: publish layout+SQL docs to serve same-origin (Story 6.4).
+        liveReports: liveReportRegistry,
       };
 
       // --- Static UI assets ---------------------------------------------
@@ -404,6 +429,38 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
             "content-type": "text/javascript; charset=utf-8",
             "x-content-type-options": "nosniff",
           },
+        });
+      }
+      // The Live Report runtime (Story 6.4): served open + data-free (like `/snapshot-runtime.js`)
+      // so the Ring-2 portable-copy path can fetch it same-origin at export time and inline it.
+      if (req.method === "GET" && url.pathname === "/live-report-runtime.js") {
+        return new Response(liveReportBundle.js, {
+          status: 200,
+          headers: {
+            "content-type": "text/javascript; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          },
+        });
+      }
+      // A published Live Report served same-origin (Story 6.4): the Core injects its per-boot
+      // session token into the page (mirroring `renderIndexHtml`, `no-store`) so the inlined
+      // runtime can re-query via the UNCHANGED `/rpc` gate as an explicit second caller. The
+      // published doc carries only layout+SQL — no data, no credential. An unknown id → 404.
+      if (req.method === "GET" && url.pathname.startsWith("/live/")) {
+        const id = url.pathname.slice("/live/".length);
+        const doc = liveReportRegistry.get(id);
+        if (doc === null) {
+          // A registry miss (unknown id, or a link from a previous boot the in-memory
+          // session-only registry no longer holds): a small human-readable page instead of a
+          // bare 404 body, so a stale/shared link explains itself rather than looking broken.
+          return new Response(
+            `<!doctype html><html lang="en"><head><meta charset="utf-8" /><title>quick-studio — live report not found</title></head><body><p>This live report link is unknown or has expired — re-export it from quick-studio.</p></body></html>`,
+            { status: 404, headers: htmlHeaders },
+          );
+        }
+        return new Response(assembleLiveReportHtml(doc, liveReportBundle.js, token), {
+          status: 200,
+          headers: liveHtmlHeaders,
         });
       }
       if (req.method === "GET" && url.pathname === "/app.css") {

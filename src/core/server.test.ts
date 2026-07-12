@@ -381,3 +381,104 @@ describe("renderIndexHtml exposure injection", () => {
     expect(html).not.toContain("</script><script>alert(1)");
   });
 });
+
+// Story 6.4: the Core publishes a layout+SQL Live Report and serves it same-origin at
+// `/live/<id>` with its per-boot token injected (mirroring the app shell), while `/rpc`
+// keeps its UNCHANGED second-caller gate so the live page is an explicit second caller.
+describe("Live Report serving (Story 6.4)", () => {
+  const liveDoc = {
+    schemaVersion: 1,
+    blocks: [
+      { kind: "prose", markdown: "# live" },
+      { kind: "query", sql: "select 1 as k", view: "table", chart: null },
+    ],
+  };
+
+  async function publish(): Promise<string> {
+    const res = await callRpc(core.token, { method: "livereport.publish", params: liveDoc });
+    const reply = await res.json();
+    expect(reply.ok).toBe(true);
+    return reply.result.path as string;
+  }
+
+  test("GET /live/<id> returns the assembled HTML with the injected token AND connect-src 'self'", async () => {
+    const path = await publish();
+    expect(path).toMatch(/^\/live\/[0-9a-f]{32}$/);
+    const res = await fetch(`${core.url}${path}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/html");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    const html = await res.text();
+    // The serving Core injects its per-boot token (like the app shell).
+    expect(html).toContain("window.__QS_TOKEN__");
+    expect(html).toContain(core.token);
+    // The load-bearing egress boundary: connect-src 'self', NOT 'none'.
+    expect(html).toContain("connect-src 'self'");
+    expect(html).not.toContain("connect-src 'none'");
+    // The published payload carries only layout+SQL — no frozen data embedded. Check the
+    // embedded payload script specifically (the inlined runtime bundle legitimately contains
+    // the word "columns" in minified Plot/micromark code).
+    expect(html).toContain("select 1 as k");
+    const payload = /<script type="application\/json" id="__qs_livereport">([\s\S]*?)<\/script>/.exec(html);
+    expect(payload).not.toBeNull();
+    expect(payload![1]).not.toContain("columns");
+    expect(payload![1]).not.toContain("rows");
+  });
+
+  test("GET /live/<id> delivers a REAL HTTP anti-framing header (a <meta> frame-ancestors is inert)", async () => {
+    const path = await publish();
+    const res = await fetch(`${core.url}${path}`);
+    expect(res.status).toBe(200);
+    // The token-bearing page must be un-framable via headers browsers actually honor —
+    // `frame-ancestors` in the <meta> CSP is silently dropped by browsers, so the clickjacking
+    // guard the CSP asserts is enforced only when delivered as an HTTP header.
+    expect(res.headers.get("x-frame-options")).toBe("DENY");
+    expect(res.headers.get("content-security-policy") ?? "").toContain("frame-ancestors 'none'");
+  });
+
+  test("an unknown live-report id → 404 with a human-readable expiry/re-export note", async () => {
+    const res = await fetch(`${core.url}/live/deadbeefdeadbeefdeadbeefdeadbeef`);
+    expect(res.status).toBe(404);
+    const body = await res.text();
+    expect(body.toLowerCase()).toContain("expired");
+    expect(body.toLowerCase()).toContain("re-export");
+  });
+
+  test("an invalid published doc → bad_request (never a throw through the envelope)", async () => {
+    const res = await callRpc(core.token, {
+      method: "livereport.publish",
+      params: { schemaVersion: 99, blocks: [] },
+    });
+    const reply = await res.json();
+    expect(res.status).toBe(400);
+    expect(reply.ok).toBe(false);
+    expect(reply.error.code).toBe("bad_request");
+  });
+
+  test("GET /live-report-runtime.js is served open with the JS content-type", async () => {
+    const res = await fetch(`${core.url}/live-report-runtime.js`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("javascript");
+    const body = await res.text();
+    expect(body.length).toBeGreaterThan(100);
+    // Open + data-free: no token baked into the served bundle.
+    expect(body).not.toContain(core.token);
+  });
+
+  test("/rpc still rejects an absent/bad token and a foreign Origin (gate UNCHANGED)", async () => {
+    // Bad token → 403.
+    const bad = await callRpc("not-the-token", { method: "livereport.publish", params: liveDoc });
+    expect(bad.status).toBe(403);
+    // Foreign Origin → 403 (checked before the token).
+    const foreign = await fetch(`${core.url}/rpc`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-qs-token": core.token,
+        origin: "http://evil.example.com",
+      },
+      body: JSON.stringify({ method: "livereport.publish", params: liveDoc }),
+    });
+    expect(foreign.status).toBe(403);
+  });
+});

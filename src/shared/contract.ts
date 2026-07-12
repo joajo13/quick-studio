@@ -880,6 +880,16 @@ export type ShutdownResult = {
 };
 
 /**
+ * Result payload for `livereport.publish` (Story 6.4). The Core stores the published
+ * layout+SQL {@link LiveReportDoc} (never data, never a credential) under an opaque id and
+ * returns the same-origin loopback `path` (`/live/<id>`) the UI opens to view it live. Only
+ * the local Core ever sees the doc — nothing is sent to any external service.
+ */
+export type LiveReportPublishResult = {
+  readonly path: string;
+};
+
+/**
  * Boot-time port-exposure state, handed to the UI via the `window.__QS_EXPOSURE__`
  * global (NOT an RPC — it is known at boot and static for the session). When
  * `exposed` is true the server bound a non-loopback address, so the UI renders
