@@ -22,14 +22,16 @@
  * outbound call is `runRawQuery`.
  */
 
-import { useMemo, useRef, useState } from "react";
-import type { FrozenData } from "../../shared/contract.ts";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { ConnectionSummary, FrozenData } from "../../shared/contract.ts";
 import { MARK_KINDS, parseChartSpec, type MarkKind } from "../../shared/chart-spec.ts";
 import { DataGrid } from "../data/DataGrid.tsx";
+import { rpc } from "../rpc/client.ts";
 import { ConfirmRun } from "../workspace/ConfirmRun.tsx";
 import { runRawQuery } from "../workspace/run-raw-query.ts";
 import { mapChart } from "./report-chart.ts";
 import { renderReportMarkdown } from "./report-markdown.ts";
+import { planRetarget } from "./retarget-plan.ts";
 import { ReportChart } from "./ReportChart.tsx";
 import {
   addProseBlock,
@@ -41,6 +43,7 @@ import {
   setBlockOk,
   setBlockResult,
   setBlockView,
+  setReportTarget,
   updateProse,
   updateQuerySql,
   type ReportBlock,
@@ -51,17 +54,30 @@ import {
 /** Transient (never-lifted) per-block run state, keyed by block id. */
 type RunEntry = {
   readonly busy: boolean;
-  /** A pending `confirmation_required` preview, awaiting the author's confirm. */
-  readonly confirm: { readonly sql: string; readonly risk: string } | null;
+  /**
+   * A pending `confirmation_required` preview, awaiting the author's confirm. It
+   * TARGET-STAMPS the connection that produced the preview (Story 6.2): `confirmBlock`
+   * fires the confirmed (possibly destructive) statement against `target`, not the live
+   * picker value — so a `DELETE` previewed against test A can never commit onto prod B.
+   */
+  readonly confirm: { readonly sql: string; readonly risk: string; readonly target: string | null } | null;
   readonly selectedRow: number | null;
 };
 
 const IDLE: RunEntry = { busy: false, confirm: null, selectedRow: null };
 
-/** Run `run` and map a throw to the same `{kind:"error"}` shape a failed envelope produces. */
-async function toOutcome(sql: string, confirmed?: boolean): Promise<Awaited<ReturnType<typeof runRawQuery>>> {
+/**
+ * Run `runRawQuery` and map a throw to the same `{kind:"error"}` shape a failed envelope
+ * produces. `connectionId` (Story 6.2) is the Report's re-target — forwarded verbatim to
+ * the Core, which resolves it to a live connection in-Ring-1 (the url never crosses back).
+ */
+async function toOutcome(
+  sql: string,
+  confirmed?: boolean,
+  connectionId?: string | null,
+): Promise<Awaited<ReturnType<typeof runRawQuery>>> {
   try {
-    return await runRawQuery(sql, confirmed);
+    return await runRawQuery(sql, confirmed, connectionId);
   } catch (e) {
     return { kind: "error", message: e instanceof Error ? e.message : String(e) };
   }
@@ -192,12 +208,61 @@ export function ReportTabView({
   // Synchronous re-entrancy guards per block id (a `busy` setState only lands after a
   // re-render; a ref blocks a synchronous double-fire on the same run button).
   const firing = useRef<Record<number, boolean>>({});
+  // Per-block RUN generation. A re-target deliberately re-fires an already-busy block, so
+  // two runs can be in flight for one id at once. Each `fireAgainst` bumps the id's gen and
+  // captures it; only the LATEST run may touch that block's transient run state (busy/firing)
+  // on completion — otherwise an old (superseded) run finishing first would falsely un-busy a
+  // block whose newer re-fire is still running, re-opening the manual double-fire window.
+  const runGen = useRef<Record<number, number>>({});
   const runEntry = (id: number): RunEntry => runs[id] ?? IDLE;
 
-  const applyOutcome = (id: number, outcome: Awaited<ReturnType<typeof runRawQuery>>): void => {
-    // If the block was removed mid-run, drop the outcome entirely — do not fold a result
-    // onto an absent block nor re-create its transient run state (busy/confirm/result).
+  // Available re-target connections (Story 6.2): fetched ONCE on mount over the proven
+  // token-gated channel. Credential-free {@link ConnectionSummary} (`{id,name,…}`) only —
+  // the picker sends just the id; the Core resolves the url in-Ring-1. An error/empty
+  // list degrades gracefully (the picker still offers the default/launch target).
+  const [connections, setConnections] = useState<ReadonlyArray<ConnectionSummary>>([]);
+  useEffect(() => {
+    let alive = true;
+    void rpc<ReadonlyArray<ConnectionSummary>>("connections.list").then((reply) => {
+      if (alive && reply.ok) setConnections(reply.result);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /**
+   * Fold one run completion, guarding against a stale write (FR-18 + Story 6.2):
+   *  - a block REMOVED mid-run → drop entirely (no UI to clean).
+   *  - a completion whose `firedTarget` differs from the report's CURRENT target → it is
+   *    SUPERSEDED (the author re-targeted since it fired): its result is DROPPED, but its
+   *    transient run state is STILL cleared (`busy=false`, release `firing`) so the
+   *    still-present block never strands "running…" and can re-fire. (This differs from
+   *    the removed-block no-op, which needs no cleanup because a removed block has no UI.)
+   */
+  const applyOutcome = (
+    id: number,
+    outcome: Awaited<ReturnType<typeof runRawQuery>>,
+    firedTarget: string | null,
+    isLatest: boolean,
+  ): void => {
     if (!stateRef.current.blocks.some((b) => b.id === id)) return;
+    if (stateRef.current.targetConnectionId !== firedTarget) {
+      // Superseded by a re-target: discard the stale completion. Only clear the block's
+      // transient run state if THIS is its latest run — a newer re-fire (higher gen) against
+      // the new target owns the busy state now, and clearing it here would falsely un-busy a
+      // block that is still running. Preserve the current grid selection.
+      if (isLatest) {
+        setRuns((r) => ({ ...r, [id]: { busy: false, confirm: null, selectedRow: (r[id] ?? IDLE).selectedRow } }));
+      }
+      return;
+    }
+    // Same-target completion, but NOT the latest run (an older re-fire against this same
+    // target, with a newer one still in flight): last-FIRED wins, not last-COMPLETED. Drop
+    // it entirely — folding its (possibly older) snapshot would let a slow gen-1 run against
+    // B overwrite the fresh gen-3 run against B under a rapid A→B→C→B retarget, showing stale
+    // data. The latest run owns BOTH the result fold and the transient state, so bail here.
+    if (!isLatest) return;
     switch (outcome.kind) {
       case "rows":
         // Functional updater: fold against the LATEST state so a sibling block's result
@@ -217,44 +282,100 @@ export function ReportTabView({
         setRuns((r) => ({ ...r, [id]: { busy: false, confirm: null, selectedRow: null } }));
         return;
       case "confirm":
-        // Stay UNRUN: surface the Core's preview for the author to confirm/cancel.
-        setRuns((r) => ({ ...r, [id]: { busy: false, confirm: { sql: outcome.sql, risk: outcome.risk }, selectedRow: null } }));
+        // Stay UNRUN: surface the Core's preview, STAMPED with the target that produced it
+        // (`firedTarget`) so `confirmBlock` commits against THAT target, never the live picker.
+        setRuns((r) => ({
+          ...r,
+          [id]: { busy: false, confirm: { sql: outcome.sql, risk: outcome.risk, target: firedTarget }, selectedRow: null },
+        }));
         return;
     }
+  };
+
+  /**
+   * Fire a query block against an EXPLICIT target (never read back from not-yet-committed
+   * React state) — the unconditional run path. It sets the block busy + clears any pending
+   * confirm, runs, then folds via {@link applyOutcome}. Used both for a normal run and for
+   * a re-target re-fire (which must re-fire even busy/confirm-pending blocks).
+   */
+  const fireAgainst = async (id: number, sql: string, target: string | null, confirmed?: boolean): Promise<void> => {
+    // Bump + capture this run's generation. If a later re-fire bumps it again before we
+    // settle, this run is no longer the latest and must not touch transient run state.
+    const gen = (runGen.current[id] = (runGen.current[id] ?? 0) + 1);
+    firing.current[id] = true;
+    setRuns((r) => ({ ...r, [id]: { busy: true, confirm: null, selectedRow: (r[id] ?? IDLE).selectedRow } }));
+    const outcome = await toOutcome(sql, confirmed, target);
+    const isLatest = runGen.current[id] === gen;
+    applyOutcome(id, outcome, target, isLatest);
+    if (isLatest) firing.current[id] = false;
   };
 
   const runBlock = async (id: number, sql: string): Promise<void> => {
     const entry = runEntry(id);
     if (firing.current[id] || entry.busy || entry.confirm !== null) return;
-    firing.current[id] = true;
-    setRuns((r) => ({ ...r, [id]: { ...entry, busy: true } }));
-    const outcome = await toOutcome(sql);
-    applyOutcome(id, outcome);
-    firing.current[id] = false;
+    await fireAgainst(id, sql, stateRef.current.targetConnectionId);
   };
 
   const confirmBlock = async (id: number): Promise<void> => {
     const entry = runEntry(id);
     if (firing.current[id] || entry.busy || entry.confirm === null) return;
-    firing.current[id] = true;
-    const sql = entry.confirm.sql;
-    setRuns((r) => ({ ...r, [id]: { ...entry, busy: true } }));
-    const outcome = await toOutcome(sql, true);
-    applyOutcome(id, outcome);
-    firing.current[id] = false;
+    // Fire the confirmed statement against the CAPTURED target that produced the preview,
+    // NOT the live picker value — belt-and-suspenders with retarget-cancels-confirm.
+    await fireAgainst(id, entry.confirm.sql, entry.confirm.target, true);
   };
 
   const cancelConfirm = (id: number): void => {
     setRuns((r) => ({ ...r, [id]: { ...runEntry(id), confirm: null } }));
   };
 
+  /**
+   * Re-target the whole Report (Story 6.2). Commits the new target, then — driven by the
+   * pure {@link planRetarget} — re-fires EVERY query block against the NEW target passed
+   * EXPLICITLY (idle, in-flight, and confirm-pending alike; a pending confirm is dropped
+   * by the reset). A superseded old-target completion is discarded by `applyOutcome`'s
+   * guard, so rapid A→B→C settles every block on C with none left stuck or showing stale
+   * data. Layout (order/prose/chart/view) is untouched — `setReportTarget` never mutates it.
+   */
+  const handleRetarget = (target: string | null): void => {
+    if (target === stateRef.current.targetConnectionId) return;
+    onStateChange((prev) => setReportTarget(prev, target));
+    const actions = planRetarget(stateRef.current.blocks, runs);
+    for (const action of actions) {
+      if (action.refire) {
+        void fireAgainst(action.id, action.sql, target);
+      } else {
+        setRuns((r) => ({ ...r, [action.id]: { ...action.reset } }));
+      }
+    }
+  };
+
   const totalBlocks = state.blocks.length;
 
   return (
     <div className="flex h-full flex-col">
-      {/* Toolbar: add a block. */}
+      {/* Toolbar: re-target picker + add a block. */}
       <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--card)] px-3 py-2">
         <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">report</span>
+        {/* Re-target picker (Story 6.2): "Default (launch connection)" = null, plus each
+            saved connection by name. Changing it re-runs every query block against the new
+            target — only the connection id crosses to the Core (credentials stay in Ring 1). */}
+        <label htmlFor="report-target" className="ml-2 font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
+          target
+        </label>
+        <select
+          id="report-target"
+          aria-label="report target"
+          value={state.targetConnectionId ?? ""}
+          onChange={(e) => handleRetarget(e.target.value === "" ? null : e.target.value)}
+          className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--coral-line)]"
+        >
+          <option value="">Default (launch connection)</option>
+          {connections.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name}
+            </option>
+          ))}
+        </select>
         <div className="ml-auto flex items-center gap-2">
           <button type="button" className={btn} onClick={() => onStateChange((prev) => addProseBlock(prev))}>
             + prose

@@ -21,6 +21,7 @@ import {
   setBlockOk,
   setBlockResult,
   setBlockView,
+  setReportTarget,
   updateProse,
   updateQuerySql,
   type ReportBlock,
@@ -39,8 +40,49 @@ const queryAt = (blocks: ReadonlyArray<ReportBlock>, i: number): Extract<ReportB
 };
 
 describe("emptyReport", () => {
-  test("is empty and ids start at 1", () => {
-    expect(emptyReport()).toEqual({ blocks: [], nextId: 1 });
+  test("is empty, ids start at 1, and the target defaults to null (boot connection)", () => {
+    expect(emptyReport()).toEqual({ blocks: [], nextId: 1, targetConnectionId: null });
+  });
+});
+
+describe("setReportTarget (Story 6.2) — target model, no layout mutation", () => {
+  test("sets and clears the target, preserving blocks + nextId (layout invariant)", () => {
+    // Build a non-trivial layout: prose + query with a result + chart.
+    let s = addProseBlock(emptyReport()); // id 1
+    s = updateProse(s, 1, "# title");
+    s = addQueryBlock(s); // id 2
+    s = setBlockResult(s, 2, data("a", 3), false);
+    s = setBlockView(s, 2, "chart");
+    const layoutBefore = s.blocks;
+    const nextIdBefore = s.nextId;
+
+    const targeted = setReportTarget(s, "conn-b");
+    expect(targeted.targetConnectionId).toBe("conn-b");
+    // Layout is untouched — same block array reference, same nextId.
+    expect(targeted.blocks).toBe(layoutBefore);
+    expect(targeted.nextId).toBe(nextIdBefore);
+
+    const cleared = setReportTarget(targeted, null);
+    expect(cleared.targetConnectionId).toBeNull();
+    expect(cleared.blocks).toBe(layoutBefore);
+  });
+
+  test("a no-op set (same id) returns the same reference", () => {
+    const s = setReportTarget(emptyReport(), "x");
+    expect(setReportTarget(s, "x")).toBe(s);
+    const base = emptyReport();
+    expect(setReportTarget(base, null)).toBe(base); // null → null
+  });
+
+  test("add/remove/reorder preserve the target", () => {
+    let s = setReportTarget(emptyReport(), "conn-a");
+    s = addProseBlock(s);
+    s = addQueryBlock(s);
+    expect(s.targetConnectionId).toBe("conn-a");
+    s = moveBlock(s, 2, "up");
+    expect(s.targetConnectionId).toBe("conn-a");
+    s = removeBlock(s, 1);
+    expect(s.targetConnectionId).toBe("conn-a");
   });
 });
 

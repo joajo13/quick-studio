@@ -20,6 +20,7 @@ import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
 import { createChatResponder } from "./chat.ts";
 import { createConnectionManager } from "./connection.ts";
 import { createConnectionRegistry } from "./connection-registry.ts";
+import { createConnectionTargets } from "./connection-targets.ts";
 import type { DriverFactory } from "./driver.ts";
 import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
@@ -249,18 +250,28 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     return okReply({ data, page: plan.page, pageSize: plan.pageSize, total });
   }
 
-  // Guarded SQL executor (Story 3.1): the ONE Core-owned risk classifier. Its seams
-  // are the live connection manager — `runQuery` (committing path) and `runReadOnly`
-  // (auto-classified reads in an engine read-only transaction) delegate to the driver;
-  // `getEngine`/`getSchema` resolve the live connection lazily+once; `quoteIdent` is
+  // Per-target connection resolver (Story 6.2): turns an optional saved-connection id
+  // into the seams the executor runs over. The default (id null/absent) is the boot
+  // manager, so the untargeted path is byte-identical. A target manager is created
+  // lazily via the SAME driver factory, cached by id, self-invalidated against the
+  // registry's `getStoredUrl` on every resolve (repoint/removal), and closed on
+  // shutdown. Only the id crosses the loopback — the url is resolved in-Core here.
+  const connectionTargets = createConnectionTargets({
+    bootManager: connectionManager,
+    getStoredUrl: (id) => connectionRegistry.getStoredUrl(id),
+    createManager: (url) =>
+      createConnectionManager({ databaseUrl: url, createDriver: options.createDriver }),
+  });
+
+  // Guarded SQL executor (Story 3.1): the ONE Core-owned risk classifier. Its single
+  // dependency is `resolveConnection` (Story 6.2): resolve the target's seams once per
+  // `execute` (default boot). `runQuery` (committing path) and `runReadOnly`
+  // (auto-classified reads in an engine read-only transaction) delegate to the resolved
+  // manager's driver; `getEngine`/`getSchema` resolve it lazily+once; `quoteIdent` is
   // the engine-correct identifier quoter. A malformed/smuggling request is rejected
-  // before any composed SQL runs.
+  // before any composed SQL runs (and before any target round-trip).
   const executor = createExecutor({
-    runQuery: (sql, params) => connectionManager.query(sql, params),
-    runReadOnly: (sql, params) => connectionManager.queryReadOnly(sql, params),
-    getEngine: async () => (await connectionManager.getSchema()).engine,
-    getSchema: () => connectionManager.getSchema(),
-    quoteIdent: (ident) => connectionManager.quoteIdent(ident),
+    resolveConnection: (connectionId) => connectionTargets.resolve(connectionId),
   });
 
   // Chat responder (Story 5.2, streamed in Story 5.4): the SOLE outbound provider
@@ -531,6 +542,10 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     // `sandboxServer.stop()` can NEVER skip the Core `server.stop()` — both ports
     // are always released, never orphaned by an ordering accident.
     stop: async () => {
+      // Close every lazily-opened re-target manager (Story 6.2) alongside the boot
+      // manager, and latch the resolver closed so a resolve racing shutdown can never
+      // open a new (leaked) target. `closeAll`/`close` both swallow teardown errors.
+      await connectionTargets.closeAll();
       await connectionManager.close();
       try {
         await sandboxServer.stop();

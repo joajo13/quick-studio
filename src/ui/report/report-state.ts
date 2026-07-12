@@ -54,6 +54,13 @@ export type ReportState = {
   readonly blocks: ReadonlyArray<ReportBlock>;
   /** Next block id to assign. Monotonic; never reused, even after a remove. */
   readonly nextId: number;
+  /**
+   * The session-only re-target (Story 6.2): a saved-connection id every query block
+   * runs against, or `null` for the boot/launch connection (the default). NEVER a url
+   * or credential — only the id — and never persisted (session-only, like the blocks).
+   * Changing it re-runs every query block against the new target; it never mutates layout.
+   */
+  readonly targetConnectionId: string | null;
 };
 
 /**
@@ -63,15 +70,15 @@ export type ReportState = {
  */
 export type ReportStateUpdate = ReportState | ((prev: ReportState) => ReportState);
 
-/** An empty Report: no blocks, ids start at 1. */
+/** An empty Report: no blocks, ids start at 1, default (boot) target. */
 export function emptyReport(): ReportState {
-  return { blocks: [], nextId: 1 };
+  return { blocks: [], nextId: 1, targetConnectionId: null };
 }
 
 /** Append a new (empty) prose block and make room for the next id. Pure. */
 export function addProseBlock(state: ReportState): ReportState {
   const block: ReportBlock = { id: state.nextId, kind: "prose", markdown: "" };
-  return { blocks: [...state.blocks, block], nextId: state.nextId + 1 };
+  return { ...state, blocks: [...state.blocks, block], nextId: state.nextId + 1 };
 }
 
 /** Append a new (empty) query block: blank SQL, no result, table view, no chart. Pure. */
@@ -84,7 +91,7 @@ export function addQueryBlock(state: ReportState): ReportState {
     view: "table",
     chart: null,
   };
-  return { blocks: [...state.blocks, block], nextId: state.nextId + 1 };
+  return { ...state, blocks: [...state.blocks, block], nextId: state.nextId + 1 };
 }
 
 /** Map the block with `id` through `fn` (only when the kind guard holds). Pure helper. */
@@ -178,6 +185,18 @@ export function setBlockChart(state: ReportState, id: number, chart: ChartSpec |
 export function removeBlock(state: ReportState, id: number): ReportState {
   const blocks = state.blocks.filter((b) => b.id !== id);
   return blocks.length === state.blocks.length ? state : { ...state, blocks };
+}
+
+/**
+ * Set (or clear, with `null`) the Report's session-only re-target — the saved-connection
+ * id every query block runs against (Story 6.2). Touches ONLY `targetConnectionId`:
+ * `blocks`/`nextId` are preserved by reference so re-targeting can NEVER mutate layout
+ * (block order, prose, chart specs, view toggles). A no-op (same id) returns the same
+ * reference. Pure.
+ */
+export function setReportTarget(state: ReportState, id: string | null): ReportState {
+  if (state.targetConnectionId === id) return state;
+  return { ...state, targetConnectionId: id };
 }
 
 /**

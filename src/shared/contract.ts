@@ -816,8 +816,8 @@ export type StructuredOp =
  * (raw mutations/DDL, structured `delete`); absent/`false` ⇒ nothing runs.
  */
 export type ExecuteRequest =
-  | { readonly shape: "raw"; readonly sql: string; readonly confirmed?: boolean }
-  | { readonly shape: "structured"; readonly op: StructuredOp; readonly confirmed?: boolean };
+  | { readonly shape: "raw"; readonly sql: string; readonly confirmed?: boolean; readonly connectionId?: string | null }
+  | { readonly shape: "structured"; readonly op: StructuredOp; readonly confirmed?: boolean; readonly connectionId?: string | null };
 
 /**
  * The outcome of an `execute` RPC — a DOMAIN result carried inside a successful

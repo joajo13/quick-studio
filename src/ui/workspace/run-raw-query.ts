@@ -35,11 +35,22 @@ export type RunOutcome =
  * splits, classifies, or composes SQL — the Core guarded executor is the sole
  * gate (AR-3). Pass `confirmed:true` to re-issue the IDENTICAL request after an
  * inline confirm accepts a `confirmation_required` preview.
+ *
+ * `connectionId` (Story 6.2) is the Report re-target: a saved-connection **id** the
+ * Core resolves to a live connection in-Ring-1 (the url/credential never crosses this
+ * boundary, AR-12). It is forwarded inside `params` ONLY when set — an absent/`null`
+ * id omits the key entirely, so every existing (2-arg) caller and the default target
+ * stay byte-identical, running against the boot connection.
  */
-export async function runRawQuery(sql: string, confirmed?: boolean): Promise<RunOutcome> {
+export async function runRawQuery(
+  sql: string,
+  confirmed?: boolean,
+  connectionId?: string | null,
+): Promise<RunOutcome> {
+  const base = confirmed ? { shape: "raw", sql, confirmed: true } : { shape: "raw", sql };
   const reply = await rpc<ExecuteResult>(
     "execute",
-    confirmed ? { shape: "raw", sql, confirmed: true } : { shape: "raw", sql },
+    connectionId != null ? { ...base, connectionId } : base,
   );
   if (!reply.ok) return { kind: "error", message: envelopeText(reply.error) };
   const result = reply.result;

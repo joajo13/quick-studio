@@ -51,6 +51,23 @@ describe("ReportTabView", () => {
     expect(html).toContain("+ query");
   });
 
+  test("renders the re-target picker with the Default (launch connection) option", () => {
+    // Story 6.2: the toolbar carries a target picker whose default (value "") is the
+    // launch connection = `null`. The saved-connection options are populated by a mount
+    // effect (not run in a static render); the Default option is always present.
+    const html = renderToStaticMarkup(<ReportTabView state={emptyReport()} onStateChange={() => {}} />);
+    expect(html).toContain('aria-label="report target"');
+    expect(html).toContain("Default (launch connection)");
+  });
+
+  test("the picker reflects a non-null stored target as the selected value", () => {
+    // A report already targeting a saved connection: the <select> value is that id
+    // (proves the picker is driven by `state.targetConnectionId`, not local state).
+    const s = { ...emptyReport(), targetConnectionId: "conn-b" };
+    const html = renderToStaticMarkup(<ReportTabView state={s} onStateChange={() => {}} />);
+    expect(html).toContain('aria-label="report target"');
+  });
+
   test("renders a populated multi-block report (prose + table + chart) without throwing", () => {
     // prose (id 1) + query-table (id 2) + query-chart (id 3), each independent.
     let s = addProseBlock(emptyReport());

@@ -11,6 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { DatabaseSchema, DbEngine } from "../shared/contract.ts";
+import type { ConnectionSeams } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import {
   createExecutor,
@@ -55,7 +56,8 @@ function schemaFor(engine: DbEngine): DatabaseSchema {
   };
 }
 
-function makeExecutor(opts: {
+/** Build a captured {@link ConnectionSeams} view (records `runQuery`/`runReadOnly` calls). */
+function makeSeams(opts: {
   engine?: DbEngine;
   schema?: DatabaseSchema;
   queryResult?: DriverQueryResult;
@@ -65,7 +67,7 @@ function makeExecutor(opts: {
   const schema = opts.schema ?? schemaFor(engine);
   const queryCalls: Capture[] = [];
   const readOnlyCalls: Capture[] = [];
-  const exec = createExecutor({
+  const seams: ConnectionSeams = {
     runQuery: async (sql, params) => {
       queryCalls.push({ sql, params });
       return opts.queryResult ?? { columns: [], rows: [], rowsAffected: 1 };
@@ -77,7 +79,20 @@ function makeExecutor(opts: {
     getEngine: async () => engine,
     getSchema: async () => schema,
     quoteIdent: engine === "postgres" ? pgQuote : myQuote,
-  });
+  };
+  return { seams, queryCalls, readOnlyCalls };
+}
+
+function makeExecutor(opts: {
+  engine?: DbEngine;
+  schema?: DatabaseSchema;
+  queryResult?: DriverQueryResult;
+  readOnlyResult?: DriverQueryResult;
+} = {}) {
+  const { seams, queryCalls, readOnlyCalls } = makeSeams(opts);
+  // Default resolver: every call (id present or not) resolves the SAME boot seams, so the
+  // whole pre-6.2 battery exercises the untargeted path unchanged.
+  const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams }) });
   return { exec, queryCalls, readOnlyCalls };
 }
 
@@ -709,11 +724,100 @@ describe("structured path cannot widen; request shape is validated first", () =>
 
   test("malformed request envelope → bad_request without a connection round-trip", async () => {
     const { exec, queryCalls, readOnlyCalls } = makeExecutor();
-    for (const req of [null, [], "raw", { shape: "nope" }, { shape: "raw" }, { shape: "raw", sql: 5 }, { shape: "structured" }, { shape: "raw", sql: "SELECT 1", confirmed: "yes" }]) {
+    for (const req of [null, [], "raw", { shape: "nope" }, { shape: "raw" }, { shape: "raw", sql: 5 }, { shape: "structured" }, { shape: "raw", sql: "SELECT 1", confirmed: "yes" }, { shape: "raw", sql: "SELECT 1", connectionId: 5 }]) {
       const reply = await exec.execute(req);
       expect(reply.ok).toBe(false);
       if (!reply.ok) expect(reply.error.code).toBe("bad_request");
     }
     expect(queryCalls.length + readOnlyCalls.length).toBe(0);
+  });
+});
+
+/* ---- Story 6.2: per-request re-target routing ------------------------ */
+
+describe("execute routes to the resolved target (Story 6.2)", () => {
+  /**
+   * Build an executor whose resolver routes: id null/absent → boot seams; a known id →
+   * that target's seams; an unknown id → `not-found`. Each seam-set captures its OWN
+   * calls so we can prove WHICH connection a request actually ran against.
+   */
+  function makeTargetedExecutor(opts: { engine?: DbEngine } = {}) {
+    const boot = makeSeams(opts);
+    const target = makeSeams(opts);
+    let resolvedUnknown = false;
+    const exec = createExecutor({
+      resolveConnection: (id) => {
+        if (id === null || id === undefined) return { ok: true, seams: boot.seams };
+        if (id === "conn-b") return { ok: true, seams: target.seams };
+        resolvedUnknown = true;
+        return { ok: false, reason: "not-found" };
+      },
+    });
+    return { exec, boot, target, wasUnknown: () => resolvedUnknown };
+  }
+
+  test("no connectionId → runs against the DEFAULT (boot) seams, target untouched", async () => {
+    const { exec, boot, target } = makeTargetedExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(boot.readOnlyCalls.length).toBe(1);
+    expect(target.readOnlyCalls.length).toBe(0);
+    expect(target.queryCalls.length).toBe(0);
+  });
+
+  test("a valid connectionId (raw read) → routes to the TARGET seams, boot untouched", async () => {
+    const { exec, boot, target } = makeTargetedExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users", connectionId: "conn-b" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(target.readOnlyCalls.length).toBe(1);
+    expect(target.readOnlyCalls[0]!.sql).toBe("SELECT * FROM users");
+    expect(boot.readOnlyCalls.length).toBe(0);
+  });
+
+  test("a valid connectionId on the STRUCTURED destructive path (confirmed delete) → runs against the TARGET", async () => {
+    // The highest-risk branch: a guarded/destructive structured op must resolve + run
+    // against the target seams, never the boot connection.
+    const { exec, boot, target } = makeTargetedExecutor();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "delete", table: "users", pk: { column: "id", value: 9 } },
+      confirmed: true,
+      connectionId: "conn-b",
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(target.queryCalls.length).toBe(1);
+    expect(target.queryCalls[0]!.sql).toBe('DELETE FROM "public"."users" WHERE "id"=$1');
+    expect(target.queryCalls[0]!.params).toEqual([9]);
+    expect(boot.queryCalls.length).toBe(0);
+  });
+
+  test("a structured insert with connectionId → composed + run against the TARGET seams", async () => {
+    const { exec, boot, target } = makeTargetedExecutor();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "insert", table: "users", columns: [{ column: "id", value: 7 }] },
+      connectionId: "conn-b",
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(target.queryCalls[0]!.sql).toBe('INSERT INTO "users" ("id") VALUES ($1)');
+    expect(boot.queryCalls.length).toBe(0);
+  });
+
+  test("an unknown connectionId → not_found error reply, nothing runs on any target", async () => {
+    const { exec, boot, target, wasUnknown } = makeTargetedExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT 1", connectionId: "ghost" });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("not_found");
+    expect(wasUnknown()).toBe(true);
+    expect(boot.readOnlyCalls.length + target.readOnlyCalls.length).toBe(0);
+  });
+
+  test("an unavailable store during resolution → internal_error (distinct from not_found)", async () => {
+    const exec = createExecutor({
+      resolveConnection: () => ({ ok: false, reason: "unavailable", detail: "store open failed" }),
+    });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT 1", connectionId: "conn-b" });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("internal_error");
   });
 });

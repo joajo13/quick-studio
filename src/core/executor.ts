@@ -20,12 +20,12 @@
 import {
   errorReply,
   okReply,
-  type DatabaseSchema,
   type DbEngine,
   type ExecuteResult,
   type RpcReply,
   type SchemaTableInfo,
 } from "../shared/contract.ts";
+import type { ConnectionSeams, ResolvedConnection } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 
@@ -53,18 +53,16 @@ const CREATE_TABLE_TYPES: ReadonlySet<string> = new Set([
   "JSON",
 ]);
 
-/** The seams the executor is built over — every side effect is one of these. */
+/**
+ * The executor's ONE dependency: resolve an optional saved-connection id to the
+ * {@link ConnectionSeams} to run over (Story 6.2). The default (id null/absent) returns
+ * the boot manager's seams, keeping the untargeted path byte-identical. A resolve is
+ * done ONCE per `execute` call — targeting logic lives entirely in `connection-targets.ts`,
+ * so this module stays the pure risk classifier/composer it was.
+ */
 export type ExecutorDeps = {
-  /** Run a composed mutation/DDL or confirmed raw statement (normal, committing path). */
-  readonly runQuery: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
-  /** Run an auto-classified read inside an engine read-only transaction (rolled back). */
-  readonly runReadOnly: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
-  /** Resolve the live engine tag (drives the splitter's engine-correct escape/quote rules). */
-  readonly getEngine: () => Promise<DbEngine>;
-  /** Resolve the live introspected schema (single-column-PK verification for update/delete). */
-  readonly getSchema: () => Promise<DatabaseSchema>;
-  /** Engine-correct identifier quoting (postgres `"`→`""`, mysql `` ` ``→`` `` ``). */
-  readonly quoteIdent: (ident: string) => string;
+  /** Resolve the target's seams (default boot); `not-found`/`unavailable` → typed error reply. */
+  readonly resolveConnection: (connectionId?: string | null) => ResolvedConnection;
 };
 
 /** The executor handle: one `execute` capability returning a formed wire reply. */
@@ -333,12 +331,19 @@ function toRowsResult(result: DriverQueryResult): ExecuteResult {
  * (engine/connection failure) propagates → `internal_error` at dispatch.
  */
 export function createExecutor(deps: ExecutorDeps): Executor {
-  const { runQuery, runReadOnly, getEngine, getSchema, quoteIdent } = deps;
+  const { resolveConnection } = deps;
 
   const bad = (message: string): RpcReply<ExecuteResult> => errorReply("bad_request", message);
 
+  /** Map a failed target resolution to its typed wire reply (never echoes a url). */
+  function targetError(reason: "not-found" | "unavailable"): RpcReply<ExecuteResult> {
+    return reason === "not-found"
+      ? errorReply("not_found", "no connection with that id")
+      : errorReply("internal_error", "credential store is unavailable");
+  }
+
   /** `schema`-qualify + quote a table identifier (`"s"."t"` / `` `s`.`t` ``). */
-  function qualified(schema: string | undefined, table: string): string {
+  function qualified(quoteIdent: ConnectionSeams["quoteIdent"], schema: string | undefined, table: string): string {
     return schema !== undefined
       ? `${quoteIdent(schema)}.${quoteIdent(table)}`
       : quoteIdent(table);
@@ -351,7 +356,8 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
   /* ---- Path (b): raw SQL ------------------------------------------------ */
 
-  async function executeRaw(sql: string, confirmed: boolean): Promise<RpcReply<ExecuteResult>> {
+  async function executeRaw(seams: ConnectionSeams, sql: string, confirmed: boolean): Promise<RpcReply<ExecuteResult>> {
+    const { runQuery, runReadOnly, getEngine } = seams;
     const engine = await getEngine();
     const statements = splitStatements(sql, engine);
     if (statements.length === 0) {
@@ -390,18 +396,20 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   /* ---- Path (a): structured op ----------------------------------------- */
 
   async function executeStructured(
+    seams: ConnectionSeams,
     op: Record<string, unknown>,
     confirmed: boolean,
   ): Promise<RpcReply<ExecuteResult>> {
     const kind = op.kind;
-    if (kind === "insert") return executeInsert(op);
-    if (kind === "update") return executeUpdate(op);
-    if (kind === "delete") return executeDelete(op, confirmed);
-    if (kind === "createTable") return executeCreateTable(op);
+    if (kind === "insert") return executeInsert(seams, op);
+    if (kind === "update") return executeUpdate(seams, op);
+    if (kind === "delete") return executeDelete(seams, op, confirmed);
+    if (kind === "createTable") return executeCreateTable(seams, op);
     return bad("unknown structured op kind");
   }
 
-  async function executeInsert(op: Record<string, unknown>): Promise<RpcReply<ExecuteResult>> {
+  async function executeInsert(seams: ConnectionSeams, op: Record<string, unknown>): Promise<RpcReply<ExecuteResult>> {
+    const { runQuery, getEngine, quoteIdent } = seams;
     const table = readTable(op);
     if ("error" in table) return bad(table.error);
     const cols = readColumnValues(op.columns, "columns");
@@ -412,12 +420,13 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const names = cols.values.map((c) => quoteIdent(c.column));
     const phs = cols.values.map((_c, idx) => placeholder(engine, idx + 1));
     const params = cols.values.map((c) => c.value);
-    const sql = `INSERT INTO ${qualified(table.schema, table.table)} (${names.join(", ")}) VALUES (${phs.join(", ")})`;
+    const sql = `INSERT INTO ${qualified(quoteIdent, table.schema, table.table)} (${names.join(", ")}) VALUES (${phs.join(", ")})`;
     const result = await runQuery(sql, params);
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 
-  async function executeUpdate(op: Record<string, unknown>): Promise<RpcReply<ExecuteResult>> {
+  async function executeUpdate(seams: ConnectionSeams, op: Record<string, unknown>): Promise<RpcReply<ExecuteResult>> {
+    const { runQuery, getEngine, getSchema, quoteIdent } = seams;
     const table = readTable(op);
     if ("error" in table) return bad(table.error);
     const set = readColumnValues(op.set, "set");
@@ -426,32 +435,34 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const pk = readPk(op.pk);
     if ("error" in pk) return bad(pk.error);
 
-    const target = await resolveSinglePkTable(table.schema, table.table, pk.column);
+    const target = await resolveSinglePkTable(getSchema, table.schema, table.table, pk.column);
     if ("error" in target) return bad(target.error);
 
     const engine = await getEngine();
     const setSql = set.values.map((c, idx) => `${quoteIdent(c.column)}=${placeholder(engine, idx + 1)}`);
     const wherePh = placeholder(engine, set.values.length + 1);
-    const sql = `UPDATE ${qualified(target.table.schema, target.table.name)} SET ${setSql.join(", ")} WHERE ${quoteIdent(pk.column)}=${wherePh}`;
+    const sql = `UPDATE ${qualified(quoteIdent, target.table.schema, target.table.name)} SET ${setSql.join(", ")} WHERE ${quoteIdent(pk.column)}=${wherePh}`;
     const params = [...set.values.map((c) => c.value), pk.value];
     const result = await runQuery(sql, params);
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 
   async function executeDelete(
+    seams: ConnectionSeams,
     op: Record<string, unknown>,
     confirmed: boolean,
   ): Promise<RpcReply<ExecuteResult>> {
+    const { runQuery, getEngine, getSchema, quoteIdent } = seams;
     const table = readTable(op);
     if ("error" in table) return bad(table.error);
     const pk = readPk(op.pk);
     if ("error" in pk) return bad(pk.error);
 
-    const target = await resolveSinglePkTable(table.schema, table.table, pk.column);
+    const target = await resolveSinglePkTable(getSchema, table.schema, table.table, pk.column);
     if ("error" in target) return bad(target.error);
 
     const engine = await getEngine();
-    const sql = `DELETE FROM ${qualified(target.table.schema, target.table.name)} WHERE ${quoteIdent(pk.column)}=${placeholder(engine, 1)}`;
+    const sql = `DELETE FROM ${qualified(quoteIdent, target.table.schema, target.table.name)} WHERE ${quoteIdent(pk.column)}=${placeholder(engine, 1)}`;
     const params = [pk.value];
 
     // Row DELETE requires explicit confirmation — but the PK verification above still
@@ -466,7 +477,8 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 
-  async function executeCreateTable(op: Record<string, unknown>): Promise<RpcReply<ExecuteResult>> {
+  async function executeCreateTable(seams: ConnectionSeams, op: Record<string, unknown>): Promise<RpcReply<ExecuteResult>> {
+    const { runQuery, getEngine, quoteIdent } = seams;
     const table = readTable(op);
     if ("error" in table) return bad(table.error);
     const columns = readColumnDefs(op.columns);
@@ -516,7 +528,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     if (pkCols.length > 0) {
       defs.push(`PRIMARY KEY (${pkCols.map((c) => quoteIdent(c)).join(", ")})`);
     }
-    const sql = `CREATE TABLE ${qualified(table.schema, table.table)} (${defs.join(", ")})`;
+    const sql = `CREATE TABLE ${qualified(quoteIdent, table.schema, table.table)} (${defs.join(", ")})`;
     const result = await runQuery(sql, []);
     // engine is read for placeholder parity / future engine-specific DDL; unused here.
     void engine;
@@ -525,6 +537,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
   /** Verify `pkColumn` is the table's SINGLE primary-key column against the live schema. */
   async function resolveSinglePkTable(
+    getSchema: ConnectionSeams["getSchema"],
     schema: string | undefined,
     table: string,
     pkColumn: string,
@@ -559,18 +572,28 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     if (req.confirmed !== undefined && typeof req.confirmed !== "boolean") {
       return bad("execute 'confirmed' must be a boolean");
     }
+    // The target rides on the request (Story 6.2): a non-null string id, or null/absent
+    // ⇒ the boot connection. Validate its SHAPE before any connection round-trip.
+    if (req.connectionId !== undefined && req.connectionId !== null && typeof req.connectionId !== "string") {
+      return bad("execute 'connectionId' must be a string or null");
+    }
+    const connectionId = (req.connectionId as string | null | undefined) ?? null;
 
     if (req.shape === "raw") {
       if (typeof req.sql !== "string") {
         return bad("raw execute requires a string 'sql'");
       }
-      return executeRaw(req.sql, confirmed);
+      const resolved = resolveConnection(connectionId);
+      if (!resolved.ok) return targetError(resolved.reason);
+      return executeRaw(resolved.seams, req.sql, confirmed);
     }
     if (req.shape === "structured") {
       if (typeof req.op !== "object" || req.op === null || Array.isArray(req.op)) {
         return bad("structured execute requires an 'op' object");
       }
-      return executeStructured(req.op as Record<string, unknown>, confirmed);
+      const resolved = resolveConnection(connectionId);
+      if (!resolved.ok) return targetError(resolved.reason);
+      return executeStructured(resolved.seams, req.op as Record<string, unknown>, confirmed);
     }
     return bad("execute 'shape' must be 'raw' or 'structured'");
   }

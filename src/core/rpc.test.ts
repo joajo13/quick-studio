@@ -49,6 +49,10 @@ function fakeRegistry(): ConnectionRegistry {
       byId.delete(params.id);
       return { ok: true, value: { removed: true } };
     },
+    getStoredUrl: (id) => {
+      const rec = byId.get(id);
+      return rec === undefined ? { kind: "not-found" } : { kind: "found", url: rec.url };
+    },
   };
 }
 

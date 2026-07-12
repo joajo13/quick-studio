@@ -88,6 +88,24 @@ describe("runRawQuery — I/O Matrix", () => {
     expect(rpcMock.mock.calls[1]?.[1]).toEqual({ shape: "raw", sql, confirmed: true });
   });
 
+  test("Re-target (Story 6.2): a non-null connectionId is forwarded inside params; null/absent omits it", async () => {
+    const data = makeData(1);
+    // A set connectionId rides inside the execute params.
+    rpcMock.mockResolvedValueOnce(okReply<ExecuteResult>({ status: "rows", data, truncated: false }));
+    await runRawQuery("select 1", false, "conn-b");
+    expect(rpcMock.mock.calls[0]?.[1]).toEqual({ shape: "raw", sql: "select 1", connectionId: "conn-b" });
+
+    // A confirmed re-run keeps connectionId AND confirmed:true.
+    rpcMock.mockResolvedValueOnce(okReply<ExecuteResult>({ status: "ok", rowsAffected: 1 }));
+    await runRawQuery("delete from t", true, "conn-b");
+    expect(rpcMock.mock.calls[1]?.[1]).toEqual({ shape: "raw", sql: "delete from t", confirmed: true, connectionId: "conn-b" });
+
+    // A null (default/launch) target OMITS the key — byte-identical to the 2-arg form.
+    rpcMock.mockResolvedValueOnce(okReply<ExecuteResult>({ status: "rows", data, truncated: false }));
+    await runRawQuery("select 2", false, null);
+    expect(rpcMock.mock.calls[2]?.[1]).toEqual({ shape: "raw", sql: "select 2" });
+  });
+
   test("Cancel: after a confirmation_required reply, not confirming issues no further request", async () => {
     const sql = "DROP TABLE users";
     rpcMock.mockResolvedValueOnce(

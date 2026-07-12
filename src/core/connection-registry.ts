@@ -53,6 +53,16 @@ export type RegistryResult<T> =
       readonly detail?: string;
     };
 
+/**
+ * A Core-internal id→url lookup outcome (Story 6.2). Kept DISTINCT: `not-found`
+ * (no such saved id) vs `unavailable` (the credential store could not be opened), so
+ * a valid target during a transient store failure is never mislabeled "unknown".
+ */
+export type StoredUrlLookup =
+  | { readonly kind: "found"; readonly url: string }
+  | { readonly kind: "not-found" }
+  | { readonly kind: "unavailable"; readonly detail: string };
+
 /** The live registry handle returned by {@link createConnectionRegistry}. */
 export type ConnectionRegistry = {
   /** All saved connections as credential-free summaries. */
@@ -63,6 +73,14 @@ export type ConnectionRegistry = {
   edit(params: EditConnectionParams): RegistryResult<ConnectionSummary>;
   /** Remove a connection by id. Idempotent: an absent id is still a success. */
   remove(params: RemoveConnectionParams): RegistryResult<RemoveConnectionResult>;
+  /**
+   * Core-INTERNAL id→url resolution for the re-target executor (Story 6.2). This is
+   * the ONLY place a stored url is read back out, and it is NEVER dispatched over RPC
+   * (no `getStoredUrl` handler) — the url stays in Ring 1. Returns a `not-found` for an
+   * unknown id, distinct from a store-open `unavailable`, so a target during a store
+   * blip is not misreported as unknown.
+   */
+  getStoredUrl(id: string): StoredUrlLookup;
 };
 
 /**
@@ -298,6 +316,23 @@ export function createConnectionRegistry(
       const mutation = store.value.deleteConnection(id);
       if (mutation.outcome !== "ok") return writeFailed();
       return { ok: true, value: { removed: true } };
+    },
+
+    getStoredUrl(id) {
+      const store = obtain();
+      if (!store.ok) {
+        // A store-OPEN failure is distinct from an unknown id. Emit the same terse
+        // stderr diagnostic other store-open failures in this module rely on, but never
+        // echo the raw detail to a caller that may put it on the wire — surface only the
+        // safe label so the resolver can classify it `internal_error`, not `not-found`.
+        process.stderr.write(
+          `[connection-registry] getStoredUrl: credential store unavailable (${store.detail ?? "open-failed"})\n`,
+        );
+        return { kind: "unavailable", detail: store.detail ?? "credential store unavailable" };
+      }
+      const record = store.value.getConnection(id);
+      if (record === undefined) return { kind: "not-found" };
+      return { kind: "found", url: record.url };
     },
   };
 }
