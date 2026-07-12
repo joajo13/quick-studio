@@ -104,6 +104,6 @@ development_status:
   epic-6: backlog
   6-1-build-report: done                     # Story 6.1: Build a Report from query results
   6-2-test-to-prod-targeting: done           # Story 6.2: Test-to-production Report targeting
-  6-3-export-static-snapshot: backlog           # Story 6.3: Export as a static Snapshot
+  6-3-export-static-snapshot: done           # Story 6.3: Export as a static Snapshot
   6-4-export-live-report: backlog               # Story 6.4: Export as a Live Report
   epic-6-retrospective: optional

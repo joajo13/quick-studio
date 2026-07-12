@@ -28,6 +28,7 @@ import { createProviderRegistry } from "./provider-registry.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
 import { sandboxBundle } from "./sandbox-bundle.generated.ts";
+import { snapshotBundle } from "./snapshot-bundle.generated.ts";
 import { startSandboxServer, type SandboxServer, type StartSandboxServerOptions } from "./sandbox-server.ts";
 import { planTableRows, readTotal } from "./table-rows.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
@@ -385,6 +386,19 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
       }
       if (req.method === "GET" && url.pathname === "/app.js") {
         return new Response(appJs, {
+          status: 200,
+          headers: {
+            "content-type": "text/javascript; charset=utf-8",
+            "x-content-type-options": "nosniff",
+          },
+        });
+      }
+      // The offline Snapshot runtime (Story 6.3): served from the CORE origin (like
+      // `/app.js`) — open, no token, data-free renderer code. Ring 2 reads it with a
+      // same-origin relative `fetch` at export time and inlines it into the exported file;
+      // it MUST live here (not on the sandbox origin, which sets no CORS headers).
+      if (req.method === "GET" && url.pathname === "/snapshot-runtime.js") {
+        return new Response(snapshotBundle.js, {
           status: 200,
           headers: {
             "content-type": "text/javascript; charset=utf-8",

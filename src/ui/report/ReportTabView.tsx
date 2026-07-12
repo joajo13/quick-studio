@@ -29,6 +29,7 @@ import { DataGrid } from "../data/DataGrid.tsx";
 import { rpc } from "../rpc/client.ts";
 import { ConfirmRun } from "../workspace/ConfirmRun.tsx";
 import { runRawQuery } from "../workspace/run-raw-query.ts";
+import { runExport, triggerHtmlDownload } from "./export-snapshot.ts";
 import { mapChart } from "./report-chart.ts";
 import { renderReportMarkdown } from "./report-markdown.ts";
 import { planRetarget } from "./retarget-plan.ts";
@@ -336,6 +337,49 @@ export function ReportTabView({
    * guard, so rapid A→B→C settles every block on C with none left stuck or showing stale
    * data. Layout (order/prose/chart/view) is untouched — `setReportTarget` never mutates it.
    */
+  // Export-snapshot state (Story 6.3): an in-flight flag (so a double-click cannot launch
+  // overlapping exports/downloads) + a user-visible transient error surface (so a failed
+  // fetch / non-OK response / assembly error is never a silent unhandled rejection and never
+  // welds an error body into the file).
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  // Synchronous in-flight guard: `exporting` state only lands after a re-render, so two
+  // synchronous clicks in one render both see it `false`. The ref is the real correctness
+  // guard against overlapping exports; the state just drives the disabled/label UI.
+  const exportingRef = useRef(false);
+
+  /**
+   * Freeze the CURRENT block results into a self-contained `.html` and download it (Story 6.3).
+   * Reads Ring-2 state only — runs no query, opens no connection. Guards concurrency and wraps
+   * the whole export in try/catch; on failure surfaces a message and downloads NOTHING.
+   */
+  const handleExport = async (): Promise<void> => {
+    if (exportingRef.current) return; // in-flight guard: ignore a synchronous double-click
+    exportingRef.current = true;
+    setExporting(true);
+    setExportError(null);
+    try {
+      await runExport({
+        blocks: stateRef.current.blocks,
+        // Fetch the data-free runtime once, same-origin; a non-OK / empty body throws BEFORE
+        // any assembly, so nothing is ever downloaded on a failed fetch.
+        fetchRuntime: async () => {
+          const res = await fetch("/snapshot-runtime.js");
+          if (!res.ok) throw new Error(`snapshot runtime unavailable (${res.status})`);
+          const js = await res.text();
+          if (js.length === 0) throw new Error("snapshot runtime is empty");
+          return js;
+        },
+        download: triggerHtmlDownload,
+      });
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : "export failed");
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
+  };
+
   const handleRetarget = (target: string | null): void => {
     if (target === stateRef.current.targetConnectionId) return;
     onStateChange((prev) => setReportTarget(prev, target));
@@ -377,6 +421,23 @@ export function ReportTabView({
           ))}
         </select>
         <div className="ml-auto flex items-center gap-2">
+          {/* Quiet ghost/secondary export control (Story 6.3): freezes the current block
+              results into a self-contained .html download. Disabled while an export is in
+              flight so a double-click cannot launch overlapping exports. Never mutates blocks. */}
+          {exportError !== null ? (
+            <span role="alert" className="font-mono text-[11px] lowercase text-red-400">
+              {exportError}
+            </span>
+          ) : null}
+          <button
+            type="button"
+            className={ghostBtn}
+            disabled={exporting}
+            aria-label="export snapshot"
+            onClick={() => void handleExport()}
+          >
+            {exporting ? "exporting…" : "export snapshot"}
+          </button>
           <button type="button" className={btn} onClick={() => onStateChange((prev) => addProseBlock(prev))}>
             + prose
           </button>

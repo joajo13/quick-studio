@@ -12,6 +12,7 @@ dist/
 *.tsbuildinfo
 src/core/ui-bundle.generated.ts
 src/core/sandbox-bundle.generated.ts
+src/core/snapshot-bundle.generated.ts
 
 # Logs
 *.log

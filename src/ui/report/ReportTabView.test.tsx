@@ -51,6 +51,22 @@ describe("ReportTabView", () => {
     expect(html).toContain("+ query");
   });
 
+  test("renders a quiet Export snapshot ghost button", () => {
+    // Story 6.3: the toolbar carries a secondary/ghost export control. Click-driven
+    // fetch/error/download coverage lives in `export-snapshot.test.ts` via `runExport`.
+    const html = renderToStaticMarkup(<ReportTabView state={emptyReport()} onStateChange={() => {}} />);
+    expect(html).toContain('aria-label="export snapshot"');
+    expect(html).toContain("export snapshot");
+  });
+
+  test("a static render never mutates block state (no onStateChange call)", () => {
+    const onStateChange = mock((_next: unknown) => {});
+    let s = addProseBlock(emptyReport());
+    s = addQueryBlock(s);
+    renderToStaticMarkup(<ReportTabView state={s} onStateChange={onStateChange} />);
+    expect(onStateChange).not.toHaveBeenCalled();
+  });
+
   test("renders the re-target picker with the Default (launch connection) option", () => {
     // Story 6.2: the toolbar carries a target picker whose default (value "") is the
     // launch connection = `null`. The saved-connection options are populated by a mount
