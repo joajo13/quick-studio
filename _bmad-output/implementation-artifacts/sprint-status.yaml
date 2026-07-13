@@ -107,3 +107,14 @@ development_status:
   6-3-export-static-snapshot: done           # Story 6.3: Export as a static Snapshot
   6-4-export-live-report: done               # Story 6.4: Export as a Live Report
   epic-6-retrospective: optional
+
+  # Epic 7: UI Redesign — Neutral (ChatGPT look)
+  epic-7: backlog
+  7-1-redesign-shell-neutral: backlog          # Story 7.1: Redesign the workspace shell to neutral — rail, tabs, schema tree, status
+  7-2-redesign-tables-grid-neutral: backlog    # Story 7.2: Redesign the Tables data grid to neutral
+  7-3-redesign-query-confirm-neutral: backlog  # Story 7.3: Redesign the Query editor + destructive confirm to neutral
+  7-4-redesign-erd-neutral: backlog            # Story 7.4: Redesign the ERD to neutral
+  7-5-redesign-chat-neutral: backlog           # Story 7.5: Redesign the AI Chat to neutral
+  7-6-redesign-report-neutral: backlog         # Story 7.6: Redesign the Report to neutral
+  7-7-redesign-settings-neutral: backlog       # Story 7.7: Redesign Settings/Connections to neutral
+  epic-7-retrospective: optional

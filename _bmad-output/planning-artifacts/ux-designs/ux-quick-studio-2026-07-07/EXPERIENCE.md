@@ -10,6 +10,8 @@ sources:
 
 # quick-studio — Experience Spine
 
+> **SUPERSEDED (2026-07-13) — Neutral pivot (Epic 7).** The visual identity has pivoted from the coral/monospace spine to a **neutral, ChatGPT-style** language (ink accent, no coral; color only where functional). The interaction model and IA below still hold; only the visual skin changed. The prototypes in `design-artifacts/*.html` are the current **visual source of truth**, and `DESIGN.md`'s coral rules are historical.
+
 > This EXPERIENCE.md and its paired `DESIGN.md` are the identity. **Both spines win over any mock on conflict**, including the prototype's incidental choices. The prototype `design-artifacts/workspace-prototype.html` is the north star for intent; where a literal mock detail contradicts a rule here, this spec governs. Epic 3 stories (3-1..3-6) and Epic 4 (ERD) reference these behaviors so the React 19 implementation respects the interaction model. Visual tokens are cross-referenced as `{path.to.token}` into DESIGN.md.
 
 ## Foundation

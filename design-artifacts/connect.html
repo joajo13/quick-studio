@@ -42,8 +42,8 @@
     --count:     #7fb3ff;
 
     /* ---- additions for this view: the ONE accent (coral) + err semantics ---- */
-    --coral:      #f2705d;
-    --coral-soft: rgba(242,112,93,0.14);
+    --coral:      #ececec;   /* ink — neutral, was coral */
+    --coral-soft: rgba(255,255,255,0.10);
     --err:        #ef6a63;
     --err-soft:   rgba(239,106,99,0.14);
 
@@ -79,8 +79,8 @@
     --ok-soft:   rgba(26,138,85,0.10);
     --money:     #157a56;
     --count:     #2f6fd6;
-    --coral:      #dd5641;
-    --coral-soft: rgba(221,86,65,0.12);
+    --coral:      #0d0d0d;   /* ink — neutral, was coral */
+    --coral-soft: rgba(0,0,0,0.06);
     --err:        #c23b34;
     --err-soft:   rgba(194,59,52,0.10);
     color-scheme: light;
@@ -94,7 +94,7 @@
       --text:#0d0d0d; --text-dim:#4d4d4d; --text-faint:#767676;
       --ink:#0d0d0d; --ink-btn:#0d0d0d; --ink-btn-fg:#ffffff;
       --ok:#1a8a55; --ok-soft:rgba(26,138,85,0.10); --money:#157a56; --count:#2f6fd6;
-      --coral:#dd5641; --coral-soft:rgba(221,86,65,0.12);
+      --coral:#0d0d0d; --coral-soft:rgba(0,0,0,0.06);
       --err:#c23b34; --err-soft:rgba(194,59,52,0.10);
       color-scheme: light;
     }
@@ -461,7 +461,7 @@
   .engine-card.selected .engine-name { color: var(--coral); }
   .engine-card .check {
     position: absolute; top: 10px; right: 10px; width: 18px; height: 18px;
-    border-radius: 50%; background: var(--coral); color: #fff; display: none; place-items: center;
+    border-radius: 50%; background: var(--coral); color: var(--ink-btn-fg); display: none; place-items: center;
   }
   .engine-card.selected .check { display: grid; }
   .engine-card .check svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 3; }
@@ -530,7 +530,7 @@
   .vault-form { display: flex; gap: 8px; }
   .vault-form .mono-input { flex: 1; }
   .unlock-btn {
-    font-family: var(--sans); font-size: 12.5px; font-weight: 600; color: #fff;
+    font-family: var(--sans); font-size: 12.5px; font-weight: 600; color: var(--ink-btn-fg);
     background: var(--coral); border: none; border-radius: 8px; padding: 0 16px; cursor: pointer;
     transition: filter .12s; flex-shrink: 0;
   }
@@ -553,7 +553,7 @@
     display: flex; flex-direction: column; align-items: center; gap: 8px;
   }
   .connect-btn.primary {
-    font-family: var(--sans); font-size: 14.5px; font-weight: 600; color: #fff;
+    font-family: var(--sans); font-size: 14.5px; font-weight: 600; color: var(--ink-btn-fg);
     background: var(--coral); border: none; border-radius: 24px; padding: 12px 34px; cursor: pointer;
     display: inline-flex; align-items: center; gap: 8px;
     transition: filter .12s, transform .06s;

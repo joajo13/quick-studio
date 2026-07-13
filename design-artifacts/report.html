@@ -51,10 +51,11 @@
     --sql-pun: #8f8f8f;
 
     /* ---- report-specific additions (new tokens; shell tokens above are unchanged) ---- */
-    --rpt-accent:      #f2705d;
-    --rpt-accent-ink:  #0a0a0a;
-    --rpt-accent-soft: rgba(242,112,93,0.14);
-    --rpt-accent-line: rgba(242,112,93,0.45);
+    --rpt-accent:      #ececec;   /* ink — chrome accent, was coral */
+    --rpt-accent-ink:  #0d0d0d;
+    --rpt-accent-soft: rgba(255,255,255,0.10);
+    --rpt-accent-line: rgba(255,255,255,0.28);
+    --rpt-chart:       #82aaff;   /* data-series accent for charts (blue), replaces coral */
     --rpt-warn:        #e0a458;
     --rpt-warn-soft:   rgba(224,164,88,0.14);
     --rpt-err:         #f05a63;
@@ -102,10 +103,11 @@
     --sql-num: #2f6fd6;
     --sql-idn: #0d0d0d;
     --sql-pun: #767676;
-    --rpt-accent:      #dd5641;
+    --rpt-accent:      #0d0d0d;   /* ink — chrome accent, was coral */
     --rpt-accent-ink:  #ffffff;
-    --rpt-accent-soft: rgba(221,86,65,0.10);
-    --rpt-accent-line: rgba(221,86,65,0.40);
+    --rpt-accent-soft: rgba(0,0,0,0.06);
+    --rpt-accent-line: rgba(0,0,0,0.22);
+    --rpt-chart:       #2f6fd6;   /* data-series accent for charts (blue), replaces coral */
     --rpt-warn:        #b3781f;
     --rpt-warn-soft:   rgba(179,120,31,0.12);
     --rpt-err:         #d23b45;
@@ -125,7 +127,7 @@
       --ink:#0d0d0d; --ink-btn:#0d0d0d; --ink-btn-fg:#ffffff;
       --ok:#1a8a55; --ok-soft:rgba(26,138,85,0.10); --money:#157a56; --count:#2f6fd6;
       --sql-kw:#c2334a; --sql-fn:#7a3fb8; --sql-str:#1f7a3f; --sql-num:#2f6fd6; --sql-idn:#0d0d0d; --sql-pun:#767676;
-      --rpt-accent:#dd5641; --rpt-accent-ink:#ffffff; --rpt-accent-soft:rgba(221,86,65,0.10); --rpt-accent-line:rgba(221,86,65,0.40);
+      --rpt-accent:#0d0d0d; --rpt-accent-ink:#ffffff; --rpt-accent-soft:rgba(0,0,0,0.06); --rpt-accent-line:rgba(0,0,0,0.22); --rpt-chart:#2f6fd6;
       --rpt-warn:#b3781f; --rpt-warn-soft:rgba(179,120,31,0.12); --rpt-err:#d23b45; --rpt-err-soft:rgba(210,59,69,0.10);
       --t-int:#2f6fd6; --t-time:#7d54cf; --t-num:#1a9b8c;
       color-scheme: light;
@@ -998,13 +1000,13 @@
                 <span class="rcard-meta">Lun 29 – Dom 05 · $</span>
               </div>
               <div class="rlegend">
-                <span class="li"><span class="sw" style="background:var(--rpt-accent)"></span>revenue diario</span>
+                <span class="li"><span class="sw" style="background:var(--rpt-chart)"></span>revenue diario</span>
               </div>
               <svg class="rchart-svg" viewBox="0 0 590 190" role="img" aria-label="Revenue over time area chart">
                 <defs>
                   <linearGradient id="revFill" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stop-color="var(--rpt-accent)" stop-opacity="0.28"/>
-                    <stop offset="100%" stop-color="var(--rpt-accent)" stop-opacity="0.02"/>
+                    <stop offset="0%" stop-color="var(--rpt-chart)" stop-opacity="0.28"/>
+                    <stop offset="100%" stop-color="var(--rpt-chart)" stop-opacity="0.02"/>
                   </linearGradient>
                 </defs>
                 <g>
@@ -1020,7 +1022,7 @@
                   <text class="rax" x="37" y="163" text-anchor="end">0</text>
                 </g>
                 <path id="revArea" fill="url(#revFill)" stroke="none"></path>
-                <path id="revLine" fill="none" stroke="var(--rpt-accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>
+                <path id="revLine" fill="none" stroke="var(--rpt-chart)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"></path>
                 <g id="revDots"></g>
                 <g id="revXLabels"></g>
               </svg>
@@ -1033,7 +1035,7 @@
                 <span class="rcard-meta">unidades por día</span>
               </div>
               <div class="rlegend">
-                <span class="li"><span class="sw" style="background:var(--rpt-accent)"></span>órdenes pagas</span>
+                <span class="li"><span class="sw" style="background:var(--rpt-chart)"></span>órdenes pagas</span>
               </div>
               <svg class="rchart-svg" viewBox="0 0 590 190" role="img" aria-label="Orders by day bar chart">
                 <g>
@@ -1187,7 +1189,7 @@
     rRevenue.forEach((v, i) => {
       const x = xAt(i), y = yAt(v);
       d += (i === 0 ? "M" : "L") + x.toFixed(1) + " " + y.toFixed(1) + " ";
-      dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8" fill="var(--bg)" stroke="var(--rpt-accent)" stroke-width="1.8"/>`;
+      dots += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="2.8" fill="var(--bg)" stroke="var(--rpt-chart)" stroke-width="1.8"/>`;
       xl += `<text class="rax" x="${x.toFixed(1)}" y="176" text-anchor="middle">${rDays[i].split(" ")[0]}</text>`;
     });
     document.getElementById("revLine").setAttribute("d", d.trim());
@@ -1204,7 +1206,7 @@
     rOrders.forEach((v, i) => {
       const gx = ax0 + i * groupW + groupW / 2;
       const h = (ayBase - ayTop) * (v / max);
-      bh += `<rect x="${(gx - barW / 2).toFixed(1)}" y="${(ayBase - h).toFixed(1)}" width="${barW}" height="${h.toFixed(1)}" rx="3" fill="var(--rpt-accent)"/>`;
+      bh += `<rect x="${(gx - barW / 2).toFixed(1)}" y="${(ayBase - h).toFixed(1)}" width="${barW}" height="${h.toFixed(1)}" rx="3" fill="var(--rpt-chart)"/>`;
       bh += `<text class="rbarlbl" x="${gx.toFixed(1)}" y="${(ayBase - h - 6).toFixed(1)}" text-anchor="middle">${v}</text>`;
       bh += `<text class="rax" x="${gx.toFixed(1)}" y="176" text-anchor="middle">${rDays[i].split(" ")[0]}</text>`;
     });

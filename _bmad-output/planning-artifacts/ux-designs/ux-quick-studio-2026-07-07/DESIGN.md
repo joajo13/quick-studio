@@ -214,6 +214,8 @@ components:
 
 # quick-studio — Design Spine
 
+> **SUPERSEDED (2026-07-13) — Neutral pivot (Epic 7).** The coral accent + monospace-first rules described below are historical. The UI has pivoted to a **neutral, ChatGPT-style** language: the accent is **ink** (white/black), **no coral**; color is kept only where functional (data-type column colors, ok/warn/err semantics, a blue chart data-series, red on destructive actions). The prototypes in `design-artifacts/*.html` are the current **visual source of truth**. Where any coral/mono rule below conflicts with the neutral pivot, the pivot wins.
+
 > This DESIGN.md and its paired EXPERIENCE.md are the identity. **Both spines win over any mock on conflict** (including the prototype's incidental choices). The prototype `design-artifacts/workspace-prototype.html` is the north star for *intent and tokens*; where a literal mock detail contradicts a rule stated here, this spec governs. Epic 3 stories (3-1..3-6) and Epic 4 (ERD) reference these tokens so the React 19 + Tailwind v4 (config-less) implementation respects the aesthetic. Written for the dev who implements: token names map to CSS custom properties in `src/ui/styles/globals.css`.
 
 ## Brand & Style

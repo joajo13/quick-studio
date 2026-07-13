@@ -775,3 +775,119 @@ So that the report stays current without me rebuilding it (UJ-4).
 **Given** a Live Report
 **When** it is opened without a running quick-studio to authorize it
 **Then** it cannot reach any database on its own
+
+## Epic 7: UI Redesign — Neutral (ChatGPT look)
+
+> **Pivot.** The whole UI moves from the coral/monospace "TablePlus" spine to a neutral, ChatGPT-style language: near-black surfaces, an **ink** (white/black) accent, **no coral**. Color is kept ONLY where it is functional — data-type column colors, ok/warn/err state semantics, a blue chart data-series, and red on destructive actions. The prototypes in `design-artifacts/*.html` are the **visual source of truth** for every story here and **supersede** any coral rule still described in DESIGN.md/EXPERIENCE.md (being rewritten separately). `src/ui/styles/globals.css` already carries the neutral tokens (`--coral` is now ink `#ececec`). Each story **ports the prototype's look** onto the existing React components while preserving all logic, RPC contracts, and passing tests — presentation only.
+
+### Story 7.1: Redesign the workspace shell to neutral — rail, tabs, schema tree, status
+
+As a user,
+I want the app shell to match the neutral prototype,
+So that the rail, tabs, tree and status read like a finished tool, not a skeleton.
+
+**Acceptance Criteria:**
+
+**Given** the app is open
+**When** I look at the launcher rail
+**Then** it shows a compact vertical icon rail (brand mark + Tables/Query/ERD/Chat/Report and a pinned Settings) with no clipped or wrapped text, matching `design-artifacts/workspace.html` and `ai-chat-chatgpt.html`
+
+**Given** open tabs
+**When** I view the tab strip and left region
+**Then** tabs use the neutral Chrome-tab look (active tab fused into the content panel, close ×, new-tab +), and the schema tree + status bar match the prototype (mono, ink accent, connection dot, no coral)
+
+### Story 7.2: Redesign the Tables data grid to neutral
+
+As a developer,
+I want the Tables grid to match the neutral prototype,
+So that browsing data feels polished, not raw.
+
+**Acceptance Criteria:**
+
+**Given** a table open in a data tab
+**When** I view its rows
+**Then** the grid matches `design-artifacts/workspace.html`: mono type-colored headers with a PK key-icon, tabular-nums numeric cells right-aligned, status/bool rendered as pills, money/amount columns formatted for humans, NULL faint-italic, zebra rows, hover/selection in ink — no coral
+
+**Given** the result area
+**When** I use it
+**Then** a live client-side row filter, a row-count·latency readout, Export/Add-Row ghost buttons, and Prev/Next pagination are present and styled per the prototype, without changing the existing `table.rows`/mutation RPC behavior
+
+### Story 7.3: Redesign the Query editor + destructive confirm to neutral
+
+As a developer,
+I want the Query editor and destructive-confirm dialog to match the neutral prototypes,
+So that writing SQL and confirming dangerous actions feel consistent and calm.
+
+**Acceptance Criteria:**
+
+**Given** the Query tab
+**When** I edit SQL
+**Then** it shows neutral type-colored syntax highlighting and a Run control in the ink style per `design-artifacts/workspace.html` — the run (⌘↵) and guarded-execute RPC behavior unchanged
+
+**Given** a destructive statement
+**When** the confirmation appears
+**Then** it matches `design-artifacts/confirm-destructive.html`: no top color line, red only on functional bits (icon, affected-rows badge, statement border, confirm button), a neutral modal frame, a concise one-line description, the dependent-FK line, and type-to-confirm — the Core executor remaining the real gate
+
+### Story 7.4: Redesign the ERD to neutral
+
+As a developer,
+I want the ERD to match the neutral prototype,
+So that the diagram reads clearly with type-coded columns and clean relations.
+
+**Acceptance Criteria:**
+
+**Given** the ERD tab on a connected schema
+**When** it renders
+**Then** table nodes match `design-artifacts/erd.html`: card header with table name (mono) + row count, columns with PK (ink key) and FK (blue link) markers and type-colored type labels, FK relations drawn as edges, on a neutral canvas — no coral
+
+**Given** the ERD
+**When** I interact
+**Then** pan, zoom-to-cursor, drag-a-table (edges follow), and hover-to-highlight-relations are styled per the prototype, preserving the existing layout-persistence behavior
+
+### Story 7.5: Redesign the AI Chat to neutral
+
+As a user,
+I want the AI Chat to match the neutral prototype,
+So that the conversation reads like the ChatGPT-style mold we chose.
+
+**Acceptance Criteria:**
+
+**Given** the Chat tab
+**When** I view a turn
+**Then** it matches `design-artifacts/ai-chat-chatgpt.html`: right-aligned grey user bubble, a collapsible reasoning channel, a generated-SQL block, inline KPIs + mini result table, an action row, and the ink composer pill with the "schema only — no rows leave the Core" note — no coral
+
+**Given** streaming
+**When** the assistant responds
+**Then** the streaming caret + reasoning treatment match the prototype without changing the schema-only Provider/sandbox RPC behavior
+
+### Story 7.6: Redesign the Report to neutral
+
+As a developer,
+I want the Report to match the neutral prototype,
+So that reports look like clean, exportable dashboards.
+
+**Acceptance Criteria:**
+
+**Given** a built report
+**When** I view it
+**Then** it matches `design-artifacts/report.html`: KPI cards with ok/err deltas, charts drawn with a blue data-series (not coral), a results table with type-colored headers and status pills, and Export snapshot / Export live in the ink style — no coral
+
+**Given** charts
+**When** they render
+**Then** they use the neutral chart accent and preserve the existing report-state / export-snapshot / export-live behavior
+
+### Story 7.7: Redesign Settings/Connections to neutral
+
+As a user,
+I want Settings/Connections to match the neutral prototype,
+So that connecting and managing credentials feels consistent.
+
+**Acceptance Criteria:**
+
+**Given** the Connections settings
+**When** I add or edit a connection
+**Then** it matches `design-artifacts/connect.html`: engine picker with an ink selected-state, form fields, Test-connection with ok/err result, and the encrypted credential-store panel — the primary/Connect button in ink with legible text, no coral and no white-on-white
+
+**Given** the Providers settings
+**When** I view them
+**Then** they follow the same neutral language, preserving the existing connection/provider RPC + credential-store behavior

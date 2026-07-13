@@ -718,11 +718,10 @@
     width: 100%; max-width: 480px;
     background: var(--bg);
     border-radius: 12px;
-    box-shadow: 0 24px 70px -14px rgba(0,0,0,.55), 0 0 0 1px var(--err-line);
+    box-shadow: 0 24px 70px -14px rgba(0,0,0,.55), 0 0 0 1px var(--border-2);
     overflow: hidden;
     animation: dx-lift .16s ease;
   }
-  .dx-rule-top { height: 2px; background: linear-gradient(90deg, var(--err), transparent); }
 
   .dx-modal-head { display: flex; align-items: flex-start; gap: 13px; padding: 18px 20px 14px; }
   .dx-danger-ico {
@@ -732,7 +731,7 @@
   .dx-danger-ico svg { width: 19px; height: 19px; }
   .dx-htext { min-width: 0; }
   .dx-title { font-family: var(--sans); font-size: 16px; font-weight: 650; letter-spacing: -.01em; color: var(--text); margin: 1px 0 4px; }
-  .dx-title .dx-mono { color: var(--err); font-size: 15px; }
+  .dx-title .dx-mono { color: var(--text); font-size: 15px; }
   .dx-sub { font-family: var(--sans); font-size: 12.5px; color: var(--text-dim); line-height: 1.55; }
   .dx-sub b { color: var(--text); font-weight: 600; }
 
@@ -871,6 +870,10 @@
   button:focus-visible.dx-btn, button:focus-visible.dx-undo, .dx-ttc input:focus-visible {
     outline: none; box-shadow: 0 0 0 1px var(--bg), 0 0 0 3px var(--err-line);
   }
+  /* The shell's generic `button:focus-visible` forces border-radius:8px. The modal
+     focuses Cancel on open, so without this the 20px pill squares off until focus
+     moves. Pin the pill radius during focus so it never changes shape. */
+  button:focus-visible.dx-btn { border-radius: 20px; }
 
   @media (prefers-reduced-motion: reduce) {
     .dx-scrim, .dx-modal, .dx-toast { animation: none !important; }
@@ -1164,14 +1167,13 @@
 <!-- ============ DESTRUCTIVE CONFIRMATION MODAL (DROP / TRUNCATE — guarded path) ============ -->
 <div class="dx-scrim" id="dx-scrim">
   <div class="dx-modal" role="alertdialog" aria-modal="true" aria-labelledby="dx-title" aria-describedby="dx-sub">
-    <div class="dx-rule-top"></div>
     <div class="dx-modal-head">
       <div class="dx-danger-ico" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3.2 1.8 20.4h20.4z"/><path d="M12 9.5v5" stroke-linecap="round"/><circle cx="12" cy="17.7" r=".2" stroke-width="2.2"/></svg>
       </div>
       <div class="dx-htext">
         <div class="dx-title" id="dx-title">Drop table <span class="dx-mono">public.orders</span>?</div>
-        <div class="dx-sub" id="dx-sub"><b>DROP TABLE</b> removes the table, every row in it, and its indexes. This is irreversible from quick-studio and breaks 1 dependent foreign key.</div>
+        <div class="dx-sub" id="dx-sub">Irreversible — removes the table, its rows and its indexes.</div>
       </div>
     </div>
 
@@ -1189,11 +1191,6 @@
           <span class="dx-arrow dx-mono">→ FK →</span>
           <span class="dx-mono">orders.id</span>
         </div>
-      </div>
-
-      <div class="dx-note">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><path d="M12 3l7 3v5c0 4.2-2.8 7.6-7 9-4.2-1.4-7-4.8-7-9V6z"/><path d="M9 12l2 2 4-4" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <span>guarded by Core executor · <b>default-deny</b> — this dialog is a heads-up, the Core is the real gate</span>
       </div>
 
       <!-- escalated friction: type-to-confirm for DROP / TRUNCATE -->
@@ -1309,7 +1306,7 @@
   const DX_CONFIGS = {
     drop: {
       title: `Drop table <span class="dx-mono">public.orders</span>?`,
-      sub: `<b>DROP TABLE</b> removes the table, every row in it, and its indexes. This is irreversible from quick-studio and breaks 1 dependent foreign key.`,
+      sub: `Irreversible — removes the table, its rows and its indexes.`,
       stmt: `<span class="dngr">DROP TABLE</span> <span class="idn">public.orders</span><span class="pun">;</span>`,
       affected: 142,
       affectedUnit: "rows destroyed",
@@ -1318,7 +1315,7 @@
     },
     truncate: {
       title: `Truncate <span class="dx-mono">public.sessions</span>?`,
-      sub: `<b>TRUNCATE</b> empties the table in place. Faster than DELETE, but just as irreversible from quick-studio.`,
+      sub: `Irreversible — empties the table in place, faster than DELETE.`,
       stmt: `<span class="dngr">TRUNCATE TABLE</span> <span class="idn">public.sessions</span><span class="pun">;</span>`,
       affected: 1204,
       affectedUnit: "rows destroyed",

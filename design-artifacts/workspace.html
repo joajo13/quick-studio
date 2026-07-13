@@ -672,10 +672,10 @@
      no accent color by design ("no coral") — the workspace needs one.
      ============================================================ */
   :root {
-    --accent:      #f2705d;
-    --accent-ink:  #0a0a0a;
-    --accent-soft: rgba(242,112,93,0.14);
-    --accent-line: rgba(242,112,93,0.45);
+    --accent:      #ececec;   /* ink — neutral, was coral */
+    --accent-ink:  #0d0d0d;
+    --accent-soft: rgba(255,255,255,0.10);
+    --accent-line: rgba(255,255,255,0.28);
     --t-int:  #6ba5ff;
     --t-time: #b18cff;
     --t-bool: #e0a458;
@@ -688,10 +688,10 @@
     --err-soft:  rgba(240,90,99,0.13);
   }
   :root[data-theme="light"] {
-    --accent:      #dd5641;
+    --accent:      #0d0d0d;   /* ink — neutral, was coral */
     --accent-ink:  #ffffff;
-    --accent-soft: rgba(221,86,65,0.10);
-    --accent-line: rgba(221,86,65,0.40);
+    --accent-soft: rgba(0,0,0,0.06);
+    --accent-line: rgba(0,0,0,0.22);
     --t-int:  #2f6fd6;
     --t-time: #7d54cf;
     --t-bool: #b3781f;
@@ -703,7 +703,7 @@
   }
   @media (prefers-color-scheme: light) {
     :root:not([data-theme="dark"]) {
-      --accent:#dd5641; --accent-ink:#ffffff; --accent-soft:rgba(221,86,65,0.10); --accent-line:rgba(221,86,65,0.40);
+      --accent:#0d0d0d; --accent-ink:#ffffff; --accent-soft:rgba(0,0,0,0.06); --accent-line:rgba(0,0,0,0.22);
       --t-int:#2f6fd6; --t-time:#7d54cf; --t-bool:#b3781f; --t-json:#1a9b8c;
       --warn:#b3781f; --warn-soft:rgba(179,120,31,0.12); --err:#d23b45; --err-soft:rgba(210,59,69,0.10);
     }
