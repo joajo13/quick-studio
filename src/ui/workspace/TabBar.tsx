@@ -4,9 +4,49 @@
  * Renders the strip of open Tabs with an active highlight and a per-Tab close
  * control. Clicking a Tab activates it; clicking its close button removes it
  * (FR-23). Renders nothing when no Tabs are open.
+ *
+ * Epic 7 restyle: Chrome-style rounded-top tabs (`design-artifacts/workspace.html`
+ * `.tab`/`.tab.on`) with a per-kind leading icon; the active tab shares the
+ * content panel's surface (`bg-card`) and pulls down a hairline (`-mb-px`) so it
+ * visually fuses with the panel below. Presentation only: every ARIA role, the
+ * close button's `aria-label`, and all handlers are unchanged.
  */
 
-import type { WorkspaceState } from "./workspace-state.ts";
+import type { TabKind, WorkspaceState } from "./workspace-state.ts";
+
+/** Per-kind leading tab icon (mirrors the launcher rail's icon set). */
+const TAB_ICON: Readonly<Record<TabKind, React.JSX.Element>> = {
+  table: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="3" y="4" width="18" height="16" rx="1.5" />
+      <path d="M3 9h18M9 9v11" />
+    </svg>
+  ),
+  query: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M6 8l4 4-4 4M12.5 16H18" />
+    </svg>
+  ),
+  erd: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="3" y="3" width="7" height="6" rx="1" />
+      <rect x="14" y="15" width="7" height="6" rx="1" />
+      <path d="M6.5 9v4a2 2 0 0 0 2 2h5.5" />
+    </svg>
+  ),
+  chat: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M4 5h16v11H9l-4 3.5V16H4z" />
+      <path d="M9 10.5h.01M12.5 10.5h.01M16 10.5h.01" />
+    </svg>
+  ),
+  report: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="5" y="3" width="14" height="18" rx="1.5" />
+      <path d="M9 8h6M9 12h6M9 16h3" />
+    </svg>
+  ),
+};
 
 export function TabBar({
   state,
@@ -25,7 +65,7 @@ export function TabBar({
     <div
       role="tablist"
       aria-label="Open tabs"
-      className="flex shrink-0 items-stretch gap-1 overflow-x-auto border-b border-border bg-card px-2 pt-2"
+      className="flex shrink-0 items-end gap-0.5 overflow-x-auto px-1"
     >
       {state.tabs.map((tab) => {
         const active = tab.id === state.activeTabId;
@@ -48,12 +88,15 @@ export function TabBar({
               }
             }}
             className={[
-              "group flex cursor-pointer select-none items-center gap-2 rounded-t-[var(--radius)] border border-b-0 px-3 py-1.5 text-sm transition-colors",
+              "group relative mx-1 flex h-9 shrink-0 cursor-pointer select-none items-center gap-2 rounded-t-xl px-3.5 text-xs transition-colors",
               active
-                ? "border-border bg-background text-foreground"
-                : "border-transparent bg-transparent text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                ? "-mb-px h-[37px] bg-card text-foreground"
+                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
             ].join(" ")}
           >
+            <span aria-hidden className="h-[13px] w-[13px] shrink-0 opacity-85">
+              {TAB_ICON[tab.kind]}
+            </span>
             <span className="whitespace-nowrap">{tab.title}</span>
             <button
               type="button"
@@ -63,7 +106,7 @@ export function TabBar({
                 e.stopPropagation();
                 onClose(tab.id);
               }}
-              className="flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-70 transition hover:bg-border hover:text-foreground hover:opacity-100"
+              className="flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-70 transition hover:bg-accent hover:text-foreground hover:opacity-100"
             >
               ×
             </button>

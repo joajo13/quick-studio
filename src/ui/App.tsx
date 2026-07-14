@@ -151,14 +151,11 @@ async function callShutdown(): Promise<Status> {
 }
 
 function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element {
+  // Neutral status-bar segment (prototype `.statusbar .seg` / `.rail-status .sdot`):
+  // green `--ok` when connected, red when errored, muted for stopped AND loading —
+  // color is spent only where it is functional, never as decoration.
   const dotColor =
-    status.phase === "ok"
-      ? "bg-emerald-500"
-      : status.phase === "error"
-        ? "bg-red-500"
-        : status.phase === "stopped"
-          ? "bg-muted-foreground"
-          : "bg-amber-500";
+    status.phase === "ok" ? "bg-ok" : status.phase === "error" ? "bg-red-500" : "bg-muted-foreground";
 
   const label =
     status.phase === "loading"
@@ -176,9 +173,9 @@ function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element 
     <div
       data-testid="health"
       title={title}
-      className="flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1 text-xs text-muted-foreground"
+      className="inline-flex items-center gap-1.5 font-mono text-[10.5px] text-muted-foreground"
     >
-      <span className={`inline-block h-2 w-2 rounded-full ${dotColor}`} aria-hidden />
+      <span className={`inline-block h-1.5 w-1.5 shrink-0 rounded-full ${dotColor}`} aria-hidden />
       <span>{label}</span>
     </div>
   );

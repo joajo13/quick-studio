@@ -47,6 +47,51 @@
   --label-size: 10.5px; /* uppercase tracked section/type labels */
   --tree-width: 232px; /* schema-tree column width */
   --focus-ring: #ececec; /* 2px ink :focus-visible outline */
+
+  /* ---- Epic 7 neutral shell: the ONE functional color to add — connection-status
+     green, matching design-artifacts/workspace.html `--ok`/`--ok-soft`. Everything
+     else the shell needs (near-black surfaces, destructive red) already exists above
+     as `--background`/`--card`/the Tailwind `red-*` scale used elsewhere in the UI. */
+  --ok: #3fbf7f; /* connection-status green (rail/status-bar dot) */
+  --ok-soft: rgba(63, 191, 127, 0.12); /* soft halo behind the --ok dot */
+}
+
+/* Light theme: overrides for the same tokens, activated ONLY via an explicit
+ * data-theme="light" (no OS-preference auto-activation — the app is mid-redesign
+ * and only this shell is neutral so far; auto-flipping to light for light-OS
+ * users would break not-yet-redesigned surfaces). Values ported from
+ * design-artifacts/workspace.html's `:root[data-theme="light"]` block, remapped
+ * onto this file's own token names. Dark stays the default — nothing above this
+ * block changes. */
+:root[data-theme="light"] {
+  --background: hsl(0 0% 100%);
+  --foreground: hsl(224 14% 9%);
+  --card: hsl(0 0% 97%);
+  --card-foreground: hsl(224 14% 9%);
+  --border: hsl(220 13% 90%);
+  --muted: hsl(220 10% 94%);
+  --muted-foreground: hsl(215 12% 40%);
+  --primary: hsl(217 70% 50%);
+  --primary-foreground: hsl(210 40% 98%);
+  --accent: hsl(223 10% 92%);
+  --accent-foreground: hsl(224 14% 9%);
+
+  /* ---- Story 3.2 design tokens, light values ---- */
+  --coral: #0d0d0d; /* ink accent — dark ink reads on light surfaces */
+  --coral-ink: #ffffff; /* light text on the filled ink accent */
+  --coral-soft: rgba(0, 0, 0, 0.06); /* ink tint for hover/selected */
+  --coral-line: rgba(0, 0, 0, 0.22);
+  --t-int: #2f6fd6;
+  --t-time: #7d54cf;
+  --t-bool: #b3781f;
+  --t-json: #1a9b8c;
+  --t-text: #5b6472;
+  --t-key: #0d0d0d;
+  --focus-ring: #0d0d0d; /* 2px ink :focus-visible outline on light surfaces */
+
+  /* ---- Epic 7 neutral shell, light value ---- */
+  --ok: #1a8a55; /* connection-status green (rail/status-bar dot) */
+  --ok-soft: rgba(26, 138, 85, 0.1); /* soft halo behind the --ok dot */
 }
 
 /* Map design tokens onto Tailwind's color scale so utilities resolve them. */
@@ -78,6 +123,10 @@
   --color-t-text: var(--t-text);
   --color-t-key: var(--t-key);
   --font-mono: var(--font-mono-stack);
+
+  /* Epic 7: `text-ok` / `bg-ok` / `bg-ok-soft` for the connection-status dot. */
+  --color-ok: var(--ok);
+  --color-ok-soft: var(--ok-soft);
 }
 
 /* Coral focus ring on every interactive element (DESIGN.md focus-ring). */

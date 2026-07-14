@@ -373,3 +373,21 @@ location: `src/live-report/runtime.ts` (`runLiveReport`, `runAll`, `loadConnecti
 severity: low
 reason: `src/live-report/runtime.ts` `runLiveReport` calls `loadConnections` once and `host.setStatus(CANNOT_REACH_HTML)` on failure; `runAll` (wired to both the picker and Refresh) only re-issues `execute` per query block — it never re-attempts `loadConnections`, clears the top-level status, nor rebuilds the picker. So recovered data is shown beneath a contradictory failure notice with named connections missing until a full page reload. Trigger is narrow (connections.list fails at load, Core recovers, viewer clicks Refresh) and data stays correct with full-reload recovery, so consequence is low/cosmetic; the correct fix is a re-entrant connection-reload + replaceable-picker refactor (must preserve the run-generation concurrency guard and the current pick), disproportionate to jam into an unattended follow-up review — deferred for focused attention.
 status: open
+
+### DW-53: No dedicated component tests exercise the workspace shell (`Workspace`/`TabBar`/`SchemaTree`/`App`), so its roles, aria, and `data-testid`s ship without a regression net
+
+origin: review of spec-7-1-redesign-shell-neutral.md, 2026-07-14
+source_spec: `spec-7-1-redesign-shell-neutral.md`
+location: `src/ui/workspace/TabBar.tsx`, `src/ui/schema/SchemaTree.tsx`, `src/ui/workspace/Workspace.tsx`, `src/ui/App.tsx`
+severity: low
+reason: The shell's `role="tab"`/`aria-selected`/`aria-pressed`/`aria-label="Schema tables"` and the `health`/`settings-toggle`/`create-table-toggle`/`exposure-banner` testids are load-bearing for a11y and were preserved as a hard constraint, but no `*.test.tsx` renders these four components — they are asserted nowhere. The story's "keep every passing test green" only covers unrelated suites (ChatTabView/QueryTabView/ErdTabView/ReportTabView/ConfirmRun/etc.), so the activation/disclosure semantics, the connection-status dot, and the light-theme flip could all regress unnoticed. Pre-existing gap surfaced by this review; adding shell render tests is worthwhile focused work, not part of a presentation-only pass.
+status: open
+
+### DW-54: The shell's destructive/error reds are hardcoded dark-tuned Tailwind classes (`text-red-400`/`bg-red-500`/`bg-red-500/10`) that do not flip under `:root[data-theme="light"]`, so on the new light theme they render low-contrast on white surfaces — tokenize them (e.g. a themed `--destructive`/`--err` pair) when the light theme is completed across Epic 7
+
+origin: review of spec-7-1-redesign-shell-neutral.md, 2026-07-14 (follow-up review pass)
+source_spec: `spec-7-1-redesign-shell-neutral.md`
+location: `src/ui/App.tsx` (ConnectionIndicator error dot), `src/ui/schema/SchemaTree.tsx` (`role="alert"` error text + conn-row error dot), `src/ui/workspace/Workspace.tsx` (status-bar Stop, ExposureBanner)
+severity: low
+reason: The neutral shell keeps the pre-existing Tailwind `red-400`/`red-500` scale for functional destructive/error color (spec-sanctioned: "the Tailwind red-* scale used elsewhere in the UI"), and the new `:root[data-theme="light"]` block added in this story flips surfaces/ink/type-colors but NOT these reds. On light surfaces a dark-theme-tuned `red-400` foreground reads at reduced contrast. Latent today: light theme has no toggle UI and is an explicitly-incomplete, mid-Epic-7 surface (documented residual risk in this spec's Verification). The durable fix is a themed destructive/err token pair swapped in for the hardcoded classes, done as part of completing the light theme across the remaining Epic 7 surfaces — out of scope for a presentation-only shell pass.
+status: open

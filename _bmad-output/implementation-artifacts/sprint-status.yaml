@@ -109,8 +109,8 @@ development_status:
   epic-6-retrospective: optional
 
   # Epic 7: UI Redesign — Neutral (ChatGPT look)
-  epic-7: backlog
-  7-1-redesign-shell-neutral: backlog          # Story 7.1: Redesign the workspace shell to neutral — rail, tabs, schema tree, status
+  epic-7: in-progress
+  7-1-redesign-shell-neutral: done             # Story 7.1: Redesign the workspace shell to neutral — rail, tabs, schema tree, status
   7-2-redesign-tables-grid-neutral: backlog    # Story 7.2: Redesign the Tables data grid to neutral
   7-3-redesign-query-confirm-neutral: backlog  # Story 7.3: Redesign the Query editor + destructive confirm to neutral
   7-4-redesign-erd-neutral: backlog            # Story 7.4: Redesign the ERD to neutral

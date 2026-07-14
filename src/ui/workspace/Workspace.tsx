@@ -25,7 +25,9 @@ import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
 import { TAB_KINDS, type TabKind, type WorkspaceState } from "./workspace-state.ts";
 
-/** Launcher-rail labels per kind. */
+/** Launcher-rail tooltip/aria-label per kind — every rail button opens a NEW tab of
+ * that kind, so the (now icon-only) button keeps its accurate "New …" wording as its
+ * `title`/`aria-label` rather than a visible clipped label (Epic 7). */
 const LAUNCH_LABEL: Readonly<Record<TabKind, string>> = {
   table: "New table",
   query: "New query",
@@ -34,10 +36,49 @@ const LAUNCH_LABEL: Readonly<Record<TabKind, string>> = {
   report: "New report",
 };
 
+/** Per-kind rail icon (also reused by `TabBar`'s per-tab leading icon). */
+const KIND_ICON: Readonly<Record<TabKind, React.JSX.Element>> = {
+  table: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <rect x="3" y="4" width="18" height="16" rx="1.5" />
+      <path d="M3 9h18M3 14.5h18M9 9v11M15 9v11" />
+    </svg>
+  ),
+  query: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <path d="M6 8l4 4-4 4M12.5 16H18" />
+      <rect x="2.5" y="4" width="19" height="16" rx="2" />
+    </svg>
+  ),
+  erd: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <rect x="3" y="3" width="7" height="6" rx="1" />
+      <rect x="14" y="15" width="7" height="6" rx="1" />
+      <path d="M6.5 9v4a2 2 0 0 0 2 2h5.5" />
+    </svg>
+  ),
+  chat: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <path d="M4 5h16v11H9l-4 3.5V16H4z" />
+      <path d="M9 10.5h.01M12.5 10.5h.01M16 10.5h.01" />
+    </svg>
+  ),
+  report: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <rect x="5" y="3" width="14" height="18" rx="1.5" />
+      <path d="M9 8h6M9 12h6M9 16h3" />
+    </svg>
+  ),
+};
+
 /**
- * The launcher rail: new-Tab buttons at the top and a bottom-PINNED Settings
- * toggle (a rail control, NOT a `TabKind`). The Settings control opens the
- * Settings surface that hosts Connections management (Story 2.4).
+ * The launcher rail: a pure-black icon-only column (prototype `.rail`) — the brand
+ * mark, an icon button per `TabKind` (tooltipped via `title`/`aria-label`, no clipped
+ * text), and a bottom-pinned create-table + Settings toggle. (The authoritative,
+ * text-bearing connection status lives in the status bar, not on the rail.) The
+ * Settings control opens the Settings surface that hosts Connections
+ * management (Story 2.4); create-table opens the `CreateTablePanel` (Story 3.4). Both
+ * toggles keep their exact `data-testid`/`aria-pressed` contract.
  */
 function LauncherRail({
   onOpen,
@@ -53,35 +94,49 @@ function LauncherRail({
   onToggleCreate: () => void;
 }): React.JSX.Element {
   return (
-    <nav aria-label="Open a new tab" className="flex h-full flex-col gap-1 p-2">
-      <div className="px-2 pb-1 pt-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        Launcher
+    <nav aria-label="Open a new tab" className="flex h-full flex-col items-center gap-0.5 bg-background py-2.5">
+      <div
+        role="img"
+        aria-label="quick-studio"
+        title="quick-studio"
+        className="mb-3 flex h-[30px] w-[30px] shrink-0 items-center justify-center rounded-lg bg-foreground font-mono text-[15px] font-bold text-background"
+      >
+        q
       </div>
+
       {TAB_KINDS.map((kind) => (
         <button
           key={kind}
           type="button"
+          title={LAUNCH_LABEL[kind]}
+          aria-label={LAUNCH_LABEL[kind]}
           onClick={() => onOpen(kind)}
-          className="flex items-center rounded-[var(--radius)] px-3 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
-          {LAUNCH_LABEL[kind]}
+          <span aria-hidden className="h-[18px] w-[18px]">
+            {KIND_ICON[kind]}
+          </span>
         </button>
       ))}
 
+      <div className="flex-1" />
+
       {/* Create-table control (Story 3.4): a rail toggle mirroring Settings, pinned
-          to the rail bottom (mt-auto) just above it. Opens the CreateTablePanel. */}
+          just above it. Opens the CreateTablePanel. */}
       <button
         type="button"
         aria-label="Create table"
         aria-pressed={createOpen}
         data-testid="create-table-toggle"
+        title="Create table"
         onClick={onToggleCreate}
-        className={`mt-auto flex items-center gap-2 rounded-[var(--radius)] px-3 py-2 text-left font-mono text-xs lowercase transition-colors hover:bg-accent hover:text-accent-foreground ${
-          createOpen ? "bg-accent text-accent-foreground" : "text-muted-foreground"
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-accent hover:text-foreground ${
+          createOpen ? "bg-accent text-foreground" : "text-muted-foreground"
         }`}
       >
-        <span aria-hidden>＋</span>
-        <span>create table</span>
+        <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="h-[18px] w-[18px]">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
       </button>
 
       {/* Bottom-pinned Settings control. */}
@@ -90,13 +145,16 @@ function LauncherRail({
         aria-label="Settings"
         aria-pressed={settingsOpen}
         data-testid="settings-toggle"
+        title="Settings"
         onClick={onToggleSettings}
-        className={`flex items-center gap-2 rounded-[var(--radius)] px-3 py-2 text-left font-mono text-xs lowercase transition-colors hover:bg-accent hover:text-accent-foreground ${
-          settingsOpen ? "bg-accent text-accent-foreground" : "text-muted-foreground"
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-accent hover:text-foreground ${
+          settingsOpen ? "bg-accent text-foreground" : "text-muted-foreground"
         }`}
       >
-        <span aria-hidden>⚙</span>
-        <span>settings</span>
+        <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} className="h-[18px] w-[18px]">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" />
+        </svg>
       </button>
     </nav>
   );
@@ -104,8 +162,9 @@ function LauncherRail({
 
 /**
  * Prominent, unmistakable full-width Port-Exposure Warning (FR-22, UX-DR5).
- * Rendered directly under the header only when the Core bound a non-loopback
- * address. States the risk and the exact steps to revert to localhost-only.
+ * Rendered at the very top of the shell (above the rail/tab/panel chrome) only
+ * when the Core bound a non-loopback address. States the risk and the exact
+ * steps to revert to localhost-only.
  */
 function ExposureBanner({ exposure }: { exposure: ExposureInfo }): React.JSX.Element {
   return (
@@ -224,28 +283,10 @@ export function Workspace({
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
-      <header className="flex shrink-0 items-center justify-between border-b border-border bg-card px-4 py-2">
-        <div className="flex items-baseline gap-2">
-          <span className="text-sm font-semibold text-foreground">quick-studio</span>
-          <span className="text-xs text-muted-foreground">workspace</span>
-        </div>
-        <div className="flex items-center gap-2">
-          {connectionIndicator}
-          <button
-            type="button"
-            onClick={onStop}
-            disabled={stopping}
-            className="rounded-[var(--radius)] border border-border px-3 py-1 text-xs text-foreground transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent disabled:hover:text-foreground"
-          >
-            {stopping ? "Stopping…" : "Stop"}
-          </button>
-        </div>
-      </header>
-
       {exposure?.exposed ? <ExposureBanner exposure={exposure} /> : null}
 
       <PanelGroup direction="horizontal" className="flex-1" onLayout={onLayout}>
-        <Panel defaultSize={panelSizes[0] ?? 20} minSize={12} maxSize={40} className="bg-card">
+        <Panel defaultSize={panelSizes[0] ?? 20} minSize={12} maxSize={40} className="bg-background">
           {/* Left region: fixed launcher rail + the resizable schema tree. */}
           <div className="flex h-full">
             <div className="shrink-0" style={{ width: "52px" }}>
@@ -271,41 +312,79 @@ export function Workspace({
         <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary data-[resize-handle-state=drag]:bg-primary" />
 
         <Panel defaultSize={panelSizes[1] ?? 80} minSize={30}>
-          {settingsOpen ? (
-            <SettingsPanel onClose={() => setSettingsOpen(false)} />
-          ) : createOpen ? (
-            <CreateTablePanel
-              schemas={schemas}
-              onCreated={onTableCreated}
-              onClose={() => setCreateOpen(false)}
-            />
-          ) : (
-            <div className="flex h-full flex-col">
-              <TabBar state={state} onActivate={onActivate} onClose={onClose} />
+          {/* Chrome-style shell: a transparent .topbar hosting the Tab strip + new-tab
+              "+" (hidden while Settings/Create fill the pane, exactly as the Tab strip
+              itself did before), and a rounded, detached `.content-panel` below it that
+              always hosts the neutral status bar (connection + Stop stay reachable no
+              matter which of the three panes — Tabs, Settings, or Create — is showing). */}
+          <div className="flex h-full flex-col bg-background">
+            {!settingsOpen && !createOpen ? (
+              <div className="flex shrink-0 items-end gap-0.5 px-2 pt-2">
+                <div className="min-w-0 flex-1 self-end">
+                  <TabBar state={state} onActivate={onActivate} onClose={onClose} />
+                </div>
+                <button
+                  type="button"
+                  title="New tab"
+                  aria-label="New tab"
+                  onClick={() => onOpen(activeTab?.kind ?? TAB_KINDS[0]!)}
+                  className="mx-1 mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-t-lg text-lg leading-none text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                >
+                  +
+                </button>
+              </div>
+            ) : null}
+
+            <div className="m-1.5 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card">
               <div className="min-h-0 flex-1 overflow-auto">
-                <TabContent
-                  tab={activeTab}
-                  primaryKeys={primaryKeys}
-                  indexes={indexes}
-                  tables={allTables}
-                  queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
-                  onQueryDraftChange={(sql) => {
-                    if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
-                  }}
-                  chatState={activeTab !== null ? chatStates.get(activeTab.id) : undefined}
-                  onChatStateChange={(next) => {
-                    if (activeTab !== null) onChatStateChange(activeTab.id, next);
-                  }}
-                  reportState={activeTab !== null ? reportStates.get(activeTab.id) : undefined}
-                  onReportStateChange={(next) => {
-                    if (activeTab !== null) onReportStateChange(activeTab.id, next);
-                  }}
-                  erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
-                  onErdLayoutChange={onErdLayoutChange}
-                />
+                {settingsOpen ? (
+                  <SettingsPanel onClose={() => setSettingsOpen(false)} />
+                ) : createOpen ? (
+                  <CreateTablePanel
+                    schemas={schemas}
+                    onCreated={onTableCreated}
+                    onClose={() => setCreateOpen(false)}
+                  />
+                ) : (
+                  <TabContent
+                    tab={activeTab}
+                    primaryKeys={primaryKeys}
+                    indexes={indexes}
+                    tables={allTables}
+                    queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
+                    onQueryDraftChange={(sql) => {
+                      if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
+                    }}
+                    chatState={activeTab !== null ? chatStates.get(activeTab.id) : undefined}
+                    onChatStateChange={(next) => {
+                      if (activeTab !== null) onChatStateChange(activeTab.id, next);
+                    }}
+                    reportState={activeTab !== null ? reportStates.get(activeTab.id) : undefined}
+                    onReportStateChange={(next) => {
+                      if (activeTab !== null) onReportStateChange(activeTab.id, next);
+                    }}
+                    erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
+                    onErdLayoutChange={onErdLayoutChange}
+                  />
+                )}
+              </div>
+
+              {/* Neutral status bar (prototype `.statusbar`): the proven connection
+                  indicator + Stop control, always reachable regardless of which pane
+                  (Tabs/Settings/Create) is active. */}
+              <div className="flex shrink-0 items-center gap-3 border-t border-border px-3.5 py-1.5">
+                {connectionIndicator}
+                <button
+                  type="button"
+                  onClick={onStop}
+                  disabled={stopping}
+                  className="ml-auto rounded-md px-2.5 py-1 font-mono text-[11px] text-red-400 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+                >
+                  {stopping ? "Stopping…" : "Stop"}
+                </button>
               </div>
             </div>
-          )}
+          </div>
         </Panel>
       </PanelGroup>
     </div>
