@@ -27,6 +27,7 @@ import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 import { createLiveReportRegistry } from "./live-report-registry.ts";
 import { liveReportBundle } from "./live-report-bundle.generated.ts";
+import { resolvePassphraseProvider } from "./passphrase-provider.ts";
 import { createProviderRegistry } from "./provider-registry.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
@@ -259,7 +260,17 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // the Settings surface. Constructed once and gated by the run mode — the store
   // is NOT opened at boot; the registry opens it lazily on the first RPC call so
   // Ephemeral stays a hard no-write (its store open is a pure in-memory no-op).
-  const connectionRegistry = createConnectionRegistry({ storeDeps: { mode } });
+  // ONE passphrase provider shared by BOTH persistent stores. When the keychain-less
+  // fallback reads its secret from a file descriptor (`QS_PASSPHRASE_FD`), that fd is
+  // a single-read stream: the first store to open drains it to EOF, so a second
+  // provider instance would read `""` → decline and starve the second store. A single
+  // memoized provider reads the fd at most once and serves the captured passphrase to
+  // both the connection and provider-key registries (and to any retry within a store).
+  const passphraseProvider = resolvePassphraseProvider(process.env);
+
+  const connectionRegistry = createConnectionRegistry({
+    storeDeps: { mode, passphraseProvider },
+  });
 
   // Workspace-state registry (Story 2.5): the sole Workspace-store holder for
   // `workspace.load`/`workspace.save`. Same lazy-open, mode-gated posture as
@@ -271,7 +282,9 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // the AI-providers Settings surface. Same lazy-open, mode-gated posture as the
   // connection registry — Ephemeral stays a hard no-write (its store open is a pure
   // in-memory no-op), and the raw key never leaves Ring 1 (summaries are secret-free).
-  const providerRegistry = createProviderRegistry({ storeDeps: { mode } });
+  const providerRegistry = createProviderRegistry({
+    storeDeps: { mode, passphraseProvider },
+  });
 
   // Live Report registry (Story 6.4): holds published layout+SQL docs (never data, never a
   // credential, never a token) so the Core can serve them same-origin at `/live/<id>`. In-memory

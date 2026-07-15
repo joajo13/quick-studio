@@ -43,7 +43,7 @@ import {
   type ScryptParams,
 } from "./passphrase-key.ts";
 import {
-  envPassphraseProvider,
+  resolvePassphraseProvider,
   type PassphraseProvider,
 } from "./passphrase-provider.ts";
 import { resolveRunMode, type RunMode } from "./run-mode.ts";
@@ -134,7 +134,7 @@ export type ProviderKeyStoreDeps = {
   readonly dir?: string;
   /** Keychain master-key provider. Defaults to `loadOrCreateStoreKey()`. */
   readonly loadStoreKey?: () => StoreKeyResult;
-  /** Passphrase source for the keychain-less fallback. Defaults to `envPassphraseProvider(process.env)`. */
+  /** Passphrase source for the keychain-less fallback. Defaults to `resolvePassphraseProvider(process.env)`. */
   readonly passphraseProvider?: PassphraseProvider;
 };
 
@@ -359,8 +359,13 @@ export function openProviderKeyStore(deps: ProviderKeyStoreDeps = {}): OpenResul
   }
   const filePath = join(dir, PROVIDER_STORE_FILE_NAME);
   const metaPath = join(dir, PROVIDER_STORE_META_FILE_NAME);
+  // Single-store fallback only. A fd passphrase transport is single-read, so a
+  // process that opens BOTH this store and the credential store MUST inject ONE
+  // shared provider (see `server.ts`) — two independent defaults would each read
+  // the fd and the second would starve. Do not rely on this default when opening
+  // multiple stores in one process.
   const passphraseProvider =
-    deps.passphraseProvider ?? envPassphraseProvider(process.env);
+    deps.passphraseProvider ?? resolvePassphraseProvider(process.env);
   const loadStoreKey = deps.loadStoreKey ?? loadOrCreateStoreKey;
 
   // The descriptor is AUTHORITATIVE for an existing store's key mode.

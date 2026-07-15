@@ -120,7 +120,8 @@ resolution: already resolved: src/core/credential-store.ts:138-139 declares the 
 origin: migrated from legacy ledger (code review of spec-2-3-passphrase-fallback.md), 2026-07-12
 location: `envPassphraseProvider` (`QS_PASSPHRASE`)
 reason: `envPassphraseProvider` (the intent-contract-sanctioned default provider) reads the passphrase from the `QS_PASSPHRASE` environment variable. On a keychain-less/headless box this leaves the secret readable via `/proc/<pid>/environ` (same-user tooling), inherits it into every spawned child process, and can capture it in core dumps — a well-known env-secret leak vector, though it never touches disk or logs (the store's "never written/logged" invariant holds). The env seam is intentional and functional today; Story 2.4 adds the interactive UI prompt, and a stdin/fd provider plus a documented warning is the proper hardening. Not a bug in Story 2.3 (the env default is by design), but residual security surface worth focused attention before a wider release.
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-passphrase-nonenv-transport
 
 ### DW-17: When Story 1.3 wires the real DB connection, validate the Ephemeral database-URL's scheme/shape (allowlist `postgres`/`postgresql`/`mysql`), rejecting `file:`/`javascript:`/`data:` and Windows drive-path pseudo-URLs (`C:\db` parses as scheme `c:`) that Story 1.2's deliberately shallow `new URL()` shape-check lets through
 

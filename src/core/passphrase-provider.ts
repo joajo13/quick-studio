@@ -9,8 +9,18 @@
  * a `provided` response.
  */
 
+import { readFileSync } from "node:fs";
+
 /** Environment variable the default provider reads the passphrase from. */
 export const PASSPHRASE_ENV_VAR = "QS_PASSPHRASE";
+
+/**
+ * Environment variable naming the file descriptor the alternate provider reads the
+ * passphrase from (an fd NUMBER, never the secret itself). Opt-in: when set to a
+ * valid non-negative integer, {@link resolvePassphraseProvider} selects the fd
+ * transport over the env one.
+ */
+export const PASSPHRASE_FD_ENV_VAR = "QS_PASSPHRASE_FD";
 
 /**
  * Context passed to a {@link PassphraseProvider}. Non-secret: it only explains WHY
@@ -38,6 +48,15 @@ export type PassphraseProvider = (ctx: PassphraseContext) => PassphraseResponse;
  * Default provider: read the passphrase from `env[QS_PASSPHRASE]`. An unset, empty,
  * or whitespace-only value is a `declined` (there is nothing to unlock with). The
  * value is read at call time so a test/host can set it just before opening.
+ *
+ * SECURITY — env secret exposure: a passphrase carried in `QS_PASSPHRASE` is
+ * readable by same-user tooling via `/proc/<pid>/environ`, is inherited by every
+ * spawned child process, and may be captured in a core dump. It is never written to
+ * disk or logged, but the environment is a well-known secret-leak surface. On
+ * headless hosts prefer the hardened file-descriptor transport — set
+ * {@link PASSPHRASE_FD_ENV_VAR} (`QS_PASSPHRASE_FD`) to an fd number and feed the
+ * secret over that fd (see {@link fdPassphraseProvider}); the env var then carries
+ * only the fd number, not the secret.
  */
 export function envPassphraseProvider(
   env: Record<string, string | undefined>,
@@ -49,4 +68,93 @@ export function envPassphraseProvider(
     }
     return { outcome: "provided", passphrase: value };
   };
+}
+
+/**
+ * Reads the entire contents of a file descriptor as UTF-8. Injectable so tests can
+ * model single-read fd semantics without touching a real fd.
+ */
+export type FdReader = (fd: number) => string;
+
+/** Default {@link FdReader}: synchronously read the fd to EOF as UTF-8 (`node:fs`). */
+export const defaultReadFd: FdReader = (fd: number): string =>
+  readFileSync(fd, "utf8");
+
+/**
+ * Read the fd exactly once and classify it. Strips exactly ONE trailing line ending
+ * (`\r?\n`) — the transport delimiter — then applies the same empty/whitespace-only
+ * → `declined` rule as the env provider, preserving leading/interior characters
+ * verbatim. Any read failure (invalid/closed fd, EOF-only/empty) → `declined`. Total:
+ * never throws.
+ */
+function readOnce(fd: number, readFd: FdReader): PassphraseResponse {
+  let raw: string;
+  try {
+    raw = readFd(fd);
+  } catch {
+    // Invalid/closed fd, EBADF, etc. — fail-safe: write nothing. Never surface the
+    // fd contents or the error in any detail.
+    return { outcome: "declined" };
+  }
+  // Strip exactly ONE trailing line ending; keep everything else (including a
+  // second trailing blank line and any leading/interior spaces) verbatim.
+  const stripped = raw.replace(/\r?\n$/, "");
+  if (stripped.trim().length === 0) {
+    return { outcome: "declined" };
+  }
+  return { outcome: "provided", passphrase: stripped };
+}
+
+/**
+ * Alternate provider: read the passphrase from a file descriptor (stdin or an
+ * inherited fd) instead of the environment — the hardened transport for headless
+ * hosts (see the SECURITY note on {@link envPassphraseProvider}).
+ *
+ * CRITICAL — an fd is a SINGLE-READ stream: `readFileSync(fd)` reads from the
+ * current offset to EOF and does not rewind, so a second read yields `""`. This
+ * provider therefore reads the fd AT MOST ONCE and memoizes the resulting
+ * {@link PassphraseResponse} in the returned closure. Every subsequent invocation —
+ * a retry after a wrong passphrase within one store, or a second store sharing this
+ * one instance — returns the captured response WITHOUT re-reading the now-EOF fd.
+ * Total: never throws.
+ *
+ * Trade-off: memoizing keeps the passphrase resident in this closure for the
+ * provider's lifetime (in the app, the whole `startCore`) — a necessary,
+ * larger retention surface than the per-call env read, but the same lifetime as
+ * the derived keys already held by the open stores. It is never written or logged.
+ */
+export function fdPassphraseProvider(
+  fd: number,
+  readFd: FdReader = defaultReadFd,
+): PassphraseProvider {
+  let cached: PassphraseResponse | undefined;
+  return (_ctx: PassphraseContext): PassphraseResponse =>
+    (cached ??= readOnce(fd, readFd));
+}
+
+/**
+ * Select the passphrase transport from the environment. `QS_PASSPHRASE_FD` absent or
+ * blank (trim-empty) → {@link envPassphraseProvider} (today's behavior, byte-for-
+ * byte). Present + a valid non-negative integer (`/^\d+$/`) → {@link fdPassphraseProvider}.
+ * Present but malformed (non-integer, negative, decimal, hex, exponent, signed) → a
+ * declining provider that MUST NOT fall back to reading `QS_PASSPHRASE`: the operator
+ * explicitly opted out of the env transport, so silently reading it would defeat the
+ * hardening. Total: never throws.
+ */
+export function resolvePassphraseProvider(
+  env: Record<string, string | undefined>,
+  readFd: FdReader = defaultReadFd,
+): PassphraseProvider {
+  const rawFd = env[PASSPHRASE_FD_ENV_VAR];
+  // Absent or blank → today's env transport, unchanged.
+  if (rawFd === undefined || rawFd.trim().length === 0) {
+    return envPassphraseProvider(env);
+  }
+  const trimmed = rawFd.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return fdPassphraseProvider(Number(trimmed), readFd);
+  }
+  // Present but malformed: the operator opted out of `QS_PASSPHRASE`, so decline
+  // rather than silently fall back to the env secret.
+  return () => ({ outcome: "declined" });
 }

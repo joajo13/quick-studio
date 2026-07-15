@@ -72,6 +72,46 @@ a later epic and is not parsed by the CLI yet):
 
 Press `Ctrl-C` to stop; the session ends cleanly and the port is released.
 
+## Persistent mode & the keychain-less fallback
+
+In Persistent mode quick-studio encrypts saved connections and AI provider keys at
+rest. The encryption key normally comes from the OS keychain. On a headless host
+with no keychain, it is instead derived from a passphrase you supply.
+
+- **`QS_PASSPHRASE`** — the default passphrase source. Convenient, but the value
+  lives in the process environment, which is a known secret-leak surface: on the
+  same host it is readable via `/proc/<pid>/environ`, it is inherited by every
+  child process quick-studio spawns, and it can be captured in a core dump. It is
+  never written to disk or logged, but prefer the file-descriptor transport below
+  on any multi-tenant or shared host.
+- **`QS_PASSPHRASE_FD`** — the hardened alternative. It carries a **file
+  descriptor number**, not the secret; quick-studio reads the passphrase from that
+  fd once and the secret never enters the environment. Feed it over stdin or an
+  inherited fd:
+
+  ```sh
+  # stdin (fd 0)
+  printf %s "$SECRET" | QS_PASSPHRASE_FD=0 quick-studio
+  # an inherited fd from a file
+  QS_PASSPHRASE_FD=3 quick-studio 3< secretfile
+  ```
+
+  Exactly one trailing newline is stripped from the fd contents, so feed the exact
+  passphrase bytes (`printf %s` adds none; a heredoc or `echo` would add one that
+  is stripped). Both the connection store and the provider-key store unlock from
+  that single fd read.
+
+  Selection is opt-in: when `QS_PASSPHRASE_FD` is unset **or blank**, quick-studio
+  uses the `QS_PASSPHRASE` env default. Only a present, non-empty, non-integer
+  value (e.g. `abc`) is rejected — it declines rather than silently falling back to
+  the environment, since setting it signals you opted out of the env transport.
+
+  A misconfigured fd transport fails safe by declining, which surfaces as "no
+  passphrase provided" with no separate error. If Persistent mode reports that
+  while you believe you supplied a passphrase, check that the fd is actually
+  inherited (e.g. the `3< secretfile` redirect or the `| QS_PASSPHRASE_FD=0` pipe
+  is present) and that the fd number matches.
+
 ## Development
 
 Requires [Bun](https://bun.sh) `>= 1.2.0`.
