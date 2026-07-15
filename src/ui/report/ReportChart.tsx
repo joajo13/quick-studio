@@ -30,9 +30,9 @@ import {
 } from "recharts";
 import type { ChartData, ChartRecord, ChartValue } from "./report-chart.ts";
 
-/** A stable, readable palette for series strokes/fills (coral-led, mono-friendly). */
+/** A stable, readable palette for series strokes/fills (blue-led via --rpt-chart, mono-friendly). */
 const SERIES_COLORS = [
-  "var(--coral-line)",
+  "var(--rpt-chart)",
   "#5eb0ef",
   "#7bd88f",
   "#e6c86e",

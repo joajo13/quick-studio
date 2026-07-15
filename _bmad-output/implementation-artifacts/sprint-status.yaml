@@ -115,6 +115,6 @@ development_status:
   7-3-redesign-query-confirm-neutral: done     # Story 7.3: Redesign the Query editor + destructive confirm to neutral
   7-4-redesign-erd-neutral: done            # Story 7.4: Redesign the ERD to neutral
   7-5-redesign-chat-neutral: done              # Story 7.5: Redesign the AI Chat to neutral
-  7-6-redesign-report-neutral: backlog         # Story 7.6: Redesign the Report to neutral
+  7-6-redesign-report-neutral: done            # Story 7.6: Redesign the Report to neutral
   7-7-redesign-settings-neutral: backlog       # Story 7.7: Redesign Settings/Connections to neutral
   epic-7-retrospective: optional

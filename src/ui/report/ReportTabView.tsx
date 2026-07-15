@@ -86,9 +86,14 @@ async function toOutcome(
 }
 
 const btn =
-  "rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--coral-soft)] px-2 py-0.5 font-mono text-xs lowercase text-[var(--foreground)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
+  "rounded-[var(--radius)] border border-[var(--rpt-accent-line)] bg-[var(--rpt-accent-soft)] px-2 py-0.5 font-mono text-xs lowercase text-[var(--foreground)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
 const ghostBtn =
   "rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 font-mono text-[11px] lowercase text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40";
+// The export controls wear the prototype's ink treatment (report.html `.seg-btn.on`):
+// an ink-accent border + fill on ink-contrast text. They remain two independent action
+// <button>s (own `handleExport` / `handleExportLive`), NOT a role="tablist" mode selector.
+const exportBtn =
+  "rounded-[var(--radius)] border border-[var(--rpt-accent-line)] bg-[var(--rpt-accent)] px-2 py-0.5 font-mono text-[11px] lowercase text-[var(--rpt-accent-ink)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
 
 /** The per-block header: an ordinal label + reorder/remove controls. */
 function BlockControls({
@@ -149,7 +154,7 @@ function ChartSpecEditor({
     setDraft(next);
     onChange(next);
   };
-  const select = "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--coral-line)]";
+  const select = "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--rpt-accent-line)]";
   return (
     <div className="flex flex-wrap items-center gap-2">
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">mark</label>
@@ -462,7 +467,7 @@ export function ReportTabView({
           aria-label="report target"
           value={state.targetConnectionId ?? ""}
           onChange={(e) => handleRetarget(e.target.value === "" ? null : e.target.value)}
-          className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--coral-line)]"
+          className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--rpt-accent-line)]"
         >
           <option value="">Default (launch connection)</option>
           {connections.map((c) => (
@@ -472,35 +477,36 @@ export function ReportTabView({
           ))}
         </select>
         <div className="ml-auto flex items-center gap-2">
-          {/* Quiet ghost/secondary export control (Story 6.3): freezes the current block
-              results into a self-contained .html download. Disabled while an export is in
-              flight so a double-click cannot launch overlapping exports. Never mutates blocks. */}
+          {/* Ink-treated export control (Story 6.3; 7.6 neutral look — report.html `.seg-btn.on`
+              idiom via `exportBtn`): freezes the current block results into a self-contained .html
+              download. Disabled while an export is in flight so a double-click cannot launch
+              overlapping exports. An independent action button, not a selected tab. Never mutates blocks. */}
           {exportError !== null ? (
-            <span role="alert" className="font-mono text-[11px] lowercase text-red-400">
+            <span role="alert" className="font-mono text-[11px] lowercase text-[var(--rpt-err)]">
               {exportError}
             </span>
           ) : null}
           {exportLiveError !== null ? (
-            <span role="alert" className="font-mono text-[11px] lowercase text-red-400">
+            <span role="alert" className="font-mono text-[11px] lowercase text-[var(--rpt-err)]">
               {exportLiveError}
             </span>
           ) : null}
           <button
             type="button"
-            className={ghostBtn}
+            className={exportBtn}
             disabled={exporting}
             aria-label="export snapshot"
             onClick={() => void handleExport()}
           >
             {exporting ? "exporting…" : "export snapshot"}
           </button>
-          {/* Sibling quiet ghost/secondary export control (Story 6.4): publishes the current
-              layout+SQL to the local Core, opens the loopback live view, and downloads a
-              portable secret-free .html. Disabled while a live export is in flight so a
-              double-click cannot launch overlapping exports. Never mutates blocks. */}
+          {/* Sibling ink-treated export control (Story 6.4; 7.6 neutral look via `exportBtn`):
+              publishes the current layout+SQL to the local Core, opens the loopback live view, and
+              downloads a portable secret-free .html. Disabled while a live export is in flight so a
+              double-click cannot launch overlapping exports. An independent action button, not a selected tab. */}
           <button
             type="button"
-            className={ghostBtn}
+            className={exportBtn}
             disabled={exportingLive}
             aria-label="export live report"
             onClick={() => void handleExportLive()}
@@ -608,7 +614,7 @@ function ProseBlock({
         rows={4}
         aria-label="prose markdown"
         placeholder="write narrative markdown…"
-        className="w-full resize-y rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--coral-line)]"
+        className="w-full resize-y rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--rpt-accent-line)]"
         style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
       />
       {markdown.trim() !== "" ? (
@@ -662,7 +668,7 @@ function QueryBlock({
         rows={3}
         aria-label="block sql"
         placeholder="select … from …"
-        className="w-full resize-y rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--coral-line)]"
+        className="w-full resize-y rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--rpt-accent-line)]"
         style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
       />
       <div className="flex items-center gap-2">
@@ -680,7 +686,7 @@ function QueryBlock({
                 onClick={() => onView(v)}
                 className={`rounded-[var(--radius)] border px-2 py-0.5 font-mono text-[11px] lowercase transition-colors ${
                   block.view === v
-                    ? "border-[var(--coral-line)] bg-[var(--coral-soft)] text-[var(--foreground)]"
+                    ? "border-[var(--rpt-accent-line)] bg-[var(--rpt-accent-soft)] text-[var(--foreground)]"
                     : "border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
                 }`}
               >
@@ -696,7 +702,7 @@ function QueryBlock({
       ) : null}
 
       {block.error !== undefined ? (
-        <p role="alert" className="font-mono text-xs lowercase text-red-400">
+        <p role="alert" className="font-mono text-xs lowercase text-[var(--rpt-err)]">
           {block.error}
         </p>
       ) : null}

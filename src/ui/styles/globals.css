@@ -81,6 +81,20 @@
   --err-line: rgba(239, 106, 99, 0.4);
   --warn: #e0a458;
   --warn-soft: rgba(224, 164, 88, 0.13);
+
+  /* ---- Story 7.6 neutral report: functional tokens for the Report tab, ported
+     verbatim from design-artifacts/report.html (dark block). The chart data-series
+     accent is BLUE (--rpt-chart), replacing the old coral series lead; --rpt-accent*
+     is the ink chrome accent for the export controls; --rpt-err is the report's
+     functional error color. Dark-first; light values under :root[data-theme="light"].
+     Only the tokens actually consumed by the report are defined. Additive only — no
+     shell token is repainted. */
+  --rpt-chart: #82aaff;
+  --rpt-accent: #ececec;
+  --rpt-accent-ink: #0d0d0d;
+  --rpt-accent-soft: rgba(255, 255, 255, 0.1);
+  --rpt-accent-line: rgba(255, 255, 255, 0.28);
+  --rpt-err: #f05a63;
 }
 
 /* Light theme: overrides for the same tokens, activated ONLY via an explicit
@@ -130,6 +144,14 @@
   --count: #2f6fd6;
   --user-bubble: #e8e8e8;
   --composer-bg: #f4f4f4;
+
+  /* ---- Story 7.6 neutral report, light values (report.html light block) ---- */
+  --rpt-chart: #2f6fd6;
+  --rpt-accent: #0d0d0d;
+  --rpt-accent-ink: #ffffff;
+  --rpt-accent-soft: rgba(0, 0, 0, 0.06);
+  --rpt-accent-line: rgba(0, 0, 0, 0.22);
+  --rpt-err: #d23b45;
 }
 
 /* Map design tokens onto Tailwind's color scale so utilities resolve them. */
