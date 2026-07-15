@@ -14,8 +14,11 @@ import mysql from "mysql2/promise";
 import type { Connection, ConnectionOptions } from "mysql2/promise";
 import type { DatabaseSchema } from "../shared/contract.ts";
 import {
+  DriverConnectionError,
+  INTROSPECTION_TIMEOUT_MS,
   assembleSchema,
   toDriverConnectionError,
+  withTimeout,
   type Driver,
   type DriverQueryResult,
   type IntrospectedColumn,
@@ -193,8 +196,16 @@ export function createMysqlDriver(url: string): Driver {
     async listSchema(): Promise<DatabaseSchema> {
       if (connection === null) {
         // Programming error, not a domain failure — surfaces as `internal_error`.
+        // Kept OUTSIDE the classified wrap below so it still throws as a bug rather
+        // than being reclassified to a neutral `network` failure.
         throw new Error("listSchema called before connect");
       }
+      // Capture the non-null connection so the extracted `introspect` closure reads
+      // it without re-narrowing (and TypeScript stays happy).
+      const conn = connection;
+      // The 4 introspection queries + fold, extracted so `withTimeout` can bound the
+      // whole thing (DW-20) and the catch below can classify any failure (DW-19).
+      const introspect = async (): Promise<DatabaseSchema> => {
       // Scope to the URL's database when present; otherwise exclude the server's
       // system schemas. Parameterized so the database name is never string-spliced.
       const where =
@@ -202,7 +213,7 @@ export function createMysqlDriver(url: string): Driver {
           ? "table_schema = ?"
           : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
       const params = database !== null ? [database] : [...SYSTEM_SCHEMAS];
-      const [rows] = await connection.query(
+      const [rows] = await conn.query(
         `SELECT table_schema, table_name, column_name, data_type, is_nullable
          FROM information_schema.columns
          WHERE ${where}
@@ -217,7 +228,7 @@ export function createMysqlDriver(url: string): Driver {
           ? "table_schema = ?"
           : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
       const pkParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
-      const [pkRows] = await connection.query(
+      const [pkRows] = await conn.query(
         `SELECT table_schema, table_name, column_name
          FROM information_schema.key_column_usage
          WHERE constraint_name = 'PRIMARY' AND ${pkWhere}`,
@@ -243,7 +254,7 @@ export function createMysqlDriver(url: string): Driver {
           : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
       const idxWhere = `${idxScope} AND column_name IS NOT NULL`;
       const idxParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
-      const [idxRows] = await connection.query(
+      const [idxRows] = await conn.query(
         `SELECT table_schema, table_name, index_name, non_unique, column_name
          FROM information_schema.statistics
          WHERE ${idxWhere}
@@ -274,7 +285,7 @@ export function createMysqlDriver(url: string): Driver {
           ? "table_schema = ?"
           : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
       const fkParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
-      const [fkRows] = await connection.query(
+      const [fkRows] = await conn.query(
         `SELECT table_schema, table_name, constraint_name, column_name,
                 referenced_table_schema, referenced_table_name, referenced_column_name
          FROM information_schema.key_column_usage
@@ -305,6 +316,15 @@ export function createMysqlDriver(url: string): Driver {
         }),
       );
       return assembleSchema("mysql", columns, indexes, foreignKeys);
+      };
+      try {
+        return await withTimeout(introspect(), INTROSPECTION_TIMEOUT_MS);
+      } catch (err) {
+        // DW-19: a post-handshake introspection failure (unprivileged account, a reset,
+        // or the DW-20 timeout) exits CLASSIFIED so connection.ts open() returns a neutral
+        // status:"failed" instead of letting a raw error escape as internal_error (500).
+        throw err instanceof DriverConnectionError ? err : toDriverConnectionError(err);
+      }
     },
 
     async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {

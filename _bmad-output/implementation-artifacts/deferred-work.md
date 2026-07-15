@@ -143,14 +143,16 @@ status: open
 origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
 location: `driver-postgres.ts` / `driver-mysql.ts` (`listSchema`); `connection.ts` `open()` (lines 92, 104)
 reason: The adapters (`driver-postgres.ts`/`driver-mysql.ts`) wrap only `connect()` errors via `toDriverConnectionError`; `listSchema()` throws raw. In `connection.ts` `open()`, a non-`DriverConnectionError` from `await d.listSchema()` (line 92) hits `throw err` (line 104) → `internal_error`. So an authenticated-but-unprivileged account that cannot read `information_schema`, or a connection dropped/reset mid-introspection, surfaces as an opaque 500 rather than a classified `status:"failed"`. Real, but the spec's golden shape deliberately re-throws non-classified errors as bugs and the current 4-kind enum has no natural bucket for a post-handshake permission/introspection error — so the fix is a taxonomy decision (adjacent to the invalid-catalog item above), not a trivial wrap. No live-DB test exercises the privileged-introspection path.
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-connection-introspection-robustness
 
 ### DW-20: Bound the introspection query itself (statement/query timeout) or race the connection manager's `close()` against a timer, so a hung `listSchema` cannot block shutdown indefinitely
 
 origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
 location: `connection.ts` `close()` (lines 143-150); driver adapters (information_schema query)
 reason: `connection.ts` `close()` unconditionally `await`s the in-flight `open()` (lines 143-150) before tearing the driver down, and neither adapter sets a per-statement timeout on the `information_schema.columns` query. If `connect()` succeeds but the introspection query hangs (e.g. a lock on `information_schema`, a stalled server), `close()` never resolves → `Core.stop()` never completes → the port is never released. The postgres `connect_timeout: 10` and the new mysql `CLOSE_TIMEOUT_MS` teardown bound cover connect and teardown, but NOT a wedged query mid-introspection. Real edge; the fix touches the concurrency/shutdown-ordering model (racing inflight vs a bounded query timeout).
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-connection-introspection-robustness
 
 ### DW-21: Distinguish a malformed-but-supported-scheme URL from a genuinely unsupported scheme, so a bad/out-of-range port (or otherwise unparseable authority) on a `postgres`/`mysql` URL is not reported as `unsupported_scheme`
 

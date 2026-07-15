@@ -218,6 +218,44 @@ describe("connection manager", () => {
     expect(counts.close).toBe(1);
   });
 
+  test("a listSchema failure CLASSIFIED as DriverConnectionError becomes {status:'failed'} — not thrown (DW-19)", async () => {
+    // The real adapters now wrap `listSchema` so a post-handshake introspection denial
+    // (an unprivileged account, a mid-introspection reset, or the DW-20 timeout) exits as
+    // a classified `DriverConnectionError`. `open()` must turn that into a neutral
+    // status:"failed" payload — never an `internal_error` — and tear down the half-open
+    // driver, exactly as it does for a classified connect failure.
+    const counts = { close: 0 };
+    const factory: DriverFactory = () => ({
+      async connect() {},
+      async listSchema(): Promise<DatabaseSchema> {
+        throw new DriverConnectionError("auth", "the database rejected the provided credentials");
+      },
+      async query() {
+        return { columns: [], rows: [] };
+      },
+      async queryReadOnly() {
+        return { columns: [], rows: [] };
+      },
+      quoteIdent(ident: string) {
+        return `"${ident}"`;
+      },
+      async close() {
+        counts.close++;
+      },
+    });
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    const result = await mgr.connect();
+    expect(result.status).toBe("failed");
+    if (result.status === "failed") {
+      expect(result.failure).toBe("auth");
+      // No credentials leak into the neutral message.
+      expect(result.message).not.toContain("p@h");
+    }
+    // The half-open driver is torn down, not orphaned.
+    expect(counts.close).toBe(1);
+  });
+
   test("concurrent connect() calls share ONE attempt — the driver opens exactly once", async () => {
     const gate = deferred();
     const { factory, counts } = fakeDriver({ onConnect: () => gate.promise, schema: SAMPLE_SCHEMA });

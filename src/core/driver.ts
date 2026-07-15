@@ -314,15 +314,33 @@ export class DriverConnectionError extends Error {
   }
 }
 
-/** Auth: PG SQLSTATE + MySQL error codes (mysql2 surfaces both `code` and `errno`). */
+/**
+ * Auth: PG SQLSTATE + MySQL error codes (mysql2 surfaces both `code` and `errno`).
+ * Covers two situations that both mean "the account cannot proceed": a connect-time
+ * handshake rejection (bad password / DB access), AND a post-handshake INTROSPECTION
+ * privilege denial — an authenticated-but-unprivileged account whose `listSchema`
+ * `information_schema` reads are refused (DW-19). The neutral 4-kind taxonomy has no
+ * `permission` bucket and the intent forbids adding one, so these privilege codes map
+ * to `auth` (the closest neutral bucket — "the database rejected …"); `select 1` at
+ * connect needs no table privileges, so extending this set does NOT regress connect-time
+ * classification.
+ */
 const AUTH_CODES: ReadonlySet<string> = new Set([
   "28P01", // PG: invalid_password
   "28000", // PG: invalid_authorization_specification
+  "42501", // PG: insufficient_privilege (post-handshake introspection denial, DW-19)
   "ER_ACCESS_DENIED_ERROR", // MySQL: 1045
   "ER_DBACCESS_DENIED_ERROR", // MySQL: 1044
+  "ER_TABLEACCESS_DENIED_ERROR", // MySQL: 1142 (introspection table privilege denied, DW-19)
+  "ER_COLUMNACCESS_DENIED_ERROR", // MySQL: 1143 (introspection column privilege denied, DW-19)
+  "ER_SPECIFIC_ACCESS_DENIED_ERROR", // MySQL: 1227 (introspection privilege denied, DW-19)
 ]);
-/** MySQL access-denied errno (paired with `ER_ACCESS_DENIED_ERROR`). */
-const AUTH_ERRNO: ReadonlySet<number> = new Set([1045, 1044]);
+/**
+ * MySQL access-denied errnos (paired with the `AUTH_CODES` entries above): `1045`/`1044`
+ * are the connect-time denials; `1142`/`1143`/`1227` are the post-handshake introspection
+ * privilege denials (DW-19) mapped to `auth` for the same reason.
+ */
+const AUTH_ERRNO: ReadonlySet<number> = new Set([1045, 1044, 1142, 1143, 1227]);
 /** Host: DNS resolution failed / unknown host. */
 const HOST_CODES: ReadonlySet<string> = new Set(["ENOTFOUND", "EAI_AGAIN"]);
 /** Network: reachable-but-refused / reset / timed out. */
@@ -375,6 +393,42 @@ export function classifyConnectionError(err: unknown): ConnectionFailureKind {
 export function toDriverConnectionError(err: unknown): DriverConnectionError {
   const kind = classifyConnectionError(err);
   return new DriverConnectionError(kind, NEUTRAL_MESSAGE[kind]);
+}
+
+/**
+ * Client-side bound (ms) on the post-handshake introspection query, so a hung
+ * `listSchema` (a lock on `information_schema`, a stalled server) cannot block
+ * `close()` → `Core.stop()` INDEFINITELY and leak the port (DW-20). It is scoped
+ * to `listSchema` ONLY and never touches the browse `query`/`queryReadOnly` paths.
+ *
+ * The value is deliberately GENEROUS (not the 5s teardown bound): the four
+ * `information_schema`/system-catalog queries — including the postgres
+ * `pg_index`/`pg_constraint` lateral-unnest joins — can legitimately take several
+ * seconds on a very large catalog, and a false timeout would misreport a healthy
+ * database as unreachable (`network`) with no way to recover. 30s comfortably
+ * clears a slow-but-healthy large-schema read while still bounding a genuinely
+ * wedged query, so shutdown always completes (worst case: teardown starts ~30s
+ * after a quit that lands exactly mid-hang — rare, and finite instead of infinite).
+ */
+export const INTROSPECTION_TIMEOUT_MS = 30_000;
+
+/**
+ * Race `op` against a timer that rejects after `ms`, clearing the timer on settle
+ * so no dangling handle keeps the event loop alive. The timer rejects with a plain
+ * `Error` on purpose: the adapter catch then classifies it via
+ * {@link toDriverConnectionError} (no `code` → `network`), keeping one classification
+ * seam for the DW-20 timeout. Exported for unit testing.
+ */
+export async function withTimeout<T>(op: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("introspection timed out")), ms);
+  });
+  try {
+    return await Promise.race([op, bound]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**

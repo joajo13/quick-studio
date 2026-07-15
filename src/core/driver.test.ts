@@ -16,6 +16,7 @@ import {
   assembleSchema,
   classifyConnectionError,
   createDriver,
+  withTimeout,
   type IntrospectedForeignKey,
   type IntrospectedIndex,
 } from "./driver.ts";
@@ -73,6 +74,12 @@ describe("classifyConnectionError", () => {
     ["MySQL ER_ACCESS_DENIED_ERROR → auth", fakeErr({ code: "ER_ACCESS_DENIED_ERROR" }), "auth"],
     ["MySQL errno 1045 → auth", fakeErr({ code: "SOMETHING", errno: 1045 }), "auth"],
     ["MySQL ER_DBACCESS_DENIED_ERROR → auth", fakeErr({ code: "ER_DBACCESS_DENIED_ERROR" }), "auth"],
+    // Post-handshake introspection privilege denials (DW-19) map to `auth`.
+    ["PG 42501 (insufficient_privilege) → auth", fakeErr({ code: "42501" }), "auth"],
+    ["MySQL ER_TABLEACCESS_DENIED_ERROR → auth", fakeErr({ code: "ER_TABLEACCESS_DENIED_ERROR" }), "auth"],
+    ["MySQL errno 1142 → auth", fakeErr({ code: "SOMETHING", errno: 1142 }), "auth"],
+    ["MySQL ER_COLUMNACCESS_DENIED_ERROR → auth", fakeErr({ code: "ER_COLUMNACCESS_DENIED_ERROR" }), "auth"],
+    ["MySQL ER_SPECIFIC_ACCESS_DENIED_ERROR → auth", fakeErr({ code: "ER_SPECIFIC_ACCESS_DENIED_ERROR" }), "auth"],
     ["ECONNREFUSED → network", fakeErr({ code: "ECONNREFUSED" }), "network"],
     ["ETIMEDOUT → network", fakeErr({ code: "ETIMEDOUT" }), "network"],
     ["ECONNRESET → network", fakeErr({ code: "ECONNRESET" }), "network"],
@@ -88,6 +95,32 @@ describe("classifyConnectionError", () => {
 
   test("never returns unsupported_scheme (that is createDriver's verdict alone)", () => {
     expect(classifyConnectionError(fakeErr({ code: "file" }))).toBe("network");
+  });
+});
+
+// DW-20 — the client-side bound wrapping `listSchema` introspection. It must pass a
+// fast op's value/rejection straight through, reject a never-settling op after the
+// bound, and — critically — clear its timer on settle so no lingering handle keeps the
+// runner alive. Exercised directly with plain promises, no live DB.
+describe("withTimeout (introspection bound)", () => {
+  test("resolves passthrough: a settled op's value comes straight through", async () => {
+    expect(await withTimeout(Promise.resolve(42), 1000)).toBe(42);
+  });
+
+  test("rejects after the bound when the op never settles", async () => {
+    // A never-settling promise + a tiny bound → the timer wins and rejects.
+    await expect(withTimeout(new Promise(() => {}), 10)).rejects.toThrow("timed out");
+  });
+
+  test("a fast-settling op clears the timer and does not hang the runner", async () => {
+    // The bound is huge (100s): if the timer were NOT cleared on settle, its dangling
+    // handle would keep the process alive ~100s. A prompt resolve proves it is cleared.
+    expect(await withTimeout(Promise.resolve("ok"), 100000)).toBe("ok");
+  });
+
+  test("propagates the op's own rejection (not the timer's)", async () => {
+    // The op loses no error identity: its rejection — not a "timed out" — surfaces.
+    await expect(withTimeout(Promise.reject(new Error("boom")), 1000)).rejects.toThrow("boom");
   });
 });
 
