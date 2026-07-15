@@ -81,6 +81,15 @@ export type ConnectionRegistry = {
    * blip is not misreported as unknown.
    */
   getStoredUrl(id: string): StoredUrlLookup;
+  /**
+   * Release the memoized store (DW-14): close its single-writer lock and clear the
+   * cache. TERMINAL — the registry does NOT re-open after close: a subsequent
+   * list/add/etc. returns an `internal_error` rather than re-acquiring the lock, so
+   * an op racing shutdown cannot resurrect the store. Best-effort — swallows any
+   * close error. Wired into `Core.stop` so a clean shutdown frees the lock; a
+   * relaunch then needs no reclaim.
+   */
+  close(): void;
 };
 
 /**
@@ -189,9 +198,21 @@ export function createConnectionRegistry(
 
   // Memoize SUCCESS only — a transient open failure must not poison the surface.
   let cached: CredentialStore | null = null;
+  // Terminal shutdown latch — once `close()` runs, `obtain()` never re-opens.
+  let closed = false;
 
   /** Obtain (open once, then reuse) the store, or map an open failure to internal_error. */
   function obtain(): RegistryResult<CredentialStore> {
+    // After close() the registry is terminal: never re-open (which would re-acquire
+    // the single-writer lock an op racing shutdown could otherwise resurrect).
+    if (closed) {
+      return {
+        ok: false,
+        code: "internal_error",
+        message: "credential store is unavailable",
+        detail: "closed",
+      };
+    }
     if (cached !== null) return { ok: true, value: cached };
     const opened = openStore();
     if (opened.outcome === "opened") {
@@ -333,6 +354,19 @@ export function createConnectionRegistry(
       const record = store.value.getConnection(id);
       if (record === undefined) return { kind: "not-found" };
       return { kind: "found", url: record.url };
+    },
+
+    close() {
+      // Terminal: mark closed first so any op racing shutdown cannot re-open, then
+      // release the memoized store's single-writer lock and drop the cache. Swallow
+      // any close error — teardown must never throw.
+      closed = true;
+      try {
+        cached?.close();
+      } catch {
+        /* best-effort: a wedged close must not block shutdown. */
+      }
+      cached = null;
     },
   };
 }

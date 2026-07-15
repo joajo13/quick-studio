@@ -656,6 +656,9 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
       // open a new (leaked) target. `closeAll`/`close` both swallow teardown errors.
       await connectionTargets.closeAll();
       await connectionManager.close();
+      // Release the credential store's single-writer lock (DW-14) so a relaunch
+      // needs no reclaim. Best-effort — `close()` swallows its own errors.
+      connectionRegistry.close();
       try {
         await sandboxServer.stop();
       } finally {

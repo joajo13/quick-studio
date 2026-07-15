@@ -32,6 +32,7 @@ import { createConnectionRegistry } from "./connection-registry.ts";
 function fakeStore(initial: StoredConnection[] = []) {
   const records = new Map<string, StoredConnection>(initial.map((r) => [r.id, r]));
   let saveCalls = 0;
+  let closeCalls = 0;
   const store: CredentialStore = {
     mode: "persistent",
     saveConnection(record) {
@@ -50,8 +51,11 @@ function fakeStore(initial: StoredConnection[] = []) {
       records.delete(id);
       return { outcome: "ok" };
     },
+    close() {
+      closeCalls++;
+    },
   };
-  return { store, saveCalls: () => saveCalls };
+  return { store, saveCalls: () => saveCalls, closeCalls: () => closeCalls };
 }
 
 // A deterministic fixed key so the store round-trips without a live keychain.
@@ -456,5 +460,53 @@ describe("connection-registry — store-open failure mapping", () => {
     const r = reg.add({ name: "ok", url: "postgres://u:p@h/db" });
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe("internal_error");
+  });
+});
+
+describe("connection-registry — close (DW-14)", () => {
+  test("close() is TERMINAL: it releases the store and a later op does NOT re-open (P4)", () => {
+    const fake = fakeStore([]);
+    let opens = 0;
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => {
+        opens++;
+        return { outcome: "opened", store: fake.store };
+      },
+    });
+
+    // First list opens + memoizes the store (one open, no close yet).
+    expect(reg.list().ok).toBe(true);
+    expect(opens).toBe(1);
+    expect(fake.closeCalls()).toBe(0);
+
+    // close() forwards to the store's close and clears the cache.
+    reg.close();
+    expect(fake.closeCalls()).toBe(1);
+
+    // Terminal: a subsequent list does NOT re-open (no new open) and returns the
+    // closed internal_error — an op racing shutdown can't re-acquire the lock.
+    const list = reg.list();
+    expect(list.ok).toBe(false);
+    if (!list.ok) {
+      expect(list.code).toBe("internal_error");
+      expect(list.detail).toBe("closed");
+    }
+    // add is likewise refused after close, still without re-opening.
+    const add = reg.add({ name: "x", url: "postgres://u:p@h/db" });
+    expect(add.ok).toBe(false);
+    if (!add.ok) {
+      expect(add.code).toBe("internal_error");
+      expect(add.detail).toBe("closed");
+    }
+    expect(opens).toBe(1);
+  });
+
+  test("close() before any open is a safe no-op (nothing cached)", () => {
+    const fake = fakeStore([]);
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => ({ outcome: "opened", store: fake.store }),
+    });
+    expect(() => reg.close()).not.toThrow();
+    expect(fake.closeCalls()).toBe(0);
   });
 });

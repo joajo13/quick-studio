@@ -73,9 +73,17 @@ import {
   loadOrCreateStoreKey,
   type StoreKeyResult,
 } from "./store-key.ts";
+import { acquireStoreLock, type StoreLockResult } from "./store-lock.ts";
 
 /** Encrypted store filename under the app dir. */
 export const STORE_FILE_NAME = "credential-store.enc";
+
+/**
+ * Advisory single-writer lock filename under the app dir (DW-14). Created 0o600 via
+ * `O_EXCL`, held for the persistent store's lifetime, released on `store.close()`.
+ * Records only pid/host/token/timestamp — never a secret. Absent for ephemeral stores.
+ */
+export const STORE_LOCK_FILE_NAME = "credential-store.lock";
 
 /**
  * Non-secret key descriptor sidecar filename. Present ⇒ passphrase mode; absent ⇒
@@ -122,12 +130,20 @@ export type CredentialStore = {
   readonly listConnections: () => readonly StoredConnection[];
   /** Remove a Connection by id. Persistent → flush; ephemeral → memory only. */
   readonly deleteConnection: (id: string) => MutationResult;
+  /**
+   * Release the persistent single-writer lock (DW-14). Idempotent — calling it more
+   * than once, or on an ephemeral store, is a safe no-op. Wired into clean shutdown
+   * via `connectionRegistry.close()` so a relaunch needs no reclaim.
+   */
+  readonly close: () => void;
 };
 
 /** Outcome of {@link openCredentialStore}. Every failure arm is a typed hook. */
 export type OpenResult =
   | { readonly outcome: "opened"; readonly store: CredentialStore }
   | { readonly outcome: "unavailable"; readonly detail: string }
+  /** A live writer already holds the single-writer lock (DW-14). Nothing written. */
+  | { readonly outcome: "locked"; readonly detail: string }
   | { readonly outcome: "key-invalid"; readonly detail: string }
   | { readonly outcome: "corrupt"; readonly detail: string }
   | { readonly outcome: "schema-unknown"; readonly detail: string }
@@ -170,6 +186,12 @@ export type CredentialStoreDeps = {
   readonly loadStoreKey?: () => StoreKeyResult;
   /** Passphrase source for the keychain-less fallback. Defaults to `envPassphraseProvider(process.env)`. */
   readonly passphraseProvider?: PassphraseProvider;
+  /**
+   * Single-writer lock seam (DW-14). Defaults to `acquireStoreLock`. Injected in
+   * tests to drive the `locked`/`unavailable` arms and observe `release` without
+   * touching real disk. Persistent mode only — ephemeral never calls it.
+   */
+  readonly acquireLock?: (lockPath: string) => StoreLockResult;
 };
 
 /**
@@ -416,9 +438,10 @@ function buildDescriptor(salt: Buffer, params: ScryptParams): KeyDescriptor {
 export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult {
   const mode = deps.mode ?? resolveRunMode(process.env);
 
-  // Ephemeral: pure in-memory store, no keychain, no disk.
+  // Ephemeral: pure in-memory store, no keychain, no disk, no lock. `close()` is a
+  // no-op (release is null) — nothing was acquired.
   if (mode === "ephemeral") {
-    return { outcome: "opened", store: buildStore(mode, [], null, null) };
+    return { outcome: "opened", store: buildStore(mode, [], null, null, null) };
   }
 
   // Resolving/creating the app dir (mkdir) can throw on EACCES/EROFS/read-only
@@ -435,6 +458,63 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
   }
   const filePath = join(dir, STORE_FILE_NAME);
   const metaPath = join(dir, STORE_META_FILE_NAME);
+  const lockPath = join(dir, STORE_LOCK_FILE_NAME);
+
+  // Single-writer guarantee (DW-14): acquire the cross-process advisory writer lock
+  // ONCE, here — after ensureAppDir, before the descriptor read / key load / first-
+  // run mint — and hold it for the store's lifetime. A second live writer on this
+  // host is refused with `locked`; a lock I/O error is the non-destructive
+  // `unavailable`. On acquire, `openPersistent` runs the real open and the lock is
+  // released on EVERY non-`opened` arm (a failed open must never leak the lock); on
+  // success the store owns the release via `close()`.
+  const acquireLock = deps.acquireLock ?? ((p) => acquireStoreLock(p));
+  const lock = acquireLock(lockPath);
+  if (lock.outcome === "held") {
+    return { outcome: "locked", detail: lock.detail };
+  }
+  if (lock.outcome === "unavailable") {
+    return { outcome: "unavailable", detail: lock.detail };
+  }
+  let result: OpenResult;
+  try {
+    result = openPersistent(deps, mode, filePath, metaPath, lock.release);
+  } catch (err) {
+    // `openPersistent` is total for expected conditions, but an UNEXPECTED throw
+    // (a contract-violating seam, an allocation failure, etc.) must still never leak
+    // the acquired lock. Release best-effort (idempotent), then let the exceptional
+    // error propagate — the store was never returned, so nothing else owns release.
+    try {
+      lock.release();
+    } catch {
+      /* best-effort: release must not mask the original throw. */
+    }
+    throw err;
+  }
+  if (result.outcome !== "opened") {
+    // Best-effort: a failed open must never leak the lock, but the release seam must
+    // also never turn a typed failure into a throw at this boundary.
+    try {
+      lock.release();
+    } catch {
+      /* best-effort: release must not throw out of a failed open. */
+    }
+  }
+  return result;
+}
+
+/**
+ * The persistent-mode open logic, run ONLY while holding the advisory writer lock
+ * (see {@link openCredentialStore}). Total — returns a typed {@link OpenResult}.
+ * `release` is threaded into {@link buildStore} on success so `store.close()`
+ * releases the lock once; the caller releases it on every non-`opened` result.
+ */
+function openPersistent(
+  deps: CredentialStoreDeps,
+  mode: RunMode,
+  filePath: string,
+  metaPath: string,
+  release: () => void,
+): OpenResult {
   const passphraseProvider =
     deps.passphraseProvider ?? envPassphraseProvider(process.env);
   const loadStoreKey = deps.loadStoreKey ?? loadOrCreateStoreKey;
@@ -480,7 +560,7 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
       // right now (e.g. tampered params). Do not risk a `corrupt` overwrite.
       return { outcome: "unavailable", detail: derived.detail };
     }
-    return loadStoreFromFile(mode, derived.key, filePath);
+    return loadStoreFromFile(mode, derived.key, filePath, release);
   }
 
   // --- Descriptor absent + `.enc` present: keychain mode (Story 2.2 back-compat).
@@ -501,7 +581,7 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
     if (keyResult.outcome === "key-invalid") {
       return { outcome: "key-invalid", detail: keyResult.detail };
     }
-    return loadStoreFromFile(mode, keyResult.key, filePath);
+    return loadStoreFromFile(mode, keyResult.key, filePath, release);
   }
 
   // --- True first run (no descriptor, no `.enc`): keychain decides the mode.
@@ -513,7 +593,7 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
     // Keychain available → keychain mode. Writes NO descriptor (absent ⇒ keychain).
     return {
       outcome: "opened",
-      store: buildStore(mode, [], keyResult.key, filePath),
+      store: buildStore(mode, [], keyResult.key, filePath, release),
     };
   }
 
@@ -567,7 +647,7 @@ export function openCredentialStore(deps: CredentialStoreDeps = {}): OpenResult 
   }
   return {
     outcome: "opened",
-    store: buildStore(mode, [], derived.key, filePath),
+    store: buildStore(mode, [], derived.key, filePath, release),
   };
 }
 
@@ -582,10 +662,11 @@ function loadStoreFromFile(
   mode: RunMode,
   key: Buffer,
   filePath: string,
+  release: () => void,
 ): OpenResult {
   // No file yet → empty store, ready to save.
   if (!existsSync(filePath)) {
-    return { outcome: "opened", store: buildStore(mode, [], key, filePath) };
+    return { outcome: "opened", store: buildStore(mode, [], key, filePath, release) };
   }
 
   // Load + parse the existing file.
@@ -602,7 +683,7 @@ function loadStoreFromFile(
         : undefined;
     if (code === "ENOENT") {
       // TOCTOU: the file vanished between existsSync and read → treat as first run.
-      return { outcome: "opened", store: buildStore(mode, [], key, filePath) };
+      return { outcome: "opened", store: buildStore(mode, [], key, filePath, release) };
     }
     if (typeof code === "string") {
       // EACCES/EIO/EISDIR/… — the ciphertext may be intact; a `corrupt` verdict
@@ -661,23 +742,42 @@ function loadStoreFromFile(
 
   return {
     outcome: "opened",
-    store: buildStore(mode, decrypted.value.connections, key, filePath),
+    store: buildStore(mode, decrypted.value.connections, key, filePath, release),
   };
 }
 
 /**
  * Construct the live store over an in-memory record map. When `key`/`filePath` are
  * non-null (persistent mode) mutations flush ciphertext; when null (ephemeral)
- * they stay in memory. Not exported — the only way to a store is `openCredentialStore`.
+ * they stay in memory. `release` is the persistent single-writer lock's release fn
+ * (null for ephemeral); `close()` invokes it AT MOST ONCE via a latch, so a double
+ * `close()` — or an ephemeral `close()` — is a safe no-op. Not exported — the only
+ * way to a store is `openCredentialStore`.
  */
 function buildStore(
   mode: RunMode,
   initial: readonly StoredConnection[],
   key: Buffer | null,
   filePath: string | null,
+  release: (() => void) | null,
 ): CredentialStore {
   const records = new Map<string, StoredConnection>();
   for (const rec of initial) records.set(rec.id, rec);
+
+  // Latch the lock release so `close()` runs it once even if called repeatedly. The
+  // underlying `release` is itself idempotent — this is belt-and-suspenders.
+  let closed = false;
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    // Best-effort: honor the "close never throws" boundary even against a release
+    // seam that throws (the latch above still flips, so this runs at most once).
+    try {
+      if (release !== null) release();
+    } catch {
+      /* best-effort: a throwing release must not escape close(). */
+    }
+  };
 
   /**
    * Encrypt a PROSPECTIVE record set and write the envelope to disk atomically
@@ -725,5 +825,6 @@ function buildStore(
       next.delete(id);
       return commit(next);
     },
+    close,
   };
 }

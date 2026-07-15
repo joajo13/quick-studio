@@ -54,6 +54,7 @@ function fakeRegistry(): ConnectionRegistry {
       const rec = byId.get(id);
       return rec === undefined ? { kind: "not-found" } : { kind: "found", url: rec.url };
     },
+    close: () => {},
   };
 }
 

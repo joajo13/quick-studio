@@ -20,6 +20,7 @@ import { KEY_LENGTH_BYTES, encryptJson, type CryptoEnvelope } from "./crypto.ts"
 import {
   openCredentialStore,
   STORE_FILE_NAME,
+  STORE_LOCK_FILE_NAME,
   STORE_META_FILE_NAME,
   STORE_SCHEMA_VERSION,
 } from "./credential-store.ts";
@@ -133,8 +134,16 @@ describe("credential-store — persistent behaviour with an injected fixed key",
 
   test("forced write failure leaves memory == disk (no divergence) (P5)", () => {
     // Point the store at a non-existent subdir so the temp write fails (ENOENT).
+    // Inject a no-op lock (DW-14): the real lock would fail to create its file in the
+    // missing dir, but this test's subject is the SAVE-time write divergence, not lock
+    // acquisition, so bypass the lock seam to reach it.
     const dir = join(makeTempDir(), "missing-subdir");
-    const open = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: fixedKeyProvider,
+      acquireLock: () => ({ outcome: "acquired", release: () => {} }),
+    });
     if (open.outcome !== "opened") throw new Error("expected opened");
 
     const result = open.store.saveConnection(rec("c1", "a", "postgres://x@h/a"));
@@ -210,6 +219,107 @@ describe("credential-store — persistent behaviour with an injected fixed key",
     open.store.saveConnection(rec("c1", "new", "postgres://x@h/new"));
     expect(open.store.listConnections()).toHaveLength(1);
     expect(open.store.getConnection("c1")?.name).toBe("new");
+  });
+});
+
+describe("credential-store — single-writer lock (DW-14)", () => {
+  test("a held lock → `locked`, and writes NOTHING (no .enc / .meta / lock)", () => {
+    const dir = makeTempDir();
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: fixedKeyProvider,
+      acquireLock: () => ({ outcome: "held", detail: "held by a live process (pid 999)" }),
+    });
+    expect(open.outcome).toBe("locked");
+    if (open.outcome === "locked") expect(open.detail).toContain("999");
+    // Contention is non-destructive: no store/descriptor/lock file created.
+    expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(false);
+    expect(existsSync(join(dir, STORE_META_FILE_NAME))).toBe(false);
+    expect(existsSync(join(dir, STORE_LOCK_FILE_NAME))).toBe(false);
+  });
+
+  test("a lock I/O error → `unavailable` (non-destructive)", () => {
+    const dir = makeTempDir();
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: fixedKeyProvider,
+      acquireLock: () => ({ outcome: "unavailable", detail: "EACCES" }),
+    });
+    expect(open.outcome).toBe("unavailable");
+    expect(existsSync(join(dir, STORE_FILE_NAME))).toBe(false);
+  });
+
+  test("store.close() invokes the lock release exactly once", () => {
+    const dir = makeTempDir();
+    let released = 0;
+    const open = openCredentialStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: fixedKeyProvider,
+      acquireLock: () => ({ outcome: "acquired", release: () => { released++; } }),
+    });
+    if (open.outcome !== "opened") throw new Error("expected opened");
+    expect(released).toBe(0);
+    open.store.close();
+    expect(released).toBe(1);
+    // Idempotent: a second close does not release again.
+    open.store.close();
+    expect(released).toBe(1);
+  });
+
+  test("ephemeral close() is a no-op and touches no disk", () => {
+    const open = openCredentialStore({ mode: "ephemeral" });
+    if (open.outcome !== "opened") throw new Error("expected opened");
+    // Must not throw and must have no observable effect.
+    expect(() => open.store.close()).not.toThrow();
+  });
+
+  test("in-process reopen of the same real dir still succeeds (same-PID reentrancy)", () => {
+    // Uses the REAL default lock: the first open records our PID; the reopen sees its
+    // own live PID and reclaims → opens. Proves the existing suite's repeated in-
+    // process opens stay green under the default lock.
+    const dir = makeTempDir();
+    const o1 = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    expect(o1.outcome).toBe("opened");
+    const o2 = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    expect(o2.outcome).toBe("opened");
+    // A real lock file exists under the dir (distinct from the .enc/.meta names).
+    expect(existsSync(join(dir, STORE_LOCK_FILE_NAME))).toBe(true);
+  });
+
+  test("a post-acquire failure arm (corrupt descriptor) releases the real lock", () => {
+    const dir = makeTempDir();
+    // Write a malformed descriptor so the open fails AFTER the lock is acquired.
+    writeFileSync(join(dir, STORE_META_FILE_NAME), "{ not valid json");
+    const open = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    expect(open.outcome).toBe("corrupt");
+    // The lock was released (removed) on the failure arm — no leaked lock file, and
+    // no `.stale.*` residue from the release path.
+    expect(existsSync(join(dir, STORE_LOCK_FILE_NAME))).toBe(false);
+    const stale = readdirSync(dir).filter((f) => f.includes(".stale."));
+    expect(stale).toEqual([]);
+  });
+
+  test("an unexpected throw during open releases the lock instead of leaking it", () => {
+    const dir = makeTempDir();
+    let released = 0;
+    // A key seam that THROWS (contract violation) rather than returning a typed
+    // result: it escapes openPersistent's total-return contract. The acquired lock
+    // must still be released on the way out — a failed open must never leak the lock.
+    const throwingKey = (): never => {
+      throw new Error("boom: contract-violating key seam");
+    };
+    expect(() =>
+      openCredentialStore({
+        mode: "persistent",
+        dir,
+        loadStoreKey: throwingKey,
+        acquireLock: () => ({ outcome: "acquired", release: () => { released++; } }),
+      }),
+    ).toThrow("boom");
+    expect(released).toBe(1);
   });
 });
 
