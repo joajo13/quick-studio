@@ -53,6 +53,7 @@ import {
   accumulateStream,
   appendAnswer,
   appendUserMessage,
+  deriveResultKpis,
   EMPTY_PARTIAL,
   setProvider,
   validateSend,
@@ -308,11 +309,50 @@ export function reconcileChartDocs(
 }
 
 /**
- * The generated-query block under an assistant message: the SQL read-only, a "run"
- * action, and — driven by `entry.outcome` — the same result surfaces `QueryTabView`
- * has (a `DataGrid` for rows, an "N rows affected" line, the shared `ConfirmRun`
- * dialog for a destructive/DDL preview, or an error banner). Purely presentational;
- * `ChatTabView` owns all the state and the `runRawQuery` calls.
+ * Copy `text` to the clipboard — a benign, state-free client action (Story 7.5). A
+ * missing/again-failing clipboard is a silent no-op (per the I/O matrix); this never
+ * mutates chat state, fires no RPC, and is safe to call from a render-time handler.
+ */
+function copyToClipboard(text: string): void {
+  if (typeof navigator !== "undefined" && navigator.clipboard) {
+    void navigator.clipboard.writeText(text).catch(() => {});
+  }
+}
+
+/** A compact stroked icon (18px viewBox) for the neutral action rows. */
+function Icon({ path, className }: { path: string; className?: string }): React.JSX.Element {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <path d={path} />
+    </svg>
+  );
+}
+
+const ICON_COPY = "M9 9h9a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2ZM5 15V5a2 2 0 0 1 2-2h8";
+const ICON_OPEN = "M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5";
+const ICON_UP = "M7 10v10H4V10zM7 10l4-7a2 2 0 0 1 2 2v3h5a2 2 0 0 1 2 2.3l-1.2 6A2 2 0 0 1 16.8 20H7";
+const ICON_DOWN = "M17 14V4h3v10zM17 14l-4 7a2 2 0 0 1-2-2v-3H6a2 2 0 0 1-2-2.3l1.2-6A2 2 0 0 1 7.2 4H17";
+const ICON_SHARE = "M8 11l8-4M8 13l8 4M18 8a2.4 2.4 0 1 0 0-4.8A2.4 2.4 0 0 0 18 8ZM6 14.4a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8ZM18 20.8a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z";
+const ICON_REGEN = "M20 11a8 8 0 0 0-14-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14 4.5L20 16M20 20v-4h-4";
+const ICON_MORE = "M5 12h.01M12 12h.01M19 12h.01";
+
+/**
+ * The generated-query block under an assistant message: the SQL read-only inside the
+ * prototype's neutral `.gen-sql` chrome (a `sql · generated` tag + copy / open-in-editor
+ * minis + the preserved `run` action), and — driven by `entry.outcome` — the same result
+ * surfaces `QueryTabView` has: a KPI strip + mini `DataGrid` for rows, an "N rows affected"
+ * line, the shared `ConfirmRun` dialog, or an error banner. Purely presentational —
+ * `ChatTabView` owns all the state and the `runRawQuery` calls. The SQL is rendered as a
+ * SINGLE verbatim mono text node (never tokenized) so it stays a contiguous string.
  */
 function ChatQueryRun({
   sql,
@@ -330,20 +370,44 @@ function ChatQueryRun({
   onSelectRow: (row: number) => void;
 }): React.JSX.Element {
   const outcome = entry.outcome;
+  const kpis = outcome?.kind === "rows" ? deriveResultKpis(outcome.data) : [];
   return (
-    <div className="flex w-full max-w-[85%] flex-col gap-2 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] p-2">
-      <pre className="overflow-x-auto whitespace-pre-wrap break-all font-mono text-xs text-[var(--foreground)]">
-        {sql}
-      </pre>
-      <div>
-        <button
-          type="button"
-          disabled={entry.busy || outcome?.kind === "confirm"}
-          onClick={onRun}
-          className="rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--coral-soft)] px-2 py-0.5 font-mono text-xs lowercase text-[var(--foreground)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          {entry.busy ? "running…" : "run"}
-        </button>
+    <div className="flex w-full max-w-full flex-col gap-3">
+      <div className="gen-sql overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--muted)]">
+        <div className="flex items-center gap-2 border-b border-[var(--border)] bg-[var(--card)] px-3 py-1.5 text-[12px] text-[var(--muted-foreground)]">
+          <span className="font-mono tracking-wide">sql · generated</span>
+          <span className="flex-1" />
+          <button
+            type="button"
+            title="Copy SQL"
+            aria-label="copy sql"
+            onClick={() => copyToClipboard(sql)}
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+          >
+            <Icon path={ICON_COPY} className="h-3.5 w-3.5" />
+            copy
+          </button>
+          <button
+            type="button"
+            title="Open in the query editor"
+            aria-label="open in editor"
+            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+          >
+            <Icon path={ICON_OPEN} className="h-3.5 w-3.5" />
+            open in editor
+          </button>
+          <button
+            type="button"
+            disabled={entry.busy || outcome?.kind === "confirm"}
+            onClick={onRun}
+            className="rounded-md border border-[var(--coral-line)] px-2.5 py-1 font-mono text-[12px] lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {entry.busy ? "running…" : "run"}
+          </button>
+        </div>
+        <pre className="overflow-x-auto whitespace-pre-wrap break-all px-4 py-3 font-mono text-[13px] leading-relaxed text-[var(--foreground)]">
+          {sql}
+        </pre>
       </div>
 
       {outcome?.kind === "confirm" ? (
@@ -351,25 +415,45 @@ function ChatQueryRun({
       ) : null}
 
       {outcome?.kind === "error" ? (
-        <p role="alert" className="font-mono text-xs lowercase text-red-400">
+        <p role="alert" className="font-mono text-xs lowercase text-[var(--err)]">
           {outcome.message}
         </p>
       ) : null}
 
       {outcome?.kind === "ok" ? (
-        <p className="font-mono text-xs lowercase text-[var(--foreground)]">
+        <p className="text-[13px] text-[var(--foreground)]">
           {outcome.rowsAffected} row{outcome.rowsAffected === 1 ? "" : "s"} affected
         </p>
       ) : null}
 
       {outcome?.kind === "rows" ? (
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-3">
           {outcome.truncated ? (
-            <p className="font-mono text-xs lowercase text-amber-400">
+            <p className="font-mono text-xs lowercase text-[var(--warn)]">
               result truncated — only the first {outcome.data.rows.length} rows were returned
             </p>
           ) : null}
-          <div className="h-64">
+          {kpis.length > 0 ? (
+            <div className="flex flex-wrap gap-3">
+              {kpis.map((k, idx) => (
+                <div
+                  key={idx}
+                  className="min-w-[120px] rounded-xl border border-[var(--border)] bg-[var(--muted)] px-4 py-2.5"
+                >
+                  <div className="mb-1 text-[11px] uppercase tracking-wide text-[var(--muted-foreground)]">
+                    {k.label}
+                  </div>
+                  <div
+                    className="text-[22px] font-semibold tabular-nums"
+                    style={{ color: k.kind === "money" ? "var(--money)" : "var(--count)" }}
+                  >
+                    {k.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <div className="h-64 overflow-hidden rounded-xl border border-[var(--border)]">
             <DataGrid
               data={outcome.data}
               primaryKeys={[]}
@@ -391,17 +475,28 @@ function ChatQueryRun({
  * model is still thinking. Honors `prefers-reduced-motion` (no animation used here).
  */
 function ReasoningBlock({ text, live }: { text: string; live?: boolean }): React.JSX.Element {
+  // The literal token `reasoning` lives ONLY on this className (the prototype's
+  // `.reasoning` gate) — rendered ONLY when a message carries reasoning — so a
+  // no-reasoning answer's HTML never contains the substring. The summary copy is
+  // "Thinking…" / "Thought" (no fabricated duration — we have no timing datum).
   return (
-    <details
-      open={live}
-      className="max-w-[85%] rounded-[var(--radius)] border border-[var(--border)] bg-[var(--muted)] px-3 py-1.5"
-    >
-      <summary className="cursor-pointer font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
-        reasoning{live ? " · thinking…" : ""}
+    <details open={live} className="reasoning group mb-3.5 w-full">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 py-0.5 text-[14px] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] [&::-webkit-details-marker]:hidden">
+        {/* One chevron, rotated from the ACTUAL open state (native toggle sets [open])
+            so the caret can't desync after a manual expand of a finished block. */}
+        <span
+          aria-hidden="true"
+          className="text-[var(--muted-foreground)] transition-transform group-open:rotate-90 motion-reduce:transition-none"
+        >
+          ▸
+        </span>
+        {live ? "Thinking…" : "Thought"}
       </summary>
-      <p className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] italic text-[var(--muted-foreground)]">
-        {text}
-      </p>
+      <div className="ml-1.5 mt-1.5 border-l-2 border-[var(--border)] py-1 pl-4">
+        <p className="whitespace-pre-wrap break-words text-[14.5px] leading-relaxed text-[var(--muted-foreground)]">
+          {text}
+        </p>
+      </div>
     </details>
   );
 }
@@ -603,30 +698,47 @@ export function ChatTabView({
 
   return (
     <div className="flex h-full flex-col">
-      {/* Header: provider picker + schema-only indicator. */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-[var(--border)] bg-[var(--card)] px-3 py-2">
-        <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
+      {/* Header: model button (provider · schema-only ▾) + privacy chip. */}
+      <div className="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--card)] px-4">
+        {/* The provider <select> IS the model button — styled ink, borderless, with a
+            trailing `· schema-only` mode + native chevron. aria-label / value / onChange
+            and the disabled-when-no-providers state are preserved verbatim. */}
+        <label className="sr-only" htmlFor="chat-provider">
           provider
         </label>
-        <select
-          aria-label="provider"
-          value={state.provider ?? ""}
-          disabled={!hasProviders}
-          onChange={(e) =>
-            onStateChange(setProvider(state, e.target.value === "" ? null : (e.target.value as ProviderKind)))
-          }
-          className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-xs lowercase text-[var(--foreground)] outline-none focus:border-[var(--coral-line)] disabled:cursor-not-allowed disabled:opacity-40"
+        <div className="inline-flex items-center gap-1 rounded-[9px] px-1 py-1 transition-colors hover:bg-[var(--accent)]">
+          <select
+            id="chat-provider"
+            aria-label="provider"
+            value={state.provider ?? ""}
+            disabled={!hasProviders}
+            onChange={(e) =>
+              onStateChange(setProvider(state, e.target.value === "" ? null : (e.target.value as ProviderKind)))
+            }
+            className="cursor-pointer rounded-md border-none bg-transparent px-1 py-0.5 text-[15px] font-semibold text-[var(--foreground)] outline-none disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <option value="">{hasProviders ? "select…" : "none configured"}</option>
+            {configured.map((k) => (
+              <option key={k} value={k}>
+                {k}
+              </option>
+            ))}
+          </select>
+          <span className="font-mono text-[12.5px] text-[var(--muted-foreground)]">· schema-only</span>
+        </div>
+        <span
+          className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[12.5px]"
+          style={{
+            color: "var(--ok)",
+            backgroundColor: "var(--ok-soft)",
+            borderColor: "color-mix(in srgb, var(--ok) 30%, transparent)",
+          }}
+          title="The Core sends the Provider your schema shape only — table & column names and types. Row data never leaves your machine."
         >
-          <option value="">{hasProviders ? "select…" : "none configured"}</option>
-          {configured.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
-        <span className="ml-auto rounded-full border border-[var(--border)] bg-[var(--muted)] px-2 py-0.5 font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
-          schema-only
+          <Icon path="M8 11V8a4 4 0 0 1 8 0v3M5 11h14v9a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1z" className="h-3.5 w-3.5" />
+          Provider sees <b className="font-semibold">schema only</b> — no rows leave the Core
         </span>
+        <span className="ml-auto" />
       </div>
 
       {providersReady && providersError !== null ? (
@@ -643,17 +755,14 @@ export function ChatTabView({
         </div>
       ) : null}
 
-      {/* Message log. */}
-      <div className="min-h-0 flex-1 overflow-auto p-3">
+      {/* Message log — narrow, centered reading column (the prototype's `.turns`). */}
+      <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
         {state.messages.length === 0 && partial === null ? (
-          <div
-            className="flex h-full items-center justify-center lowercase text-[var(--muted-foreground)]"
-            style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
-          >
+          <div className="flex h-full items-center justify-center text-[15px] text-[var(--muted-foreground)]">
             ask a question about your schema
           </div>
         ) : (
-          <ul className="flex flex-col gap-3">
+          <ul className="mx-auto flex max-w-[760px] flex-col gap-8">
             {state.messages.map((m, i) => {
               // A chart-bearing assistant message whose run produced rows composes a Ring 3
               // render doc (memoized for stable identity, P2); everything else keeps the
@@ -662,78 +771,123 @@ export function ChatTabView({
               // The plain bubble shows fence-STRIPPED prose (never raw ```chart``` JSON) and is
               // suppressed once the sandbox renders the rich block — no duplicated prose (P1).
               const { bubbleText, showBubble } = decideMessageView(m, chartDoc);
+              // USER: right-aligned grey rounded bubble (~75% max-width).
+              if (m.role === "user") {
+                return (
+                  <li key={i} className="flex justify-end">
+                    <div className="max-w-[75%] rounded-[22px] bg-[var(--user-bubble)] px-[18px] py-[11px] text-[16px] leading-relaxed text-[var(--foreground)]">
+                      <p className="whitespace-pre-wrap break-words">{bubbleText}</p>
+                    </div>
+                  </li>
+                );
+              }
+              // ASSISTANT: an ink avatar + a body (reasoning · answer · SQL · result · actions).
               return (
-              <li
-                key={i}
-                className={`flex flex-col gap-1 ${m.role === "user" ? "items-end" : "items-start"}`}
-              >
-                {m.role === "assistant" && m.reasoning !== null ? (
-                  <ReasoningBlock text={m.reasoning} />
-                ) : null}
-                {showBubble ? (
+                <li key={i} className="flex gap-4">
                   <div
-                    className={`max-w-[85%] rounded-[var(--radius)] border px-3 py-2 font-mono text-xs ${
-                      m.role === "user"
-                        ? "border-[var(--coral-line)] bg-[var(--coral-soft)] text-[var(--foreground)]"
-                        : "border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]"
-                    }`}
+                    className="mt-0.5 grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full font-mono text-[13px] font-bold"
+                    style={{ backgroundColor: "var(--coral)", color: "var(--coral-ink)" }}
+                    aria-hidden="true"
                   >
-                    <p className="whitespace-pre-wrap break-words">{bubbleText}</p>
+                    q
                   </div>
-                ) : null}
-                {m.role === "assistant" ? (
-                  <>
-                    <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
-                      schema-only · {m.context.tables} {m.context.tables === 1 ? "table" : "tables"}
-                    </span>
-                    {m.query !== null ? (
-                      <ChatQueryRun
-                        sql={m.query}
-                        entry={runEntry(i)}
-                        onRun={() => void runQuery(i, m.query as string)}
-                        onConfirm={() => void confirmQuery(i)}
-                        onCancel={() => cancelQuery(i)}
-                        onSelectRow={(row) =>
-                          setRuns((r) => ({ ...r, [i]: { ...runEntry(i), selectedRow: row } }))
-                        }
-                      />
-                    ) : null}
-                    {/* Story 5.6: a validated chart spec + query rows renders rich Markdown +
-                        an Observable Plot chart inside the Ring 3 sandbox iframe, beside the
-                        query run. Sized to its content via the guest's `height` signal. */}
-                    {chartDoc !== null ? (
-                      <div className="w-full max-w-[85%]">
-                        <SandboxFrame
-                          doc={chartDoc}
-                          onError={(message) => {
-                            // Never swallow a guest render error (P3): log it + show an inline note.
-                            console.error(`sandbox render error (message ${i}): ${message}`);
-                            setSandboxErrors((e) => ({ ...e, [i]: message }));
-                          }}
-                        />
-                      </div>
-                    ) : null}
-                    {sandboxErrors[i] !== undefined ? (
-                      <p role="alert" className="font-mono text-[11px] lowercase text-amber-400">
-                        chart render failed: {sandboxErrors[i]}
+                  <div className="min-w-0 flex-1">
+                    {m.reasoning !== null ? <ReasoningBlock text={m.reasoning} /> : null}
+                    {showBubble ? (
+                      <p className="mb-3.5 whitespace-pre-wrap break-words text-[16px] leading-[1.75] text-[var(--foreground)]">
+                        {bubbleText}
                       </p>
                     ) : null}
-                  </>
-                ) : null}
-              </li>
+                    <div className="mb-3 flex flex-col gap-3">
+                      <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
+                        schema-only · {m.context.tables} {m.context.tables === 1 ? "table" : "tables"}
+                      </span>
+                      {m.query !== null ? (
+                        <ChatQueryRun
+                          sql={m.query}
+                          entry={runEntry(i)}
+                          onRun={() => void runQuery(i, m.query as string)}
+                          onConfirm={() => void confirmQuery(i)}
+                          onCancel={() => cancelQuery(i)}
+                          onSelectRow={(row) =>
+                            setRuns((r) => ({ ...r, [i]: { ...runEntry(i), selectedRow: row } }))
+                          }
+                        />
+                      ) : null}
+                      {/* Story 5.6: a validated chart spec + query rows renders rich Markdown +
+                          an Observable Plot chart inside the Ring 3 sandbox iframe. The container
+                          div is the only adaptable presentation — SandboxFrame is untouched. */}
+                      {chartDoc !== null ? (
+                        <div className="w-full overflow-hidden rounded-xl border border-[var(--border)]">
+                          <SandboxFrame
+                            doc={chartDoc}
+                            onError={(message) => {
+                              // Never swallow a guest render error (P3): log it + show an inline note.
+                              console.error(`sandbox render error (message ${i}): ${message}`);
+                              setSandboxErrors((e) => ({ ...e, [i]: message }));
+                            }}
+                          />
+                        </div>
+                      ) : null}
+                      {sandboxErrors[i] !== undefined ? (
+                        <p role="alert" className="font-mono text-[11px] lowercase text-[var(--warn)]">
+                          chart render failed: {sandboxErrors[i]}
+                        </p>
+                      ) : null}
+                    </div>
+                    {/* Assistant action row — only `copy` is functional (copies the raw answer
+                        text); the rest are presentational affordances (aria-labels + focus ring). */}
+                    <div role="group" aria-label="response actions" className="flex items-center gap-0.5">
+                      <button
+                        type="button"
+                        title="Copy"
+                        aria-label="copy"
+                        onClick={() => copyToClipboard(m.text)}
+                        className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
+                      >
+                        <Icon path={ICON_COPY} className="h-[17px] w-[17px]" />
+                      </button>
+                      <button type="button" title="Good response" aria-label="good response" className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]">
+                        <Icon path={ICON_UP} className="h-[17px] w-[17px]" />
+                      </button>
+                      <button type="button" title="Bad response" aria-label="bad response" className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]">
+                        <Icon path={ICON_DOWN} className="h-[17px] w-[17px]" />
+                      </button>
+                      <button type="button" title="Share" aria-label="share" className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]">
+                        <Icon path={ICON_SHARE} className="h-[17px] w-[17px]" />
+                      </button>
+                      <button type="button" title="Regenerate" aria-label="regenerate" className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]">
+                        <Icon path={ICON_REGEN} className="h-[17px] w-[17px]" />
+                      </button>
+                      <button type="button" title="More" aria-label="more actions" className="grid h-8 w-8 place-items-center rounded-md text-[var(--muted-foreground)] transition-colors hover:bg-[var(--accent)] hover:text-[var(--foreground)]">
+                        <Icon path={ICON_MORE} className="h-[17px] w-[17px]" />
+                      </button>
+                    </div>
+                  </div>
+                </li>
               );
             })}
             {/* Live streaming bubble (Story 5.4): the in-flight reasoning + incremental
-                answer, coalesced per animation frame. Committed to a real message on
-                `done`; cleared on completion/error/unmount. */}
+                answer, coalesced per animation frame, with a blinking streaming caret.
+                Committed to a real message on `done`; cleared on completion/error/unmount. */}
             {partial !== null ? (
-              <li className="flex flex-col items-start gap-1">
-                {partial.reasoning.length > 0 ? (
-                  <ReasoningBlock text={partial.reasoning} live />
-                ) : null}
-                <div className="max-w-[85%] rounded-[var(--radius)] border border-[var(--border)] bg-[var(--card)] px-3 py-2 font-mono text-xs text-[var(--foreground)]">
-                  <p className="whitespace-pre-wrap break-words">
-                    {partial.text.length > 0 ? partial.text : "…"}
+              <li className="flex gap-4">
+                <div
+                  className="mt-0.5 grid h-[26px] w-[26px] shrink-0 place-items-center rounded-full font-mono text-[13px] font-bold"
+                  style={{ backgroundColor: "var(--coral)", color: "var(--coral-ink)" }}
+                  aria-hidden="true"
+                >
+                  q
+                </div>
+                <div className="min-w-0 flex-1">
+                  {partial.reasoning.length > 0 ? <ReasoningBlock text={partial.reasoning} live /> : null}
+                  <p className="whitespace-pre-wrap break-words text-[16px] leading-[1.75] text-[var(--foreground)]">
+                    {partial.text.length > 0 ? partial.text : null}
+                    <span
+                      aria-hidden="true"
+                      className="ml-0.5 inline-block h-[1.05em] w-[2px] animate-pulse align-text-bottom"
+                      style={{ backgroundColor: "var(--foreground)" }}
+                    />
                   </p>
                 </div>
               </li>
@@ -743,42 +897,58 @@ export function ChatTabView({
       </div>
 
       {error !== null ? (
-        <div className="flex items-center gap-3 border-t border-red-700 bg-red-950/40 px-3 py-2">
-          <p role="alert" className="font-mono text-xs lowercase text-red-400">
+        <div
+          className="flex items-center gap-3 border-t px-5 py-2"
+          style={{ borderColor: "var(--err-line)", backgroundColor: "var(--err-soft)" }}
+        >
+          <p role="alert" className="font-mono text-xs lowercase text-[var(--err)]">
             {error}
           </p>
         </div>
       ) : null}
 
-      {/* Input + send control. */}
-      <div className="flex shrink-0 flex-col gap-2 border-t border-[var(--border)] bg-[var(--card)] p-3">
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          spellCheck={false}
-          rows={3}
-          disabled={!hasProviders}
-          aria-label="chat message"
-          placeholder="ask about your schema…"
-          className="w-full resize-y rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-3 py-2 text-[var(--foreground)] outline-none focus:border-[var(--coral-line)] disabled:cursor-not-allowed disabled:opacity-40"
-          style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
-        />
-        <div className="flex items-center gap-2">
+      {/* Composer — the ChatGPT ink pill + a schema-only note. */}
+      <div className="shrink-0 px-5 pb-3 pt-1.5">
+        <div className="mx-auto flex max-w-[760px] items-end gap-2 rounded-[26px] border border-[var(--border)] bg-[var(--composer-bg)] p-2 transition-colors focus-within:border-[var(--coral-line)]">
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            spellCheck={false}
+            rows={1}
+            disabled={!hasProviders}
+            aria-label="chat message"
+            placeholder="ask about your schema…"
+            className="max-h-40 min-h-[40px] flex-1 resize-none border-none bg-transparent px-2 py-2 text-[16px] leading-normal text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)] disabled:cursor-not-allowed disabled:opacity-40"
+          />
           <button
             type="button"
             disabled={!canSend}
             onClick={() => void send()}
-            className="rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--coral-soft)] px-3 py-1 font-mono text-xs lowercase text-[var(--foreground)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            aria-label="send"
+            title="Send (Ctrl/Cmd+Enter)"
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-full transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+            style={{ backgroundColor: "var(--coral)", color: "var(--coral-ink)" }}
           >
-            {busy ? "asking…" : "send"}
+            {busy ? (
+              <span className="font-mono text-[10px] lowercase">…</span>
+            ) : (
+              <Icon path="M12 20V5M6 11l6-6 6 6" className="h-[18px] w-[18px]" />
+            )}
           </button>
-          <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">ctrl/cmd+enter</span>
+        </div>
+        <div className="mx-auto mt-2 flex max-w-[760px] items-center justify-center gap-2 text-[12px] text-[var(--muted-foreground)]">
+          <span
+            className="inline-block h-1.5 w-1.5 shrink-0 rounded-full"
+            style={{ backgroundColor: "var(--ok)" }}
+            aria-hidden="true"
+          />
+          quick-studio can make mistakes — verify important data. Exposure: schema-only, no rows leave the Core. (ctrl/cmd+enter to send)
         </div>
       </div>
     </div>

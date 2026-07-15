@@ -6,11 +6,17 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { ChatContextSummary, ChatStreamChunk } from "../../shared/contract.ts";
+import {
+  FROZEN_SCHEMA_VERSION,
+  type ChatContextSummary,
+  type ChatStreamChunk,
+  type FrozenData,
+} from "../../shared/contract.ts";
 import {
   accumulateStream,
   appendAnswer,
   appendUserMessage,
+  deriveResultKpis,
   EMPTY_PARTIAL,
   emptyChatState,
   setProvider,
@@ -122,5 +128,93 @@ describe("accumulateStream", () => {
     const p1 = accumulateStream(p0, done);
     expect(p1).toEqual({ text: "x", reasoning: "" });
     expect(EMPTY_PARTIAL).toEqual({ text: "", reasoning: "" });
+  });
+});
+
+describe("deriveResultKpis (Story 7.5 KPI strip — real data only)", () => {
+  const numberScalar = (value: number, name = "count"): FrozenData => ({
+    schemaVersion: FROZEN_SCHEMA_VERSION,
+    columns: [{ name, type: "number" }],
+    rows: [[{ kind: "number", value }]],
+  });
+
+  test("always surfaces the row count as a count KPI", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [
+        { name: "product", type: "string" },
+        { name: "units", type: "number" },
+      ],
+      rows: [
+        [{ kind: "string", value: "a" }, { kind: "number", value: 3 }],
+        [{ kind: "string", value: "b" }, { kind: "number", value: 5 }],
+      ],
+    };
+    // Multi-column result degrades to JUST the row-count KPI.
+    expect(deriveResultKpis(data)).toEqual([{ label: "rows", value: "2", kind: "count" }]);
+  });
+
+  test("a single 1×1 INTEGER scalar surfaces as a count KPI (+ row count), grouped", () => {
+    expect(deriveResultKpis(numberScalar(1284))).toEqual([
+      { label: "count", value: "1,284", kind: "count" },
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+  });
+
+  test("a single 1×1 DECIMAL scalar surfaces as a money KPI (+ row count), grouped", () => {
+    expect(deriveResultKpis(numberScalar(4218.4, "revenue"))).toEqual([
+      { label: "revenue", value: "4,218.4", kind: "money" },
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+  });
+
+  test("a float-artifact scalar is formatted for humans, not raw IEEE-754", () => {
+    expect(deriveResultKpis(numberScalar(0.1 + 0.2, "ratio"))).toEqual([
+      { label: "ratio", value: "0.3", kind: "money" },
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+  });
+
+  test("a negative decimal scalar still surfaces (grouped, money)", () => {
+    expect(deriveResultKpis(numberScalar(-1234.5, "delta"))).toEqual([
+      { label: "delta", value: "-1,234.5", kind: "money" },
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+  });
+
+  test("a non-finite scalar (NaN/Infinity) is NOT surfaced — degrades to row count", () => {
+    expect(deriveResultKpis(numberScalar(Number.NaN))).toEqual([
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+    expect(deriveResultKpis(numberScalar(Number.POSITIVE_INFINITY))).toEqual([
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+  });
+
+  test("a single 1×1 NON-numeric scalar degrades to just the row count", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "name", type: "string" }],
+      rows: [[{ kind: "string", value: "hello" }]],
+    };
+    expect(deriveResultKpis(data)).toEqual([{ label: "rows", value: "1", kind: "count" }]);
+  });
+
+  test("multiple rows of a single numeric column degrade to just the row count", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "id", type: "number" }],
+      rows: [[{ kind: "number", value: 1 }], [{ kind: "number", value: 2 }]],
+    };
+    expect(deriveResultKpis(data)).toEqual([{ label: "rows", value: "2", kind: "count" }]);
+  });
+
+  test("a zero-row result still surfaces a row-count KPI of 0", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "id", type: "number" }],
+      rows: [],
+    };
+    expect(deriveResultKpis(data)).toEqual([{ label: "rows", value: "0", kind: "count" }]);
   });
 });

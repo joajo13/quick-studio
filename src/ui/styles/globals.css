@@ -62,6 +62,14 @@
   --ok: #3fbf7f; /* connection-status green (rail/status-bar dot) */
   --ok-soft: rgba(63, 191, 127, 0.12); /* soft halo behind the --ok dot */
 
+  /* ---- Story 7.5 neutral chat: the only genuinely-missing functional/surface tokens
+     the ChatGPT-look chat needs (ai-chat-chatgpt.html). Money/count are the sole
+     functional KPI colors; user-bubble/composer-bg are neutral greys, no coral. */
+  --money: #6ec6a8; /* KPI money / decimals (functional teal-green) */
+  --count: #7fb3ff; /* KPI count / ints (functional blue) */
+  --user-bubble: #2f2f2f; /* right-aligned user message bubble */
+  --composer-bg: #2f2f2f; /* composer input pill */
+
   /* ---- Story 7.3 semantic tokens: destructive red + restrained warn.
      Values ported from design-artifacts/confirm-destructive.html (--err*) and
      workspace.html (--warn*). Dark-only — the file is dark-first and these are
@@ -116,6 +124,12 @@
   /* ---- Epic 7 neutral shell, light value ---- */
   --ok: #1a8a55; /* connection-status green (rail/status-bar dot) */
   --ok-soft: rgba(26, 138, 85, 0.1); /* soft halo behind the --ok dot */
+
+  /* ---- Story 7.5 neutral chat, light values (ai-chat-chatgpt.html light block) ---- */
+  --money: #157a56;
+  --count: #2f6fd6;
+  --user-bubble: #e8e8e8;
+  --composer-bg: #f4f4f4;
 }
 
 /* Map design tokens onto Tailwind's color scale so utilities resolve them. */
@@ -157,6 +171,13 @@
   /* Epic 7: `text-ok` / `bg-ok` / `bg-ok-soft` for the connection-status dot. */
   --color-ok: var(--ok);
   --color-ok-soft: var(--ok-soft);
+
+  /* Story 7.5: `text-money` / `text-count` for KPI values and `bg-user-bubble` /
+     `bg-composer-bg` for the chat's grey bubble + composer pill. */
+  --color-money: var(--money);
+  --color-count: var(--count);
+  --color-user-bubble: var(--user-bubble);
+  --color-composer-bg: var(--composer-bg);
 
   /* Story 7.3: `text-err` / `bg-err-soft` / `border-err-line` for the destructive
      confirm + error banner, and `text-warn` / `bg-warn-soft` for the truncated banner. */

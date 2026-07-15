@@ -11,7 +11,12 @@
  * classifier. No I/O, no React, no `window`.
  */
 
-import type { ChatContextSummary, ChatStreamChunk, ProviderKind } from "../../shared/contract.ts";
+import type {
+  ChatContextSummary,
+  ChatStreamChunk,
+  FrozenData,
+  ProviderKind,
+} from "../../shared/contract.ts";
 
 /**
  * One entry in the message log. An assistant answer carries its schema-only
@@ -110,6 +115,46 @@ export type StreamPartial = {
 
 /** The empty partial — both channels blank (the start of a stream). */
 export const EMPTY_PARTIAL: StreamPartial = { text: "", reasoning: "" };
+
+/** One derived KPI for the in-chat result strip. `value` is already display-ready. */
+export type ResultKpi = {
+  readonly label: string;
+  readonly value: string;
+  readonly kind: "money" | "count";
+};
+
+/**
+ * Derive the KPI strip for a run's result from the ACTUAL {@link FrozenData} — never
+ * fabricated business metrics (Story 7.5). The row count is ALWAYS surfaced
+ * (`{label:"rows", kind:"count"}`). When the result is exactly one row × one numeric
+ * column — the common `SELECT count(*)` / `SELECT sum(...)` chat shape — that scalar is
+ * ALSO surfaced as its own KPI, labelled by the column name: `kind:"money"` when the
+ * value carries a fractional part (a decimal/money-shaped number, the finest signal
+ * FrozenData's single `number` type exposes), else `kind:"count"`. Any multi-column or
+ * multi-row result degrades to just the row-count KPI (+ the mini table). Pure, DOM-free.
+ */
+export function deriveResultKpis(data: FrozenData): ReadonlyArray<ResultKpi> {
+  const rowKpi: ResultKpi = { label: "rows", value: formatKpiValue(data.rows.length), kind: "count" };
+  if (data.rows.length === 1 && data.columns.length === 1 && data.columns[0]?.type === "number") {
+    const cell = data.rows[0]?.[0];
+    // Non-finite scalars (NaN/±Infinity, reachable from float columns) are NOT surfaced
+    // as a KPI — they would render literally as "NaN"/"∞" in a money-colored card.
+    if (cell !== undefined && cell.kind === "number" && Number.isFinite(cell.value)) {
+      const kind: "money" | "count" = Number.isInteger(cell.value) ? "count" : "money";
+      return [{ label: data.columns[0].name, value: formatKpiValue(cell.value), kind }, rowKpi];
+    }
+  }
+  return [rowKpi];
+}
+
+/**
+ * Human-format a KPI number: thousands grouping, at most two fractional digits, and
+ * NEVER scientific notation — so a float sum (`0.1 + 0.2`) shows `0.3` not
+ * `0.30000000000000004`, and a huge scalar shows its grouped digits not `1e+21`.
+ */
+function formatKpiValue(value: number): string {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+}
 
 /**
  * Pure delta-accumulation for the streaming partial: route a `text-delta` to the
