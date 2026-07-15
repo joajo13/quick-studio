@@ -391,3 +391,30 @@ location: `src/ui/App.tsx` (ConnectionIndicator error dot), `src/ui/schema/Schem
 severity: low
 reason: The neutral shell keeps the pre-existing Tailwind `red-400`/`red-500` scale for functional destructive/error color (spec-sanctioned: "the Tailwind red-* scale used elsewhere in the UI"), and the new `:root[data-theme="light"]` block added in this story flips surfaces/ink/type-colors but NOT these reds. On light surfaces a dark-theme-tuned `red-400` foreground reads at reduced contrast. Latent today: light theme has no toggle UI and is an explicitly-incomplete, mid-Epic-7 surface (documented residual risk in this spec's Verification). The durable fix is a themed destructive/err token pair swapped in for the hardcoded classes, done as part of completing the light theme across the remaining Epic 7 surfaces — out of scope for a presentation-only shell pass.
 status: open
+
+### DW-55: The new client-side CSV Export does not guard against CSV/formula injection — a string cell beginning with `=`, `+`, `-`, or `@` is written verbatim and executes as a formula when the exported file is opened in Excel/Sheets
+
+origin: review of spec-7-2-redesign-tables-grid-neutral.md, 2026-07-15
+source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
+location: `src/ui/data/grid-view.ts` (`csvField`/`rowsToCsv`)
+severity: medium
+reason: `rowsToCsv`'s `csvField` quotes only fields containing `,`/`"`/newline (exactly the escaping the spec prescribed) — it does not neutralize leading formula sigils. Because a DB browser exports arbitrary row content, a cell like `=SUM(A1)`/`+cmd`/`-2+3`/`@foo` becomes a live formula in a spreadsheet app. This is a genuine (well-known) export vulnerability, but the fix is a policy decision the presentation-only spec deliberately did not scope: the common mitigation (prefixing a `'` or tab) MUTATES exported data and many DB tools intentionally preserve fidelity instead. Worth a focused decision + follow-up rather than silently altering export output in an unattended pass.
+status: open
+
+### DW-56: Clicking the result-bar Add-Row ("row") button opens the in-grid insert draft at the bottom of the scrollable table body with no scroll-into-view, so on a full/scrolled page the click appears to do nothing
+
+origin: review of spec-7-2-redesign-tables-grid-neutral.md, 2026-07-15
+source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
+location: `src/ui/workspace/TabContent.tsx` (Add-Row button → `setInsertOpen(true)`), `src/ui/data/DataGrid.tsx` (`InsertDraftRow` renders at the end of `<tbody>` inside the scroll container)
+severity: low
+reason: The spec required Add-Row to "open/reuse the existing in-grid insert-draft flow" and it does — the draft expands at the bottom of `<tbody>`. But the toolbar button lives at the top of the panel and the draft can be off-screen in a scrolled/full page, so the user gets no visible feedback that the click registered. Fixing it needs a ref + `scrollIntoView` (or a focus handoff) added to `DataGrid`, extra surface beyond the presentation-only reskin. Real but low-consequence UX polish — deferred for focused attention.
+status: open
+
+### DW-57: The result-bar insert draft (`insertOpen`) is not reset on page navigation, so a draft opened (and partially typed) on one page stays open with stale values after Prev/Next loads a different page
+
+origin: review of spec-7-2-redesign-tables-grid-neutral.md, 2026-07-15
+source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
+location: `src/ui/workspace/TabContent.tsx` (`insertOpen` state; `InsertDraftRow` value state in `src/ui/data/DataGrid.tsx` — the grid is keyed per table, not per page, so its local draft values persist across page changes)
+severity: low
+reason: `insertOpen` (lifted so the toolbar Add-Row can open the same draft) is only cleared on insert success (`InsertDraftRow.reset()`); `setPage`/prev/next never reset it, and the grid is remounted per bound table (not per page) so `InsertDraftRow`'s local `values` persist too. Paging with a half-filled draft open leaves it open over the newly loaded page with the prior page's typed values. A safe fix is a small `useEffect(() => setInsertOpen(false), [page])` plus a draft-values reset, but it was left out of the presentation pass to avoid adding reset logic near the fetch effect the spec froze. Low-consequence UX edge — deferred.
+status: open

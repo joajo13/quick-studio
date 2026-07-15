@@ -2,10 +2,11 @@
 title: 'Redesign the Tables data grid to neutral — port the ChatGPT-style prototype look onto the browse grid'
 type: 'refactor'
 created: '2026-07-13'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: false
-baseline_revision: '977a350de685efe02506d1171549b18ba379ed80'
+baseline_revision: 'e42de6ea0b4ab10429086d6c3a58c6b221ed5968'
+final_revision: '9c48f8fbe777dc599f6d58efb6193e596c459cde'
 context:
   - '{project-root}/design-artifacts/workspace.html'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-7-context.md'
@@ -74,14 +75,14 @@ warnings: [oversized]
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/ui/styles/globals.css` -- verify the grid's tokens are present (`--coral*` ink, `--t-*`, `--t-key`, `--ok`/`--ok-soft` + `@theme` aliases); add nothing unless a rendered element needs an absent token.
-- [ ] `src/ui/data/grid-view.ts` (NEW) -- add pure `filterRows` and `rowsToCsv` presentation helpers.
-- [ ] `src/ui/data/grid-view.test.ts` (NEW) -- unit-test the I/O matrix edges for `filterRows` (match/no-match/empty query/whitespace) and `rowsToCsv` (comma/quote/newline escaping, null → empty).
-- [ ] `src/ui/data/DataGrid.tsx` -- port the grid look (two-line type-tagged headers + PK `⚿`, tabular-nums right-aligned raw numerics, dimmed dates, boolean/state pills, faint-italic NULL, ink PK cells, faint hover, ink single-select — no zebra), swapping every coral idiom to a `globals.css` token; mutation/edit/insert/delete logic byte-for-byte unchanged.
-- [ ] `src/ui/data/IndexList.tsx` -- align to the reskinned grid idioms (mono, sticky header, `⚿`/`--t-key`, ink hover, `"0 indexes"`); preserve `title="unique index"` and column text; read-only, no behavior change.
-- [ ] `src/ui/workspace/TabContent.tsx` -- port the result-bar (`rowRangeSummary` + `· <ms> ms` readout, live row filter via `filterRows`, Export via `rowsToCsv`, Add-Row ghost) + retained Prev/Next + `rows|indexes` toggle; capture latency around the existing `table.rows` rpc; fetch/pagination/retry/mutation wiring untouched.
-- [ ] `src/ui/schema/CreateTablePanel.tsx` -- reskin to neutral; fields/validation/double-submit/structured-op/optimistic-append preserved.
-- [ ] `src/ui/data/data-grid-state.ts` -- verify no change needed; if a copy string must change, keep it pure and update `data-grid-state.test.ts` in lockstep (not expected).
+- [x] `src/ui/styles/globals.css` -- verify the grid's tokens are present (`--coral*` ink, `--t-*`, `--t-key`, `--ok`/`--ok-soft` + `@theme` aliases); add nothing unless a rendered element needs an absent token.
+- [x] `src/ui/data/grid-view.ts` (NEW) -- add pure `filterRows` and `rowsToCsv` presentation helpers.
+- [x] `src/ui/data/grid-view.test.ts` (NEW) -- unit-test the I/O matrix edges for `filterRows` (match/no-match/empty query/whitespace) and `rowsToCsv` (comma/quote/newline escaping, null → empty).
+- [x] `src/ui/data/DataGrid.tsx` -- port the grid look (two-line type-tagged headers + PK `⚿`, tabular-nums right-aligned raw numerics, dimmed dates, boolean/state pills, faint-italic NULL, ink PK cells, faint hover, ink single-select — no zebra), swapping every coral idiom to a `globals.css` token; mutation/edit/insert/delete logic byte-for-byte unchanged.
+- [x] `src/ui/data/IndexList.tsx` -- align to the reskinned grid idioms (mono, sticky header, `⚿`/`--t-key`, ink hover, `"0 indexes"`); preserve `title="unique index"` and column text; read-only, no behavior change.
+- [x] `src/ui/workspace/TabContent.tsx` -- port the result-bar (`rowRangeSummary` + `· <ms> ms` readout, live row filter via `filterRows`, Export via `rowsToCsv`, Add-Row ghost) + retained Prev/Next + `rows|indexes` toggle; capture latency around the existing `table.rows` rpc; fetch/pagination/retry/mutation wiring untouched.
+- [x] `src/ui/schema/CreateTablePanel.tsx` -- reskin to neutral; fields/validation/double-submit/structured-op/optimistic-append preserved.
+- [x] `src/ui/data/data-grid-state.ts` -- verify no change needed; if a copy string must change, keep it pure and update `data-grid-state.test.ts` in lockstep (not expected).
 
 **Acceptance Criteria:**
 - Given a browsed table, when its page renders, then the data grid matches `design-artifacts/workspace.html`: two-line type-tagged headers with a PK `⚿` in `--t-key`, tabular-nums right-aligned numeric cells, dimmed date cells, boolean/state pills, faint-italic `NULL`, a faint hover wash, and ink single-select — with no coral and no zebra anywhere.
@@ -126,3 +127,49 @@ Latency readout: `rowRangeSummary(grid)` stays the source of the "rows X–Y of 
 **Manual checks (if a seeded DB + browser is available):**
 - Launch the app, open a table, and confirm the grid, result bar (readout + filter + Export + Add-Row + pager), index sub-view, and create-table form visually match `design-artifacts/workspace.html`; toggle light/dark and confirm both themes read correctly with no coral.
 - Type in the filter and confirm rows hide/show with no network call; click Export and confirm a CSV of the loaded page downloads with no network call.
+
+## Review Triage Log
+
+### 2026-07-15 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (high 0, medium 0, low 4)
+- defer: 3: (high 0, medium 1, low 2)
+- reject: 8
+- addressed_findings:
+  - `[low]` `[patch]` Row-selection highlight could land on the wrong underlying row once the live filter reindexes the rendered list — clear the selection whenever the filter query changes (presentation-only, `src/ui/workspace/TabContent.tsx`).
+  - `[low]` `[patch]` Export could serialize the previous page's rows mid-refetch — disable Export while `loading`, not only when `data === null` (`src/ui/workspace/TabContent.tsx`).
+  - `[low]` `[patch]` The `· <ms> ms` latency readout was attributed to failed loads beside a stale summary — measure and show latency only on a successful fetch, clear it on error (`src/ui/workspace/TabContent.tsx`).
+  - `[low]` `[patch]` Export filename dropped the schema and left filesystem-hostile characters unsanitized — qualify with the schema and strip invalid chars (`src/ui/workspace/TabContent.tsx`).
+
+## Auto Run Result
+
+Status: done
+
+### Summary
+Presentation-only neutral reskin of the Tables data grid, its result bar/pager, the index sub-view, and the create-table form — porting the ChatGPT-style `design-artifacts/workspace.html` look onto the existing React components with no change to any data path (`table.rows` read, guarded `execute` mutation path, the pure `DataGridState` model, remount-per-table keying, double-submit refs, `reloadNonce` retry). Added a pure `grid-view.ts` (live client-side row filter + client-side CSV export) and wired the result bar's `rowRangeSummary` + `· <ms> ms` latency readout, live filter, Export, and Add-Row ghost affordances.
+
+### Files changed
+- `src/ui/data/grid-view.ts` (NEW) — pure, DOM/RPC-free `filterRows` (case-insensitive substring over loaded rows; blank query returns all) and `rowsToCsv` (RFC-4180-ish escaping; `null` → empty field).
+- `src/ui/data/grid-view.test.ts` (NEW) — 12 Bun unit tests over the I/O-matrix edges (filter match/no-match/empty/whitespace/null; CSV comma/quote/newline/null/header-only).
+- `src/ui/data/DataGrid.tsx` — neutral cell reskin (numeric `tabular-nums` ink as-is, dimmed dates, `--ok`/muted boolean state pills, faint-italic NULL, ink `--coral` PK cells) and a lifted/controlled insert-draft open state so the result-bar Add-Row reuses the same `onInsertRow` path; edit/delete/insert logic unchanged.
+- `src/ui/workspace/TabContent.tsx` — result-bar port (`rowRangeSummary` + latency suffix, live `filterRows` input, client-side `rowsToCsv` Export, Add-Row ghost, retained Prev/Next + `rows|indexes` toggle), passive latency capture around the existing `table.rows` rpc, plus the four review patches above.
+- `src/ui/schema/CreateTablePanel.tsx` — neutral form reskin (ink `--coral` submit/focus/checkbox accents, neutral hovers); fields/validation/`inFlight`/structured op/optimistic append preserved.
+- VERIFY-ONLY, unchanged: `src/ui/data/IndexList.tsx` (already matched the reskinned idioms), `src/ui/styles/globals.css` (all needed tokens present), `src/ui/data/data-grid-state.ts` (`rowRangeSummary` strings intact).
+
+### Review findings breakdown
+- Patches applied (4, all low): selection-under-filter reset, Export disabled while loading, latency not shown on failed fetch, export filename schema-qualified + sanitized.
+- Deferred (3): DW-55 CSV/formula-injection on Export (medium; a data-mutating policy decision the spec deliberately did not scope), DW-56 Add-Row draft opens off-screen with no scroll-into-view (low), DW-57 insert draft not reset on page navigation (low).
+- Rejected (8): summary shows page-range under filter (spec-specified, `rowRangeSummary` test-locked); `selectRow` bounds guard (frozen module; same root as the patched selection reset); toolbar Add-Row gated on `canMutate` (spec-mandated); CSV LF-not-CRLF / no BOM ("-ish" intentional, LF universally accepted); sticky filter across pages (debatable design, not a bug); duplicated `cellText` (no current defect); `filterRows` same-ref comment (cosmetic); Unicode locale casing (extreme edge).
+
+### Follow-up review recommendation
+`false` — the final pass made only four localized, low-consequence presentation-layer patches confined to `TabContent.tsx`, with no behavior/API/data-path/security impact and all suites green. An independent follow-up review would add no meaningful signal.
+
+### Verification
+- `bunx tsc --noEmit` — clean (0 errors), pre- and post-patch.
+- `bun test` — 1043 pass / 0 fail across 68 files (incl. the new `grid-view.test.ts`); `data-grid-state`, `workspace-state`, `create-table`, `row-mutations`, `IndexList` green with no assertion churn.
+
+### Residual risks
+- Light theme remains an explicitly-incomplete, mid-Epic-7 surface (no toggle UI yet); the grid draws from themed tokens but full light-theme fidelity is verified separately.
+- No component-level render test exercises the new result-bar affordances (filter/Export/Add-Row) end-to-end; the pure helpers are unit-tested and the wiring is type-checked, but the DOM interaction is only manually verifiable with a seeded DB + browser (unavailable in this unattended run).
+- The deferred items (DW-55/56/57) are known, logged, and low/medium-consequence.

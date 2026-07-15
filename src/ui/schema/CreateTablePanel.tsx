@@ -67,7 +67,7 @@ function Field({
         spellCheck={false}
         autoCapitalize="off"
         autoComplete="off"
-        className={`rounded-[var(--radius)] border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary ${
+        className={`rounded-[var(--radius)] border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus-visible:border-[var(--coral)] ${
           invalid ? "border-red-500" : "border-border"
         }`}
       />
@@ -113,7 +113,7 @@ function ColumnRow({
         <select
           value={column.type}
           onChange={(e) => onChange({ type: e.target.value })}
-          className="rounded-[var(--radius)] border border-border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary"
+          className="rounded-[var(--radius)] border border-border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus-visible:border-[var(--coral)]"
         >
           {CREATE_TABLE_TYPES.map((type) => (
             <option key={type} value={type}>
@@ -145,7 +145,7 @@ function ColumnRow({
         onClick={onRemove}
         disabled={!removable}
         aria-label="Remove column"
-        className="rounded-[var(--radius)] border border-border px-2 py-1 font-mono text-xs lowercase text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+        className="rounded-[var(--radius)] border border-border px-2 py-1 font-mono text-xs lowercase text-muted-foreground transition-colors hover:bg-[var(--muted)] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
       >
         ✕
       </button>
@@ -230,7 +230,7 @@ export function CreateTablePanel({
           type="button"
           onClick={onClose}
           aria-label="Close create table"
-          className="rounded-[var(--radius)] border border-border px-3 py-1 font-mono text-xs lowercase text-foreground transition-colors hover:bg-accent"
+          className="rounded-[var(--radius)] border border-border px-3 py-1 font-mono text-xs lowercase text-foreground transition-colors hover:bg-[var(--muted)]"
         >
           close
         </button>
@@ -252,7 +252,7 @@ export function CreateTablePanel({
               <select
                 value={schema}
                 onChange={(e) => setSchema(e.target.value)}
-                className="rounded-[var(--radius)] border border-border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary"
+                className="rounded-[var(--radius)] border border-border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus-visible:border-[var(--coral)]"
               >
                 {schemas.map((s) => (
                   <option key={s} value={s}>
@@ -271,7 +271,7 @@ export function CreateTablePanel({
             <button
               type="button"
               onClick={addColumn}
-              className="rounded-[var(--radius)] border border-border px-2 py-1 font-mono text-xs lowercase text-foreground transition-colors hover:bg-accent"
+              className="rounded-[var(--radius)] border border-border px-2 py-1 font-mono text-xs lowercase text-foreground transition-colors hover:bg-[var(--muted)]"
             >
               + add column
             </button>
@@ -294,7 +294,7 @@ export function CreateTablePanel({
             type="button"
             disabled={!validation.ok || busy}
             onClick={() => void onSubmit()}
-            className="rounded-[var(--radius)] border border-border bg-primary px-3 py-1 font-mono text-xs lowercase text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+            className="rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--coral)] px-3 py-1 font-mono text-xs lowercase text-[var(--coral-ink)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {busy ? "creating…" : "create table"}
           </button>

@@ -9,7 +9,7 @@
  * (erd / chat / report) stay labelled shell placeholders for later epics.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type {
   ErdTabLayout,
   ExecuteResult,
@@ -21,6 +21,7 @@ import type {
 } from "../../shared/contract.ts";
 import { DataGrid } from "../data/DataGrid.tsx";
 import { IndexList } from "../data/IndexList.tsx";
+import { filterRows, rowsToCsv } from "../data/grid-view.ts";
 import {
   applyPage,
   canNext,
@@ -90,6 +91,12 @@ function TableTabView({
   const [grid, setGrid] = useState<DataGridState>(() => createDataGridState());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Presentation-only view state (never a refetch): the live client-side row filter,
+  // the last `table.rows` round-trip latency for the result-bar readout, and whether
+  // the in-grid insert draft is open (so the result-bar Add-Row can open the same one).
+  const [filterQuery, setFilterQuery] = useState("");
+  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [insertOpen, setInsertOpen] = useState(false);
   // Bumped by the error banner's "retry" so the fetch effect re-fires for the
   // CURRENT page — a failed page-N fetch would otherwise leave the pager frozen
   // (Next is a no-op when it targets the already-set page) with no in-tab recovery.
@@ -121,12 +128,19 @@ function TableTabView({
   useEffect(() => {
     let alive = true;
     setLoading(true);
+    // Time the existing read for the result-bar `· <ms> ms` readout — a passive
+    // measurement around the SAME rpc; it changes neither the call nor the deps.
+    const startedAt = performance.now();
     void rpc<TableRowsResult>("table.rows", { schema: effectiveSchema, table: table.name, page }).then((reply) => {
       if (!alive) return;
       if (!reply.ok) {
+        // Don't attribute a latency readout to a failed load — the result bar would
+        // otherwise show the previous page's summary next to the failed request's ms.
+        setLatencyMs(null);
         setError(envelopeText(reply.error));
         setData(null);
       } else {
+        setLatencyMs(Math.round(performance.now() - startedAt));
         setError(null);
         setData(reply.result.data);
         setGrid((g) =>
@@ -210,6 +224,39 @@ function TableTabView({
     return (await runOp(op, false)) === "ok";
   };
 
+  // The live filter is presentation-only: it hides/shows already-loaded rows, never a
+  // refetch. Memoize so the derived page object keeps a stable identity across unrelated
+  // renders — a fresh object every render would thrash `DataGrid`'s edit-reset effect.
+  const visibleRows = useMemo(() => filterRows(data?.rows ?? [], filterQuery), [data, filterQuery]);
+  const visibleData = useMemo(
+    () => (data === null ? null : { ...data, rows: visibleRows }),
+    [data, visibleRows],
+  );
+
+  // Selection is a positional index into the RENDERED rows; changing the filter reindexes
+  // that list, so clear any selection to stop the highlight from landing on a different
+  // underlying row. Presentation-only — never touches the pager/data model. (No-op when
+  // nothing is selected, so filter keystrokes don't churn grid state.)
+  useEffect(() => {
+    setGrid((g) => (g.selectedRow === null ? g : selectRow(g, -1)));
+  }, [filterQuery]);
+
+  // Export the currently-shown rows to a client-side CSV — no rpc, no contract change.
+  const onExport = (): void => {
+    if (data === null) return;
+    const csv = rowsToCsv(data.columns, visibleRows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    // Qualify with the schema and strip filesystem-hostile characters so a table named
+    // with a `/`, `.`, or reserved char yields a valid, non-colliding download filename.
+    const base = effectiveSchema === undefined ? table.name : `${effectiveSchema}.${table.name}`;
+    a.download = `${base.replace(/[^\w.-]+/g, "_")}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="flex h-full flex-col">
       {/* Result bar: table name + pager + summary (mono, terse). */}
@@ -240,31 +287,90 @@ function TableTabView({
           ))}
         </div>
         <span className="ml-auto lowercase text-[var(--muted-foreground)]">
-          {view === "indexes"
-            ? `${indexes.length} ${indexes.length === 1 ? "index" : "indexes"}`
-            : loading
-              ? "loading…"
-              : rowRangeSummary(grid)}
+          {view === "indexes" ? (
+            `${indexes.length} ${indexes.length === 1 ? "index" : "indexes"}`
+          ) : loading ? (
+            "loading…"
+          ) : (
+            <>
+              {rowRangeSummary(grid)}
+              {latencyMs !== null ? (
+                <>
+                  {" · "}
+                  <span className="text-[var(--coral)]">{latencyMs} ms</span>
+                </>
+              ) : null}
+            </>
+          )}
         </span>
         {view === "rows" ? (
-          <div className="flex items-center gap-1">
+          <>
+            {/* Live client-side row filter — hides/shows loaded rows, never a refetch. */}
+            <label className="inline-flex items-center gap-1.5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-0.5 text-[var(--muted-foreground)] focus-within:border-[var(--coral-line)]">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                aria-hidden
+                className="h-3 w-3"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="M20 20l-3.5-3.5" />
+              </svg>
+              <input
+                type="text"
+                value={filterQuery}
+                onChange={(e) => setFilterQuery(e.target.value)}
+                placeholder="filter rows…"
+                aria-label="Filter rows"
+                spellCheck={false}
+                autoComplete="off"
+                className="w-32 border-none bg-transparent lowercase text-[var(--foreground)] outline-none placeholder:text-[var(--muted-foreground)]"
+              />
+            </label>
+            {canMutate ? (
+              <button
+                type="button"
+                onClick={() => setInsertOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--card)] px-2 py-0.5 lowercase text-[var(--muted-foreground)] transition-colors hover:border-[var(--coral-line)] hover:text-[var(--foreground)]"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden className="h-3 w-3">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+                row
+              </button>
+            ) : null}
             <button
               type="button"
-              disabled={!canPrev(grid) || loading || error !== null}
-              onClick={() => setPage(prevPage(grid))}
-              className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={onExport}
+              disabled={data === null || loading}
+              className="inline-flex items-center gap-1.5 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--card)] px-2 py-0.5 lowercase text-[var(--muted-foreground)] transition-colors hover:border-[var(--coral-line)] hover:text-[var(--foreground)] disabled:cursor-not-allowed disabled:opacity-40"
             >
-              prev
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden className="h-3 w-3">
+                <path d="M12 3v11M8 10l4 4 4-4M5 20h14" />
+              </svg>
+              export
             </button>
-            <button
-              type="button"
-              disabled={!canNext(grid) || loading || error !== null}
-              onClick={() => setPage(nextPage(grid))}
-              className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              next
-            </button>
-          </div>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                disabled={!canPrev(grid) || loading || error !== null}
+                onClick={() => setPage(prevPage(grid))}
+                className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                prev
+              </button>
+              <button
+                type="button"
+                disabled={!canNext(grid) || loading || error !== null}
+                onClick={() => setPage(nextPage(grid))}
+                className="rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                next
+              </button>
+            </div>
+          </>
         ) : null}
       </div>
 
@@ -303,14 +409,16 @@ function TableTabView({
         // Indexes ride in the schema payload already held in props — render directly,
         // no fetch, no dependence on the rows load state.
         <IndexList indexes={indexes} />
-      ) : data !== null ? (
+      ) : visibleData !== null ? (
         <DataGrid
-          data={data}
+          data={visibleData}
           primaryKeys={primaryKeys}
           selectedRow={grid.selectedRow}
           onSelectRow={(index) => setGrid((g) => selectRow(g, index))}
           canMutate={canMutate}
           busy={mutating}
+          insertOpen={insertOpen}
+          onInsertOpenChange={setInsertOpen}
           onCommitEdit={onCommitEdit}
           onDeleteRow={onDeleteRow}
           onInsertRow={onInsertRow}

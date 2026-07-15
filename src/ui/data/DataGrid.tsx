@@ -32,19 +32,36 @@ function typeMeta(type: FrozenColumn["type"]): { readonly color: string; readonl
   }
 }
 
-/** Render one tagged cell. Numeric right-aligned tabular; NULL faint italic. */
+/**
+ * Render one cell in the neutral prototype idiom: numeric right-aligned `tabular-nums`
+ * in ink (inherits the `<td>`'s color — ink, or `--coral` on a PK column — value AS-IS,
+ * no thousands grouping); date dimmed; boolean as an ok/muted state pill; NULL faint
+ * italic; string base ink. Data-type color lives in the header tag, not the cell.
+ */
 function Cell({ cell, numeric }: { cell: FrozenCell; numeric: boolean }): React.JSX.Element {
   if (cell.kind === "null") {
     return <span className="italic text-[color:var(--t-text)] opacity-60">null</span>;
   }
   if (cell.kind === "number") {
-    return <span className="tabular-nums text-[color:var(--t-int)]">{cell.value}</span>;
+    return <span className="tabular-nums">{cell.value}</span>;
   }
   if (cell.kind === "boolean") {
-    return <span className="text-[color:var(--t-bool)]">{cell.value ? "true" : "false"}</span>;
+    return (
+      <span
+        className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px]"
+        style={
+          cell.value
+            ? { color: "var(--ok)", backgroundColor: "var(--ok-soft)" }
+            : { color: "var(--muted-foreground)", backgroundColor: "var(--muted)" }
+        }
+      >
+        <span className="inline-block h-[5px] w-[5px] rounded-full bg-current" aria-hidden />
+        {cell.value ? "true" : "false"}
+      </span>
+    );
   }
   if (cell.kind === "date") {
-    return <span className="text-[color:var(--t-time)]">{cell.iso}</span>;
+    return <span className="text-[color:var(--muted-foreground)]">{cell.iso}</span>;
   }
   return <span className={numeric ? "tabular-nums" : undefined}>{cell.value}</span>;
 }
@@ -173,15 +190,20 @@ function InsertDraftRow({
   columns,
   busy,
   actionsCol,
+  open,
+  onOpenChange,
   onInsert,
 }: {
   columns: ReadonlyArray<FrozenColumn>;
   busy: boolean;
   /** A trailing per-row actions column exists on the data rows — pad the draft to match. */
   actionsCol: boolean;
+  /** Whether the draft is expanded — lifted so the result-bar Add-Row can open it too. */
+  open: boolean;
+  /** Report an open/close (collapsed toggle, cancel, or commit-success reset). */
+  onOpenChange: (open: boolean) => void;
   onInsert: (draft: ReadonlyArray<{ column: string; edit: CellEdit }>) => boolean | Promise<boolean>;
 }): React.JSX.Element {
-  const [open, setOpen] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
   const [nulls, setNulls] = useState<Record<string, boolean>>({});
   // `busy`/`disabled` only lands after the parent re-renders, so two synchronous
@@ -195,7 +217,7 @@ function InsertDraftRow({
   const reset = (): void => {
     setValues({});
     setNulls({});
-    setOpen(false);
+    onOpenChange(false);
   };
 
   const commit = async (): Promise<void> => {
@@ -220,7 +242,7 @@ function InsertDraftRow({
         <td colSpan={span} className="px-3 py-1.5">
           <button
             type="button"
-            onClick={() => setOpen(true)}
+            onClick={() => onOpenChange(true)}
             className="rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--coral-soft)] px-2 py-0.5 font-mono text-xs lowercase text-[var(--foreground)] transition-colors hover:opacity-90"
           >
             + insert row
@@ -298,6 +320,8 @@ export function DataGrid({
   onSelectRow,
   canMutate = false,
   busy = false,
+  insertOpen,
+  onInsertOpenChange,
   onCommitEdit,
   onDeleteRow,
   onInsertRow,
@@ -310,6 +334,11 @@ export function DataGrid({
   canMutate?: boolean;
   /** A mutation is in flight — inputs disable to avoid a double-submit. */
   busy?: boolean;
+  /** Controlled insert-draft open state — lets the result-bar Add-Row open the same
+   * in-grid draft. Omit to let the grid's own "+ insert row" toggle manage it. */
+  insertOpen?: boolean;
+  /** Report insert-draft open/close when controlled. */
+  onInsertOpenChange?: (open: boolean) => void;
   /**
    * Commit a single-cell edit (parent builds the structured `update`). Resolves
    * `true` when the edit was ACCEPTED (validation passed + committed) so the editor
@@ -325,6 +354,11 @@ export function DataGrid({
   const pkSet = new Set(primaryKeys);
   const [editing, setEditing] = useState<EditingCell | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState<number | null>(null);
+  // Insert-draft open state: controlled by the parent when `insertOpen` is provided
+  // (so the result-bar Add-Row can open the same draft), else self-managed here.
+  const [internalInsertOpen, setInternalInsertOpen] = useState(false);
+  const draftOpen = insertOpen ?? internalInsertOpen;
+  const setDraftOpen = onInsertOpenChange ?? setInternalInsertOpen;
 
   // `editing`/`confirmingDelete` are keyed by ROW INDEX. A post-mutation refetch swaps
   // in a new `data` object with (potentially) reindexed rows, so any open editor or
@@ -398,6 +432,9 @@ export function DataGrid({
                 {row.map((cell, c) => {
                   const col = data.columns[c];
                   const numeric = col?.type === "number";
+                  // PK-column cells render in ink `--coral` (the prototype's `.pk-cell`);
+                  // string/number cells inherit it, while pill/date/null set their own.
+                  const isPk = col !== undefined && pkSet.has(col.name);
                   const isEditing = editing !== null && editing.row === r && editing.col === c;
                   return (
                     <td
@@ -405,7 +442,7 @@ export function DataGrid({
                       onDoubleClick={() => {
                         if (mutable && col !== undefined) setEditing({ row: r, col: c });
                       }}
-                      className={`whitespace-nowrap px-3 py-1 text-[var(--foreground)] ${numeric ? "text-right" : "text-left"} ${
+                      className={`whitespace-nowrap px-3 py-1 ${isPk ? "text-[var(--coral)]" : "text-[var(--foreground)]"} ${numeric ? "text-right" : "text-left"} ${
                         mutable ? "cursor-text" : ""
                       }`}
                     >
@@ -475,7 +512,14 @@ export function DataGrid({
             );
           })}
           {onInsertRow !== undefined ? (
-            <InsertDraftRow columns={data.columns} busy={busy} actionsCol={actionsCol} onInsert={onInsertRow} />
+            <InsertDraftRow
+              columns={data.columns}
+              busy={busy}
+              actionsCol={actionsCol}
+              open={draftOpen}
+              onOpenChange={setDraftOpen}
+              onInsert={onInsertRow}
+            />
           ) : null}
         </tbody>
       </table>
