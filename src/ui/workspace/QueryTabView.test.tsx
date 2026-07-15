@@ -38,7 +38,7 @@ describe("QueryTabView — static structure", () => {
   test("Run is disabled when the draft is blank", () => {
     const html = renderToStaticMarkup(<QueryTabView draft="" onDraftChange={noop} />);
     expect(html).toContain('disabled=""');
-    expect(html).toContain(">run<");
+    expect(html).toContain(">Run<");
   });
 
   test("Run is disabled when the draft is whitespace-only", () => {

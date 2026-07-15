@@ -194,11 +194,19 @@ export function QueryTabView({
             type="button"
             disabled={!isRunnable(draft) || busy || confirm !== null}
             onClick={() => void run()}
-            className="rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--coral-soft)] px-3 py-1 font-mono text-xs lowercase text-[var(--foreground)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex items-center gap-2 rounded-[7px] bg-[var(--coral)] px-3 py-1.5 text-xs font-semibold text-[var(--coral-ink)] transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {busy ? "running…" : "run"}
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} className="h-3 w-3" aria-hidden="true">
+              <path d="M12 19V5M6 11l6-6 6 6" />
+            </svg>
+            {busy ? "running…" : "Run"}
+            <span
+              className="rounded-[4px] border px-1 font-mono text-[10px] opacity-75"
+              style={{ borderColor: "color-mix(in srgb, var(--coral-ink) 30%, transparent)" }}
+            >
+              {typeof navigator !== "undefined" && /Mac|iP(hone|ad|od)/.test(navigator.platform) ? "⌘↵" : "Ctrl ↵"}
+            </span>
           </button>
-          <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">ctrl/cmd+enter</span>
           {data !== null ? (
             <>
               <span className="ml-auto font-mono text-[12px] lowercase text-[var(--muted-foreground)]">
@@ -228,8 +236,8 @@ export function QueryTabView({
       </div>
 
       {truncated && data !== null ? (
-        <div className="flex items-center border-b border-amber-700 bg-amber-950/40 px-3 py-2">
-          <p className="font-mono text-xs lowercase text-amber-400">
+        <div className="flex items-center border-b border-[var(--warn)] bg-[var(--warn-soft)] px-3 py-2">
+          <p className="font-mono text-xs lowercase text-[var(--warn)]">
             result truncated — only the first {data.rows.length} rows were returned
           </p>
         </div>
@@ -246,8 +254,8 @@ export function QueryTabView({
       ) : null}
 
       {error !== null ? (
-        <div className="flex items-center gap-3 border-b border-red-700 bg-red-950/40 px-3 py-2">
-          <p role="alert" className="font-mono text-xs lowercase text-red-400">
+        <div className="flex items-center gap-3 border-b border-[var(--err-line)] bg-[var(--err-soft)] px-3 py-2">
+          <p role="alert" className="font-mono text-xs lowercase text-[var(--err)]">
             {error}
           </p>
         </div>

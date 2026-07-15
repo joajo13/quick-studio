@@ -418,3 +418,66 @@ location: `src/ui/workspace/TabContent.tsx` (`insertOpen` state; `InsertDraftRow
 severity: low
 reason: `insertOpen` (lifted so the toolbar Add-Row can open the same draft) is only cleared on insert success (`InsertDraftRow.reset()`); `setPage`/prev/next never reset it, and the grid is remounted per bound table (not per page) so `InsertDraftRow`'s local `values` persist too. Paging with a half-filled draft open leaves it open over the newly loaded page with the prior page's typed values. A safe fix is a small `useEffect(() => setInsertOpen(false), [page])` plus a draft-values reset, but it was left out of the presentation pass to avoid adding reset logic near the fetch effect the spec froze. Low-consequence UX edge — deferred.
 status: open
+
+### DW-58: The redesigned Confirm button paints white text on the new `--err` fill (`#ef6a63`), a ~3:1 contrast ratio that falls below WCAG AA (4.5:1) for its 12.5px semibold label
+
+origin: review of spec-7-3-redesign-query-confirm-neutral.md, 2026-07-15
+source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (`footerButtons`, the `bg-[var(--err)] text-white` Confirm button)
+severity: medium
+reason: The white-on-`--err` fill is a faithful port of `confirm-destructive.html` (`.dx-btn-danger { background: var(--err); color: #fff }`), which the spec designates the visual source of truth — so following the contract produced it. The fix (darken `--err`, or the label) is an epic-wide `--err` design-token decision touching every destructive surface, not an isolated component tweak, and it slightly deviates from the prototype the spec mandates. Deferred to a focused a11y/contrast pass over the Epic 7 `--err`/`--warn` palette rather than a unilateral change in a presentation-only story.
+status: open
+
+### DW-59: `ConfirmRun` declares `role="alertdialog"` + `aria-modal="true"` but does not enforce modality — no focus trap, no scrim-click dismiss, and background content stays tabbable
+
+origin: review of spec-7-3-redesign-query-confirm-neutral.md, 2026-07-15
+source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (the `alertdialog` card + `fixed inset-0` scrim)
+severity: medium
+reason: The prototype markup (and the port) assert `aria-modal="true"`, but the component adds no focus trap and the scrim has no dismiss handler, so a keyboard/AT user can Tab out to the page behind the "modal" and a screen reader announces a boundary that isn't kept. This is a genuine modal-a11y gap, but it is shared across all three callers (Query/Chat/Report) and a proper focus trap is real behavior beyond a presentation-only reskin — best done once as a dedicated shared-modal a11y pass for the epic. Not a regression from the prior inline panel (which claimed no modality at all).
+status: open
+
+### DW-60: `ConfirmRun`'s `position: fixed` overlay is rendered in-tree (no portal), so it anchors to an ancestor instead of the viewport if any ancestor establishes a containing block (`transform`/`filter`/`will-change`/`contain`)
+
+origin: review of spec-7-3-redesign-query-confirm-neutral.md, 2026-07-15
+source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (`fixed inset-0` root), rendered inside `QueryTabView`/`ChatTabView`/`ReportTabView` trees
+severity: low
+reason: `QueryTabView`'s own root is transform-free today, so the full-screen scrim resolves against the viewport as intended. But the modal is rendered in place (not via a React portal), so a future shell/panel ancestor that applies `transform`/`filter` (common for animations) would silently clip or mis-center it. The durable fix is a portal to `document.body`, which changes the render path and is out of scope for a presentation-only port. Latent fragility, surfaced for the record.
+status: open
+
+### DW-61: The optional `affectedRows` badge renders for any numeric value — `0`, negative, or `NaN` all paint the red "N rows" badge, and pluralization only special-cases `=== 1`
+
+origin: review of spec-7-3-redesign-query-confirm-neutral.md, 2026-07-15
+source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (the `affectedRows !== undefined` badge)
+severity: low
+reason: `affectedRows` is a prop-gated preview with NO Core source today (the `confirmation_required` preview carries only `sql`+`risk`), so this branch is dormant until a future story wires it. When wired, a `0`/negative/`NaN` value would render a misleading red "0 rows"/"-5 rows"/"NaN rows" destruction badge. The right place to add the `Number.isFinite && >= 0` guard (and richer pluralization) is the story that supplies the data with real semantics — deferred with it.
+status: open
+
+### DW-62: The optional `objectName` type-to-confirm gate bypasses on empty string and is unmatchable for whitespace-bearing names (`typed.trim() === objectName` trims only the left side)
+
+origin: review of spec-7-3-redesign-query-confirm-neutral.md, 2026-07-15
+source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (`TypeToConfirmSection` mount gate `objectName !== undefined` + `match = typed.trim() === objectName`)
+severity: low
+reason: `objectName` is a prop-gated escalated-friction input with no Core source today (dormant). Two boundary bugs live in the dormant path: `objectName === ""` passes the `!== undefined` mount gate and matches an empty input immediately (friction fully bypassed), and a name with leading/trailing whitespace can never equal a `.trim()`-ed input (Confirm permanently disabled). Because the gate is UX-only (the Core is the real authorizer) and unreachable until wired, the mount guard (`.trim() !== ""`) and symmetric trimming belong to the story that feeds real object names. Deferred.
+status: open
+
+### DW-63: The `objectName` type-to-confirm input stays editable while `busy` is true, even though both footer buttons disable — an inconsistent frozen state during an in-flight round-trip
+
+origin: review of spec-7-3-redesign-query-confirm-neutral.md, 2026-07-15
+source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (`TypeToConfirmSection` `<input>`, no `disabled={busy}`)
+severity: low
+reason: When a confirm round-trip is in flight (`busy`), Confirm and Cancel both disable to avoid a double-fire, but the type-to-confirm input has no `disabled={busy}`, so it remains editable while the rest of the dialog is frozen. Purely cosmetic (typing changes nothing while the buttons are inert, and the Core is the gate), and on the dormant `objectName` path. Add `disabled={busy}` when the escalated path is wired for real. Deferred.
+status: open
+
+### DW-64: The type-to-confirm callback wiring (onConfirm/onCancel threaded through `TypeToConfirmSection`) is structurally unreachable by the presentational test's `findButton` tree-walk, so the escalated-confirm path's button callbacks are untested
+
+origin: review of spec-7-3-redesign-query-confirm-neutral.md, 2026-07-15
+source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
+location: `src/ui/workspace/ConfirmRun.test.tsx` (`findButton` walks `element.props.children`, which is `undefined` for the unrendered `<TypeToConfirmSection>` child component element)
+severity: low
+reason: The callback tests invoke `ConfirmRun(...)` directly to get the element tree and walk it for real `onClick` handlers — but in the `objectName` path the buttons live inside the `<TypeToConfirmSection>` child *component element*, which `findButton` cannot render, so those callbacks are never exercised (the static-markup "renders when supplied" assertions DO cover rendering via `renderToStaticMarkup`, just not the wiring). The `objectName` prop is dormant (no caller), so the coverage gap is latent; when a story wires the escalated path it should add a jsdom/testing-library test (or a render-based walk) for the TTC button callbacks. Deferred.
+status: open

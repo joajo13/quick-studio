@@ -54,6 +54,18 @@
      as `--background`/`--card`/the Tailwind `red-*` scale used elsewhere in the UI. */
   --ok: #3fbf7f; /* connection-status green (rail/status-bar dot) */
   --ok-soft: rgba(63, 191, 127, 0.12); /* soft halo behind the --ok dot */
+
+  /* ---- Story 7.3 semantic tokens: destructive red + restrained warn.
+     Values ported from design-artifacts/confirm-destructive.html (--err*) and
+     workspace.html (--warn*). Dark-only — the file is dark-first and these are
+     NOT overridden under :root[data-theme="light"] (Story 7.3 dark-first pivot).
+     Red (--err) is spent ONLY on functional destructive/error bits; --warn on the
+     restrained truncated-result banner. */
+  --err: #ef6a63;
+  --err-soft: rgba(239, 106, 99, 0.14);
+  --err-line: rgba(239, 106, 99, 0.4);
+  --warn: #e0a458;
+  --warn-soft: rgba(224, 164, 88, 0.13);
 }
 
 /* Light theme: overrides for the same tokens, activated ONLY via an explicit
@@ -127,6 +139,14 @@
   /* Epic 7: `text-ok` / `bg-ok` / `bg-ok-soft` for the connection-status dot. */
   --color-ok: var(--ok);
   --color-ok-soft: var(--ok-soft);
+
+  /* Story 7.3: `text-err` / `bg-err-soft` / `border-err-line` for the destructive
+     confirm + error banner, and `text-warn` / `bg-warn-soft` for the truncated banner. */
+  --color-err: var(--err);
+  --color-err-soft: var(--err-soft);
+  --color-err-line: var(--err-line);
+  --color-warn: var(--warn);
+  --color-warn-soft: var(--warn-soft);
 }
 
 /* Coral focus ring on every interactive element (DESIGN.md focus-ring). */

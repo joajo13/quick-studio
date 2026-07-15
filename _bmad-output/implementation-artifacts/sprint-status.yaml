@@ -112,7 +112,7 @@ development_status:
   epic-7: in-progress
   7-1-redesign-shell-neutral: done             # Story 7.1: Redesign the workspace shell to neutral — rail, tabs, schema tree, status
   7-2-redesign-tables-grid-neutral: done    # Story 7.2: Redesign the Tables data grid to neutral
-  7-3-redesign-query-confirm-neutral: backlog  # Story 7.3: Redesign the Query editor + destructive confirm to neutral
+  7-3-redesign-query-confirm-neutral: done     # Story 7.3: Redesign the Query editor + destructive confirm to neutral
   7-4-redesign-erd-neutral: backlog            # Story 7.4: Redesign the ERD to neutral
   7-5-redesign-chat-neutral: backlog           # Story 7.5: Redesign the AI Chat to neutral
   7-6-redesign-report-neutral: backlog         # Story 7.6: Redesign the Report to neutral
