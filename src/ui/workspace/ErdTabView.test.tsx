@@ -56,8 +56,20 @@ describe("ErdTabView", () => {
     const out = renderToStaticMarkup(<ErdTabView tables={SAMPLE} />);
     expect(out).toContain("user_id");
     expect(out).toContain("integer");
-    // PK marker for the primary-key column.
-    expect(out).toContain("🔑");
+    // PK marker for the primary-key column (neutral key badge replaced the 🔑 emoji).
+    expect(out).toContain('aria-label="primary key"');
+  });
+
+  test("a foreign-key column renders the FK link badge", () => {
+    const out = renderToStaticMarkup(<ErdTabView tables={SAMPLE} />);
+    // `orders.user_id` is the FK/int column in SAMPLE.
+    expect(out).toContain('aria-label="foreign key"');
+  });
+
+  test("a column's type label carries the mapped type-color class", () => {
+    const out = renderToStaticMarkup(<ErdTabView tables={SAMPLE} />);
+    // `integer` maps to the `t-int` family via typeColorClass.
+    expect(out).toContain("t-int");
   });
 
   test("a foreign key renders at least one edge in the canvas", () => {

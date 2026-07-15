@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import { MarkerType } from "@xyflow/react";
 import type { SchemaForeignKeyInfo, SchemaTableInfo } from "../../shared/contract.ts";
-import { applyLayout, schemaToGraph, tableId } from "./erd-graph.ts";
+import { applyLayout, schemaToGraph, tableId, typeColorClass } from "./erd-graph.ts";
 
 function col(name: string, dataType = "integer"): SchemaTableInfo["columns"][number] {
   return { name, dataType, nullable: false };
@@ -292,5 +292,69 @@ describe("applyLayout — saved-position overlay I/O & Edge-Case Matrix (Story 4
       const out = applyLayout(graph, { [ordersId]: bad } as never);
       expect(out.nodes.find((n) => n.id === ordersId)?.position).toEqual(dagreOrders!);
     }
+  });
+});
+
+describe("typeColorClass — functional data-type color families (Story 7.4)", () => {
+  test("int / serial family → t-int", () => {
+    for (const t of ["int8", "int4", "integer", "serial", "bigserial", "smallint"]) {
+      expect(typeColorClass(t)).toBe("t-int");
+    }
+  });
+
+  test("timestamp / date / time family → t-time", () => {
+    for (const t of ["timestamptz", "timestamp", "date", "time", "timetz"]) {
+      expect(typeColorClass(t)).toBe("t-time");
+    }
+  });
+
+  test("interval → t-time (not int, despite the 'int' substring)", () => {
+    expect(typeColorClass("interval")).toBe("t-time");
+  });
+
+  test("numeric / decimal / money / float / double family → t-num", () => {
+    for (const t of ["numeric", "decimal", "money", "float8", "double precision"]) {
+      expect(typeColorClass(t)).toBe("t-num");
+    }
+  });
+
+  test("enum / USER-DEFINED family → t-enum (case-insensitive)", () => {
+    for (const t of ["order_status_enum", "USER-DEFINED", "user-defined"]) {
+      expect(typeColorClass(t)).toBe("t-enum");
+    }
+  });
+
+  test("text / citext / varchar / inet / unknown fall back to t-text", () => {
+    for (const t of ["text", "citext", "varchar", "inet", "bytea", "uuid", ""]) {
+      expect(typeColorClass(t)).toBe("t-text");
+    }
+  });
+});
+
+describe("schemaToGraph — additive isForeignKey column flag (Story 7.4)", () => {
+  test("columns participating in an outbound FK are flagged; others are not", () => {
+    const graph = schemaToGraph([
+      table(
+        "orders",
+        [{ name: "id" }, { name: "user_id" }, { name: "note", dataType: "text" }],
+        {
+          primaryKey: ["id"],
+          foreignKeys: [
+            {
+              columns: ["user_id"],
+              referencedSchema: "public",
+              referencedTable: "users",
+              referencedColumns: ["id"],
+            },
+          ],
+        },
+      ),
+      table("users", [{ name: "id" }], { primaryKey: ["id"] }),
+    ]);
+    const orders = graph.nodes.find((n) => n.id === tableId("public", "orders"))!;
+    const byName = new Map(orders.data.columns.map((c) => [c.name, c]));
+    expect(byName.get("user_id")?.isForeignKey).toBe(true);
+    expect(byName.get("id")?.isForeignKey).toBe(false);
+    expect(byName.get("note")?.isForeignKey).toBe(false);
   });
 });

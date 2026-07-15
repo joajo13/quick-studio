@@ -481,3 +481,30 @@ location: `src/ui/workspace/ConfirmRun.test.tsx` (`findButton` walks `element.pr
 severity: low
 reason: The callback tests invoke `ConfirmRun(...)` directly to get the element tree and walk it for real `onClick` handlers — but in the `objectName` path the buttons live inside the `<TypeToConfirmSection>` child *component element*, which `findButton` cannot render, so those callbacks are never exercised (the static-markup "renders when supplied" assertions DO cover rendering via `renderToStaticMarkup`, just not the wiring). The `objectName` prop is dormant (no caller), so the coverage gap is latent; when a story wires the escalated path it should add a jsdom/testing-library test (or a render-based walk) for the TTC button callbacks. Deferred.
 status: open
+
+### DW-65: An ERD column that is BOTH a primary key and a foreign key shows only the PK ink-key badge — its FK-ness gets no per-column blue-link marker (the relationship is still drawn as an edge)
+
+origin: review of spec-7-4-redesign-erd-neutral.md, 2026-07-15
+source_spec: `spec-7-4-redesign-erd-neutral.md`
+location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` marker ternary `c.isPrimaryKey ? key : c.isForeignKey ? link : spacer`)
+severity: low
+reason: Join/junction tables commonly have columns that are simultaneously PK and FK (an identifying relationship). The single 13px badge slot renders PK-first, so such a column shows the ink key and no blue link — the column-level FK cue is lost. It is NOT invisible overall: `schemaToGraph` still emits the FK edge, so the relationship is drawn on the canvas and lights up on hover; only the per-column glyph is missing. The prototype's card is a one-badge-per-row layout, so surfacing both would need a combined/dual-badge design decision (out of scope for a presentation-only port). Cosmetic; deferred for a badge-layout decision.
+status: open
+
+### DW-66: `hoveredNodeId` is never reconciled against the live node set — if the hovered table is removed (and its `tableId` later reused) while the pointer is over it and `onNodeMouseLeave` never fires, a stale id can spuriously highlight a different table's edges
+
+origin: review of spec-7-4-redesign-erd-neutral.md, 2026-07-15
+source_spec: `spec-7-4-redesign-erd-neutral.md`
+location: `src/ui/workspace/ErdTabView.tsx` (`hoveredNodeId` state; edges `useMemo` deps `[graph.edges, hoveredNodeId]`; no reset effect on `nodes` change)
+severity: low
+reason: The hover highlight is pure presentation over the derived edges, driven by `onNodeMouseEnter`/`onNodeMouseLeave`. In the narrow case where the exact hovered table is dropped/recreated (via a `tables` change) without a mouseleave, `hoveredNodeId` persists; because node ids are the NUL-joined `schema\0name`, a later table reusing that id would inherit the highlight until the next hover. Very low probability (table create/remove rarely coincides with hovering that same node) and self-correcting on the next pointer move; edge/position derivation and persistence are unaffected. A one-line reconciling effect (`if hoveredNodeId not in nodes → clear`) is the fix; deferred as low-consequence.
+status: open
+
+### DW-67: ERD type labels (`text-[10px]`, `--t-text` muted) and the type legend (`text-[10.5px]`, 9px swatches) render sub-11px muted-on-tonal text with no verified contrast in either theme
+
+origin: review of spec-7-4-redesign-erd-neutral.md, 2026-07-15
+source_spec: `spec-7-4-redesign-erd-neutral.md`
+location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` type label; `ErdLegend`)
+severity: low
+reason: The tiny muted type labels and legend faithfully reproduce `design-artifacts/erd.html` (the visual source of truth), but sub-11px muted foreground on a tonal `--card`/`--background` surface is a real WCAG legibility risk, and nothing in the tests checks contrast in light or dark. This is an epic-wide neutral-redesign concern (cf. DW-58, the Epic 7 light-theme/contrast work), not specific to the ERD — folded here so the ERD's small-text surfaces are covered when the epic does a contrast/a11y pass.
+status: open
