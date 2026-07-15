@@ -88,6 +88,13 @@ function checkTabs(
   if (!Array.isArray(value)) {
     return { ok: false, reason: "tabs must be an array" };
   }
+  // Tab ids must be UNIQUE at this trusted save boundary (DW-26): a hand-edited
+  // snapshot with two tabs sharing an id would make `closeTab` remove both at once
+  // (the reducer filters by id). Reject strictly here — the RESTORE path is
+  // deliberately more tolerant (it dedupes) so a bad file still opens; this write
+  // boundary owns correctness. The `Set` is populated only AFTER the per-element
+  // validation below proves each `id` is already a finite number.
+  const seenIds = new Set<number>();
   for (const t of value) {
     if (typeof t !== "object" || t === null) {
       return { ok: false, reason: "each tab must be an object" };
@@ -102,6 +109,11 @@ function checkTabs(
     if (typeof tab.title !== "string") {
       return { ok: false, reason: "each tab.title must be a string" };
     }
+    // `id` is now proven a finite number — safe to key the uniqueness Set on it.
+    if (seenIds.has(tab.id)) {
+      return { ok: false, reason: "tab ids must be unique" };
+    }
+    seenIds.add(tab.id);
   }
   return { ok: true, value: value as WorkspaceSnapshotTab[] };
 }

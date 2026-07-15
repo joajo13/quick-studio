@@ -166,7 +166,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
 location: `src/ui/App.tsx` (debounced `workspace.save`)
 reason: The debounced save in `src/ui/App.tsx` does `void rpc<SaveWorkspaceResult>("workspace.save", …)` — the reply (including `internal_error` from a store `write-failed`, or `saved:false`) is discarded, with no retry and no notification. Real but layout-only (non-critical) data, and surfacing it correctly needs a UX decision (status stamp/toast) beyond Story 2.5's "restore Panel sizes + Tabs" scope; the terse mono status-bar stamp pattern from the epic UX notes is the natural home.
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-workspace-persistence-hardening
 
 ### DW-23: Constrain `panelSizes` to exactly two finite numbers in a sane range (e.g. [0,100]) at the workspace-store/registry validation boundary (or sanitize in the UI before it reaches `defaultSize`), so a hand-edited/legacy `workspace-state.json` cannot yield a broken initial split
 
@@ -180,7 +181,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
 location: `src/ui/App.tsx` (save effect cleanup, `onStop`)
 reason: The save effect cleanup in `src/ui/App.tsx` does `clearTimeout(handle)` with no flush, and `onStop` fires `shutdown` without draining the pending save; there is no `beforeunload` handler. A drag/open immediately followed by quit drops that final change. Narrow window and layout-only, but it's exactly the "last action" a user expects to survive; a correct flush-on-unmount in Electron needs a sync/beacon path, so it's a focused follow-up rather than a trivial patch.
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-workspace-persistence-hardening
 
 ### DW-25: Reconcile the `activeTabId: null`-with-tabs-present disagreement between the registry validator (accepts it as valid) and `restoreWorkspace` (rewrites it to the first tab), so a "no active tab" intent is not silently changed on restore
 
@@ -194,14 +196,16 @@ status: open
 origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
 location: `checkTabs` (`src/core/workspace-registry.ts`); `restoreWorkspace` (`src/ui/workspace/workspace-state.ts`)
 reason: Neither `checkTabs` nor `restoreWorkspace` rejects duplicate ids; the `activeTabId` set-membership check dedupes and so doesn't catch it. `tabs:[{id:1,…},{id:1,…}]` restores verbatim, and `closeTab`'s `filter(t => t.id !== id)` then removes both. Reachable only via a hand-edited file — hardening, not a normal-operation bug (the pure model's monotonic `nextId` never mints duplicates).
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-workspace-persistence-hardening
 
 ### DW-27: Add a sequencing/generation guard (or single-flight) to `workspace.save` so two overlapping in-flight saves cannot land out of completion order and persist the older snapshot
 
 origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
 location: `src/ui/App.tsx`; `workspace-store.ts`
 reason: `src/ui/App.tsx` can have a slow save S1 in flight when a newer change fires S2; the store (`workspace-store.ts`) uses a unique temp file + `rename` per save (no corruption), but there's no ordering guard, so if S2's rename lands before S1's the older snapshot wins. Low probability given fast local fs renames and the 400ms debounce; a monotonic save-generation check or single-flight-with-trailing would close it.
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-workspace-persistence-hardening
 
 ### DW-28: Preserve, rather than overwrite, an unreadable-but-newer-version `workspace-state.json` (e.g. a `version: 2` file opened by an older `version: 1` build) so a downgrade launch doesn't destroy a future build's saved state
 

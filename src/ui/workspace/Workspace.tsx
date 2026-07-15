@@ -207,6 +207,7 @@ export function Workspace({
   onStop,
   stopping,
   connectionIndicator,
+  saveIndicator,
   exposure,
   panelSizes,
   onLayout,
@@ -247,6 +248,8 @@ export function Workspace({
   onStop: () => void;
   stopping: boolean;
   connectionIndicator: React.ReactNode;
+  /** Terse status-bar save-failure indicator (DW-22), shown only when a save failed. */
+  saveIndicator?: React.ReactNode;
   exposure?: ExposureInfo;
   /** `[rail size, main size]`, read once as each Panel's `defaultSize` at mount. */
   panelSizes: ReadonlyArray<number>;
@@ -374,6 +377,7 @@ export function Workspace({
                   (Tabs/Settings/Create) is active. */}
               <div className="flex shrink-0 items-center gap-3 border-t border-border px-3.5 py-1.5">
                 {connectionIndicator}
+                {saveIndicator}
                 <button
                   type="button"
                   onClick={onStop}

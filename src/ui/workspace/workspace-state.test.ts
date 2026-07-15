@@ -239,6 +239,36 @@ describe("restoreWorkspace", () => {
   });
 });
 
+describe("restoreWorkspace — duplicate tab ids (DW-26)", () => {
+  const DUP: WorkspaceSnapshot = {
+    version: 1,
+    panelSizes: [20, 80],
+    tabs: [
+      { id: 1, kind: "table", title: "first" },
+      { id: 1, kind: "query", title: "second" }, // dup id — must be dropped
+      { id: 2, kind: "erd", title: "third" },
+    ],
+    activeTabId: 1,
+    nextId: 3,
+  };
+
+  test("keeps only the first tab per id (a hand-edited dup file still opens, deduped)", () => {
+    const state = restoreWorkspace(DUP);
+    expect(state.tabs).toEqual([
+      { id: 1, kind: "table", title: "first" },
+      { id: 2, kind: "erd", title: "third" },
+    ]);
+  });
+
+  test("a subsequent closeTab(id) removes exactly one tab (never two)", () => {
+    const state = restoreWorkspace(DUP);
+    expect(state.tabs).toHaveLength(2); // three entries deduped to two
+    const closed = closeTab(state, 1);
+    expect(closed.tabs).toHaveLength(1);
+    expect(closed.tabs.map((t) => t.id)).toEqual([2]);
+  });
+});
+
 describe("toWorkspaceSnapshot", () => {
   test("captures tabs/activeTabId/nextId plus the supplied panelSizes", () => {
     const state = openMany("table", "query");

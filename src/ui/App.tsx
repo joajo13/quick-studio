@@ -30,9 +30,10 @@ import type {
   ShutdownResult,
   WorkspaceSnapshot,
 } from "../shared/contract.ts";
-import { rpc } from "./rpc/client.ts";
+import { rpc, saveWorkspaceSync } from "./rpc/client.ts";
 import type { ChatState } from "./workspace/chat-model.ts";
 import { emptyReport, type ReportState, type ReportStateUpdate } from "./report/report-state.ts";
+import { createSaveScheduler, type SaveScheduler } from "./workspace/save-scheduler.ts";
 import { Workspace } from "./workspace/Workspace.tsx";
 import {
   activateTab,
@@ -182,6 +183,26 @@ function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element 
 }
 
 /**
+ * Terse status-bar save-failure indicator (DW-22), mirroring {@link ConnectionIndicator}
+ * exactly (same mono type scale, same dot+label shape) rather than introducing a
+ * toast/snackbar system. Rendered ONLY while a persistent-mode `workspace.save`
+ * is failing; it clears the moment a save succeeds. The `title` tooltip states the
+ * self-healing behavior — the next content change re-attempts the save.
+ */
+function SaveIndicator(): React.JSX.Element {
+  return (
+    <div
+      data-testid="save-status"
+      title="Workspace save failed — retrying on next change"
+      className="inline-flex items-center gap-1.5 font-mono text-[10.5px] text-muted-foreground"
+    >
+      <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" aria-hidden />
+      <span>Save failed</span>
+    </div>
+  );
+}
+
+/**
  * The brief pre-mount gate while the initial `workspace.load` is in flight.
  * `react-resizable-panels` reads `defaultSize` only once, at its FIRST mount, so
  * `Workspace`/`PanelGroup` must not render until the restored (or default) Panel
@@ -217,6 +238,56 @@ export function App(): React.JSX.Element {
   const lastPersistedRef = useRef<string | null>(null);
   const [status, setStatus] = useState<Status>({ phase: "loading" });
   const [stopping, setStopping] = useState(false);
+  // True while a persistent-mode `workspace.save` is failing — surfaced via the
+  // status-bar `SaveIndicator` (DW-22). Set by the scheduler's `onError`, cleared
+  // by its `onSuccess`; `saved:false` (ephemeral) is a success and never sets it.
+  const [saveFailed, setSaveFailed] = useState(false);
+  // Set true the instant Stop is pressed so the debounce timer's callback and any
+  // future arming both bail — no new save is scheduled once we're quitting (the
+  // quit path owns the final, ordered write). A ref (not state) so the already-armed
+  // debounce callback reads the latest value without a re-render race.
+  const stoppingRef = useRef(false);
+  // Holds the armed debounce `setTimeout` handle so `onStop` can cancel a pending
+  // (not-yet-fired) save before flushing the current snapshot through the scheduler.
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Component-alive guard for post-`await` `setState` in `onStop` (mirrors the load
+  // effect's `alive` pattern): a shutdown-time unmount must not warn on a late set.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // The ONE serialization primitive every async `workspace.save` goes through
+  // (DW-27): debounce AND the quit flush both `schedule` onto it, so at most one
+  // save is ever outstanding and the newest snapshot always lands last (no reorder
+  // from the store's temp-file+rename). Created once — lazy `useRef` init keeps a
+  // single instance across renders. Its callbacks close over stable setters/refs.
+  const schedulerRef = useRef<SaveScheduler | null>(null);
+  if (schedulerRef.current === null) {
+    schedulerRef.current = createSaveScheduler({
+      // Thin `rpc` wrapper: the scheduler only needs the `ok` bit. `reply.ok===true`
+      // covers BOTH a real persistent write (`saved:true`) and the ephemeral no-op
+      // (`saved:false`) — both are successes; only `!reply.ok` is a failure.
+      save: (s) => rpc<SaveWorkspaceResult>("workspace.save", s).then((r) => ({ ok: r.ok })),
+      // Advance the persisted marker ONLY on success (DW-22 retry invariant): a
+      // failed write leaves it stale so an identical later change still re-saves.
+      onPersisted: (serialized) => {
+        lastPersistedRef.current = serialized;
+      },
+      // Guard the `setState`s: a save can settle after a shutdown-time unmount, and
+      // setting state on an unmounted tree warns. `onPersisted` only touches a ref, so
+      // it needs no guard.
+      onError: () => {
+        if (mountedRef.current) setSaveFailed(true);
+      },
+      onSuccess: () => {
+        if (mountedRef.current) setSaveFailed(false);
+      },
+    });
+  }
+  const scheduler = schedulerRef.current;
   // The live introspected tables (from the schema tree's `connect`), kept so the
   // grid of the active table tab can look up its PK columns (for the key icon).
   const [schemaTables, setSchemaTables] = useState<ReadonlyArray<SchemaTableInfo>>([]);
@@ -379,21 +450,82 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (!savingEnabled) return;
     const handle = setTimeout(() => {
+      // Once Stop is pressed, the quit path owns the final write — never schedule a
+      // fresh debounced save that could race or resurrect content after shutdown.
+      if (stoppingRef.current) return;
       const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastPersistedRef.current) return; // nothing actually changed
-      lastPersistedRef.current = serialized;
-      void rpc<SaveWorkspaceResult>("workspace.save", snapshot);
+      // Route through the single scheduler: it advances `lastPersistedRef` itself,
+      // and ONLY on success — do NOT advance it optimistically here (a failed write
+      // must stay retryable).
+      scheduler.schedule(serialized, snapshot);
     }, SAVE_DEBOUNCE_MS);
+    saveTimerRef.current = handle;
     return () => clearTimeout(handle);
-  }, [workspace, panelSizes, erdLayouts, savingEnabled]);
+  }, [workspace, panelSizes, erdLayouts, savingEnabled, scheduler]);
+
+  // Window-close last-chance flush (DW-24): on `beforeunload`, if the current
+  // snapshot differs from what's persisted AND the async scheduler is idle, do a
+  // best-effort SYNCHRONOUS save (an async `fetch` cannot reliably finish during
+  // teardown). When the scheduler IS busy we do NOTHING — the async writer owns the
+  // write, and overlapping a sync XHR with an in-flight async save is the exact
+  // DW-27 reorder. Advance the persisted marker only when the sync write confirmed.
+  useEffect(() => {
+    if (!savingEnabled) return;
+    const handler = (): void => {
+      const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
+      const serialized = JSON.stringify(snapshot);
+      if (serialized === lastPersistedRef.current) return; // already persisted
+      if (scheduler.isBusy()) return; // async writer owns the write — never overlap
+      if (saveWorkspaceSync(snapshot)) {
+        lastPersistedRef.current = serialized;
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [workspace, panelSizes, erdLayouts, savingEnabled, scheduler]);
 
   const onStop = (): void => {
     // Guard the destructive control: ignore repeat clicks so a double-click
     // can't fire a second `shutdown` RPC, and reflect a pending state.
     if (stopping) return;
+    // Mark quitting FIRST so an already-armed debounce callback bails, then cancel
+    // the pending debounce timer outright — the quit flush below owns the final write.
+    stoppingRef.current = true;
     setStopping(true);
-    void callShutdown().then((s) => setStatus(s));
+    if (saveTimerRef.current !== null) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    void (async () => {
+      // Flush the last pre-Stop change through the SAME scheduler so it can never
+      // overlap an in-flight debounced save (DW-27): schedule it (if changed), then
+      // `drain()` waits for the in-flight save, its trailing save, and this quit save
+      // to all settle in order — newest snapshot last, no reorder — before shutdown.
+      if (savingEnabled) {
+        const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
+        const serialized = JSON.stringify(snapshot);
+        if (serialized !== lastPersistedRef.current) {
+          scheduler.schedule(serialized, snapshot);
+        }
+      }
+      await scheduler.drain();
+      // Last-ditch flush: if the drained quit save FAILED (async `save` returned
+      // `!ok`, so `lastPersistedRef` is still stale) the change would be lost on
+      // shutdown. The scheduler is now idle, so a synchronous write here cannot
+      // reorder — attempt it best-effort before Core goes away.
+      if (savingEnabled) {
+        const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
+        const serialized = JSON.stringify(snapshot);
+        if (serialized !== lastPersistedRef.current && saveWorkspaceSync(snapshot)) {
+          lastPersistedRef.current = serialized;
+        }
+      }
+      const s = await callShutdown();
+      // Guard the post-`await` set: a shutdown-time unmount must not warn on a late set.
+      if (mountedRef.current) setStatus(s);
+    })();
   };
 
   // Exposure state is injected at boot (static for the session), so read it once
@@ -466,6 +598,7 @@ export function App(): React.JSX.Element {
         onStop={onStop}
         stopping={stopping}
         connectionIndicator={<ConnectionIndicator status={status} />}
+        saveIndicator={saveFailed ? <SaveIndicator /> : undefined}
         exposure={exposure}
         panelSizes={panelSizes}
         onLayout={setPanelSizes}

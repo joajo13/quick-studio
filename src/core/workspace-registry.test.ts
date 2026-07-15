@@ -269,6 +269,34 @@ describe("workspace-registry — bad_request on malformed save params", () => {
   });
 });
 
+describe("workspace-registry — duplicate tab ids (DW-26)", () => {
+  test("duplicate tab ids are a bad_request naming tabs, and nothing is written", () => {
+    const fake = fakeStore("persistent");
+    const reg = registryOver(fake.store);
+    const r = reg.save({
+      ...SAMPLE,
+      tabs: [
+        { id: 1, kind: "table", title: "a" },
+        { id: 1, kind: "query", title: "b" }, // same id — must be rejected
+      ],
+      activeTabId: 1,
+      nextId: 2,
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.code).toBe("bad_request");
+      expect(r.detail).toContain("tabs");
+    }
+    expect(fake.saveCalls()).toBe(0);
+  });
+
+  test("unique tab ids still pass (the uniqueness check does not reject a valid snapshot)", () => {
+    const fake = fakeStore("persistent");
+    const reg = registryOver(fake.store);
+    expect(reg.save(SAMPLE)).toEqual({ ok: true, value: { saved: true } });
+  });
+});
+
 describe("workspace-registry — store write failure maps to internal_error", () => {
   test("a forced write-failed → internal_error, detail is the safe label (not the raw store detail)", () => {
     const fake = fakeStore("persistent");

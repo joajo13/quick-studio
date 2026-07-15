@@ -186,9 +186,22 @@ export function bindTableToActiveTab(state: WorkspaceState, ref: TableRef): Work
  * value doesn't already clear that bar (so a future `openTab` can never mint a
  * colliding id), and a dangling `activeTabId` (not among the restored tabs)
  * falls back to the first tab, or `null` when there are no tabs at all.
+ *
+ * Duplicate-id defense (DW-26): a hand-edited on-disk snapshot can slip two tabs
+ * sharing an id past the load shape-guard (intentionally looser than `checkTabs`,
+ * which REJECTS duplicates outright, so a bad file still opens). Here we tolerate
+ * it by keeping ONLY the FIRST occurrence per id — otherwise a later `closeTab`
+ * would filter out and remove BOTH tabs at once. The `maxId`/`nextId`/`activeTabId`
+ * logic below is unchanged and simply operates on the deduped set.
  */
 export function restoreWorkspace(snapshot: WorkspaceSnapshot): WorkspaceState {
-  const tabs: WorkspaceTab[] = snapshot.tabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title }));
+  const seenIds = new Set<number>();
+  const tabs: WorkspaceTab[] = [];
+  for (const t of snapshot.tabs) {
+    if (seenIds.has(t.id)) continue; // keep the first tab per id; drop later dupes
+    seenIds.add(t.id);
+    tabs.push({ id: t.id, kind: t.kind, title: t.title });
+  }
   const maxId = tabs.reduce((max, t) => Math.max(max, t.id), 0);
   const nextId = Math.max(snapshot.nextId, maxId + 1);
   const activeTabId = tabs.some((t) => t.id === snapshot.activeTabId)

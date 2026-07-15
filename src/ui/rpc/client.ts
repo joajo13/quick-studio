@@ -11,7 +11,7 @@
  * add/edit submit body and receives only credential-free results back.
  */
 
-import type { RpcReply } from "../../shared/contract.ts";
+import type { RpcReply, SaveWorkspaceResult, WorkspaceSnapshot } from "../../shared/contract.ts";
 
 declare global {
   interface Window {
@@ -76,5 +76,41 @@ export async function rpc<T>(method: string, params?: unknown): Promise<RpcReply
     };
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * Best-effort SYNCHRONOUS workspace save for the `beforeunload` last-chance flush
+ * (DW-24). During page teardown an async `fetch` cannot reliably complete, so this
+ * uses a blocking `XMLHttpRequest` — the accepted teardown-only transport (it has
+ * no timeout because sync XHR forbids one; a wedged Core could briefly block window
+ * close, an accepted trade-off for not losing the last change).
+ *
+ * Total by construction: EVERYTHING is wrapped so it can never throw out of the
+ * unload handler (a throw there is undefined behavior across browsers). Returns
+ * `true` only when the parsed reply is a well-formed `ok:true` envelope; any
+ * failure — network, non-JSON body, malformed envelope, `ok:false` — returns
+ * `false` so the caller does NOT advance its persisted marker (the change retries
+ * on the next real save, or via Core's still-intact prior write).
+ *
+ * Used ONLY by `beforeunload`, and ONLY when the async scheduler is idle, so a sync
+ * XHR and an in-flight async `workspace.save` never overlap (the DW-27 gate).
+ */
+export function saveWorkspaceSync(snapshot: WorkspaceSnapshot): boolean {
+  try {
+    const token = window.__QS_TOKEN__ ?? "";
+    const xhr = new XMLHttpRequest();
+    // `false` = synchronous: `send()` blocks until the reply is fully received.
+    xhr.open("POST", "/rpc", false);
+    xhr.setRequestHeader("content-type", "application/json");
+    xhr.setRequestHeader("x-qs-token", token);
+    xhr.send(JSON.stringify({ method: "workspace.save", params: snapshot }));
+    const body = JSON.parse(xhr.responseText) as RpcReply<SaveWorkspaceResult>;
+    // Only a genuine `ok:true` envelope counts as persisted; anything else is a
+    // failure the caller must not treat as saved.
+    return typeof body === "object" && body !== null && body.ok === true;
+  } catch {
+    // Network drop, non-JSON body, or any teardown-time failure — never throw.
+    return false;
   }
 }
