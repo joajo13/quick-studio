@@ -39,6 +39,10 @@ import { createWorkspaceRegistry } from "./workspace-registry.ts";
 
 const TOKEN_HEADER = "x-qs-token";
 
+// Content-Length hardening guard: reject an over-limit POST body (413) BEFORE
+// `req.json()` buffers it whole into memory. Shared by both POST endpoints.
+const MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024; // 8 MiB
+
 export type Core = {
   readonly url: string;
   readonly host: string;
@@ -148,6 +152,31 @@ export type StartCoreOptions = {
 
 function jsonResponse(body: unknown, status: number): Response {
   return new Response(JSON.stringify(body), { status, headers: jsonHeaders });
+}
+
+/**
+ * True when the request self-declares a `content-length` over the limit — a cheap
+ * size check to reject before `req.json()` buffers the body. Coercion corners:
+ * an ABSENT header is `Number(null)` → `0` (proceeds); a non-numeric or duplicate
+ * (comma-joined) header is `NaN` (proceeds — an out-of-scope undercount); a huge
+ * all-digit value overflows to `Infinity`, which is `> MAX` and IS rejected — the
+ * guard must not leave a hole at the very top of the range. Only `NaN` is excused.
+ */
+export function overBodyLimit(req: Request): boolean {
+  const len = Number(req.headers.get("content-length"));
+  return !Number.isNaN(len) && len > MAX_REQUEST_BODY_BYTES;
+}
+
+/**
+ * The shared `413` reject for an over-limit body, or `null` to proceed. Both POST
+ * endpoints call this right after their gates and before `await req.json()`, so
+ * the limit and its user-facing message (derived from the constant, never a drifting
+ * literal) live in exactly one place.
+ */
+function bodyLimitResponse(req: Request): Response | null {
+  if (!overBodyLimit(req)) return null;
+  const mib = Math.floor(MAX_REQUEST_BODY_BYTES / (1024 * 1024));
+  return jsonResponse(errorReply("bad_request", `Request body exceeds the ${mib} MiB limit`), 413);
 }
 
 /**
@@ -493,6 +522,10 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         if (!validateToken(provided, token)) {
           return jsonResponse(errorReply("unauthorized", "Missing or invalid session token"), 403);
         }
+        // Resource-exhaustion guard (after the gates): reject an over-limit body
+        // before `req.json()` buffers it whole into memory.
+        const overLimit = bodyLimitResponse(req);
+        if (overLimit) return overLimit;
         let params: unknown;
         try {
           params = await req.json();
@@ -534,6 +567,11 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
             403,
           );
         }
+
+        // Resource-exhaustion guard (after the gates): reject an over-limit body
+        // before `req.json()` buffers it whole into memory.
+        const overLimit = bodyLimitResponse(req);
+        if (overLimit) return overLimit;
 
         // Parse + dispatch.
         let parsed: unknown;

@@ -20,7 +20,7 @@ import { join } from "node:path";
 import type { DatabaseSchema } from "../shared/contract.ts";
 import { resolveAppDir } from "./app-dir.ts";
 import { DriverConnectionError, type Driver, type DriverFactory } from "./driver.ts";
-import { renderIndexHtml, startCore, type Core } from "./server.ts";
+import { overBodyLimit, renderIndexHtml, startCore, type Core } from "./server.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
 
 let core: Core;
@@ -78,6 +78,96 @@ test("default boot is not exposed and injects exposed:false into the served HTML
   const html = await (await fetch(`${core.url}/`)).text();
   expect(html).toContain("window.__QS_EXPOSURE__");
   expect(html).toContain('"exposed":false');
+});
+
+// DW-7: shared max-request-body guard — an over-limit `Content-Length` is rejected
+// (413 `bad_request`) at BOTH POST endpoints, AFTER the token gate and BEFORE
+// `req.json()` buffers the body. Bun's `fetch` recomputes `content-length` from the
+// actual body (a manually set header is ignored), so the over-limit cases send a
+// genuinely >8 MiB body — cheap over loopback — to force the real header past the limit.
+describe("max request-body guard (DW-7)", () => {
+  // One byte past the 8 MiB limit so the real `content-length` trips the guard.
+  const overLimitBody = "x".repeat(8 * 1024 * 1024 + 1);
+
+  test("POST /rpc with a valid token and an over-limit body → 413 bad_request", async () => {
+    const res = await fetch(`${core.url}/rpc`, {
+      method: "POST",
+      // `connection: close` so the unconsumed 8 MiB body doesn't ride a reused
+      // keep-alive connection and pollute the next request (server returns before draining it).
+      headers: { "content-type": "application/json", "x-qs-token": core.token, connection: "close" },
+      body: overLimitBody,
+    });
+    expect(res.status).toBe(413);
+    const reply = await res.json();
+    expect(reply.ok).toBe(false);
+    expect(reply.error.code).toBe("bad_request");
+  });
+
+  test("POST /chat/stream with a valid token and an over-limit body → 413 bad_request", async () => {
+    const res = await fetch(`${core.url}/chat/stream`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-qs-token": core.token, connection: "close" },
+      body: overLimitBody,
+    });
+    expect(res.status).toBe(413);
+    const reply = await res.json();
+    expect(reply.ok).toBe(false);
+    expect(reply.error.code).toBe("bad_request");
+  });
+
+  test("a within-limit request still succeeds (guard doesn't break normal calls)", async () => {
+    const res = await callRpc(core.token, { method: "health" });
+    expect(res.status).toBe(200);
+    const reply = await res.json();
+    expect(reply.ok).toBe(true);
+    expect(reply.result.status).toBe("ok");
+  });
+
+  test("an over-limit body with a bad token → 403 (token gate fires before the guard)", async () => {
+    const res = await fetch(`${core.url}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-qs-token": "not-the-token", connection: "close" },
+      body: overLimitBody,
+    });
+    expect(res.status).toBe(403);
+    const reply = await res.json();
+    expect(reply.ok).toBe(false);
+    // Assert the TOKEN gate specifically — not just "a 403" (the Origin gate also
+    // returns 403) — so this proves the guard sits after the token check.
+    expect(reply.error.code).toBe("unauthorized");
+  });
+});
+
+// DW-7 (predicate unit tests): `overBodyLimit` reads only the `content-length`
+// header, so a minimal header stub exercises every boundary without allocating a
+// real body — including the >8 MiB / Infinity-overflow inputs that Bun's `fetch`
+// won't let an integration test forge (it recomputes `content-length` from the body).
+describe("overBodyLimit predicate (DW-7)", () => {
+  const LIMIT = 8 * 1024 * 1024;
+  const withCL = (cl: string | null): Request =>
+    ({ headers: { get: (name: string) => (name === "content-length" ? cl : null) } }) as unknown as Request;
+
+  test("exactly at the limit is allowed (guard is strictly greater-than)", () => {
+    expect(overBodyLimit(withCL(String(LIMIT)))).toBe(false);
+  });
+
+  test("one byte over the limit is rejected", () => {
+    expect(overBodyLimit(withCL(String(LIMIT + 1)))).toBe(true);
+  });
+
+  test("an all-digit value that overflows Number() to Infinity is rejected", () => {
+    // The bug this guards: `Number.isFinite(Infinity) === false` used to let a
+    // gigantic declared size slip through the guard's own upper bound.
+    expect(overBodyLimit(withCL("9".repeat(400)))).toBe(true);
+  });
+
+  test("absent, empty, zero, non-numeric, and negative content-length all proceed", () => {
+    expect(overBodyLimit(withCL(null))).toBe(false); // Number(null) === 0
+    expect(overBodyLimit(withCL(""))).toBe(false); // Number("") === 0
+    expect(overBodyLimit(withCL("0"))).toBe(false);
+    expect(overBodyLimit(withCL("not-a-number"))).toBe(false); // NaN → excused
+    expect(overBodyLimit(withCL("-100"))).toBe(false); // invalid HTTP, not a large body
+  });
 });
 
 // Story 5.5: Core boots a SECOND server (the Ring 3 sandbox origin) on a distinct

@@ -52,7 +52,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
 location: `POST /rpc` (`src/core/server.ts`, `await req.json()`)
 reason: `await req.json()` buffers an unbounded body. Low risk for a single-user localhost tool (you would only DoS yourself), but a cheap hardening once multi-caller scenarios (Live Reports, Epic 6) appear.
-status: open
+status: done 2026-07-15
+resolution: resolved by sweep bundle dw-rpc-request-body-guard
 
 ### DW-8: When story 1.2 makes the port user-configurable, handle the scheme-default ports (80/443) in `validateOrigin` — browsers omit the default port from `Host`/`Origin`, so the exact `host:port` authority match rejects every RPC
 
@@ -528,3 +529,6 @@ status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-7-redesign-settings-neutral.md`
   summary: The destructive remove-confirm "yes" button (solid `bg-err` fill + `text-white`) is ~3:1 contrast in the dark theme — below WCAG AA for normal text — after the neutral port swapped the darker `bg-red-600` (~4.8:1) for the softer `--err` (#ef6a63); the most dangerous action now has the weakest legibility.
   evidence: `src/ui/settings/SettingsPanel.tsx` (ConnectionRow remove-confirm "yes"). Both adversarial reviewers independently flagged it. The story's intent-contract explicitly sanctions white-on-red as functional color, and a proper fix (a darker destructive-red token, or an on-err foreground token analogous to `--coral-ink`) belongs in `globals.css`, which this presentation-only story is contract-forbidden to edit. Epic-wide neutral-palette/contrast concern (cf. DW-58/67); non-blocking — the "yes" label still reads and the action is behind a two-step confirm.
+- source_spec: `_bmad-output/implementation-artifacts/spec-dw-7-rpc-request-body-guard.md`
+  summary: `Bun.serve` at `src/core/server.ts:410` does not set `maxRequestBodySize`, so the ~128 MB backstop the DW-7 body-guard spec explicitly leans on (for the omitted/undercounted/chunked Content-Length class it declares out-of-scope) is Bun's version-dependent default, not a deliberately chosen value — and it is ~16× larger than the 8 MiB guard itself.
+  evidence: Verified: no `maxRequestBodySize` key exists in the `Bun.serve({…})` options at `src/core/server.ts:410`, so a caller that omits/undercounts `content-length` (or uses chunked `Transfer-Encoding`) sails past the 8 MiB `overBodyLimit` guard and is only stopped at Bun's default (~128 MB). Pre-existing config gap (the endpoints predate DW-7) surfaced by the follow-up review; out of DW-7's Content-Length-header-only scope ("do not stream-count body bytes or re-architect body reading"). Low consequence for a localhost single-user tool (self-DoS only), but pinning `maxRequestBodySize` to an explicit value would make the spec's stated backstop real and version-stable rather than an implicit framework default.
