@@ -21,21 +21,24 @@ status: open
 origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
 location: `decode` (FrozenData decode on the RPC server path)
 reason: `decode` enforces producer-side invariants by throwing `TypeError`; that is correct for internal producers but wrong for untrusted inbound wire data. No RPC decodes untrusted FrozenData in story 1.1, so it is latent until Epic 3.
-status: open
+status: done 2026-07-15
+resolution: already resolved: src/core/rpc.ts:122-246 — no RPC handler ingests/decodes untrusted FrozenData; the only decode() sites (src/shared/contract.ts:611-615 sandbox-inbound guard, src/shared/snapshot.ts:59-64) map failures to a validation `false`, never internal_error(500). The feared data-carrying-RPC → 500 path was never built.
 
 ### DW-4: Story 1.2's browser-open must target `http://127.0.0.1:<port>`, NOT `http://localhost:<port>`, or the Origin/Host gate rejects every RPC
 
 origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
 location: `validateOrigin` (`src/core/server.ts`)
 reason: `validateOrigin` requires an exact `127.0.0.1:<port>` Host match and treats `localhost` as a distinct (rejected) origin — per the spec's deliberate design. A `localhost` launch URL would make the app appear broken end-to-end with only a `forbidden_origin` error.
-status: open
+status: done 2026-07-15
+resolution: already resolved: bin/quick-studio.ts:110 opens core.openUrl = deriveOpenUrl(bindHost,port), which returns http://127.0.0.1:<port> for the default bind (src/core/binding.ts:101-106) — never localhost.
 
 ### DW-5: Decouple the Ring-2 UI build from Ring-1 Core availability and stop rebuilding the UI on every boot (bundle at build time / cache) to protect the epic's ≤2s cold-start target
 
 origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
 location: `startCore` / `buildUiBundle()` (`src/core/server.ts`)
 reason: `startCore` awaits `buildUiBundle()`, so any UI TypeScript/build error currently aborts the whole Core (including the health channel), and every boot re-bundles. Acceptable for a skeleton; a cost/robustness concern for the run-mode and packaging stories (1.2, 1.7).
-status: open
+status: done 2026-07-15
+resolution: already resolved: The UI is pre-bundled at build time into src/core/ui-bundle.generated.ts; startCore consumes the prebuilt bundle at src/core/server.ts:219 — no buildUiBundle()/Bun.build call at boot.
 
 ### DW-6: Decide the canonical frozen-date sub-second precision policy (truncate-to-ms vs preserve) before real DB timestamps arrive; the current ISO regex + calendar round-trip only support millisecond precision
 
@@ -56,14 +59,16 @@ status: open
 origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
 location: `validateOrigin` (`src/core/server.ts`, `expectedAuthority`)
 reason: `validateOrigin` builds `expectedAuthority` as `${host}:${port}`, but a browser loading `http://127.0.0.1` (QS_PORT=80) sends `Host: 127.0.0.1` and `Origin: http://127.0.0.1` with no `:80`, so both comparisons fail and every RPC is rejected `forbidden_origin` (app dead-on-arrival). Story 1.1 defaults to ephemeral ports, so this is latent until 1.2 lets the user pin a port.
-status: open
+status: done 2026-07-15
+resolution: already resolved: src/core/auth.ts:18,129 — HTTP_DEFAULT_PORT=80 and acceptBareHost=(boundPort===80) is applied to the wildcard/Host/Origin matches (auth.ts:140,155,166), so a browser omitting :80 is accepted; port 443 is N/A (Core is http-only).
 
 ### DW-9: When story 1.2 adds browser-open, do NOT hand the OS launcher `core.url` verbatim for a wildcard bind — `http://0.0.0.0:<port>` (and `http://[::]:<port>`) is a non-routable bind sentinel, not a navigable address; compute a display/open URL of `http://localhost:<port>` instead
 
 origin: migrated from legacy ledger (code review of spec-1-6-localhost-binding-port-warning.md), 2026-07-12
 location: `startCore` (`src/core/server.ts`, `core.url = http://${bindHost}:${boundPort}`)
 reason: `startCore` builds `core.url = http://${bindHost}:${boundPort}`, so under `QS_HOST=0.0.0.0` the boot line prints `listening on http://0.0.0.0:<port>` and any future auto-open would target a dead URL. Truthful-but-unusable today (only the stderr listening line is affected); becomes a real dead-on-open defect once 1.2 wires browser-open. Bind host stays `0.0.0.0` for `Bun.serve`; only the surfaced URL needs the substitution.
-status: open
+status: done 2026-07-15
+resolution: already resolved: src/core/binding.ts:90-107 deriveOpenUrl maps wildcard 0.0.0.0→127.0.0.1 and ::→[::1]; Core exposes it as openUrl (server.ts:599) distinct from the verbatim url, and bin/quick-studio.ts:110 hands the launcher core.openUrl.
 
 ### DW-10: Replace the English substring heuristic (`isNotFoundError`) that distinguishes a missing keychain entry (`not-found`) from an unreachable backend (`unavailable`) with typed error codes/kinds from `@napi-rs/keyring`, once the real per-platform error shapes are observed (CI Windows leg / Story 2.2)
 
@@ -105,7 +110,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-2-2-encrypted-credential-store.md), 2026-07-12
 location: `store-key.ts` (`loadOrCreateStoreKey`); `credential-store.ts` (`openCredentialStore`)
 reason: `loadOrCreateStoreKey` mints a fresh CSPRNG key on any keychain `not-found` with no awareness that an encrypted `credential-store.enc` already exists. If the keychain entry is lost while the file survives (OS keychain reset, profile migration, Secret Service re-init, logout wipe), the next open generates a new key, decryption fails the auth tag, and `openCredentialStore` returns `corrupt` — indistinguishable from a tampered file. The data encrypted under the vanished key is already unrecoverable (inherent to AES-GCM with a lost key), so this is not data loss caused by Story 2.2, and the store never overwrites on open; but the misclassification and the absence of a "key-missing / file-present" recovery signal belong to Story 2.3's passphrase-fallback design (the sanctioned recovery path for a missing key). Distinct from the single-writer entry above (that is a concurrency/race issue; this is key-lifecycle vs file-lifecycle desync). NOTE: the legacy entry recorded this as later RESOLVED by Story 2.3 (spec-2-3) — the keychain reopen path now maps a regenerated key (`created`) over an existing `.enc` to the distinct typed `key-unavailable`, with the passphrase fallback as the sanctioned recovery path; sweep triage should verify against the current code before closing.
-status: open
+status: done 2026-07-15
+resolution: already resolved: src/core/credential-store.ts:138-139 declares the distinct key-unavailable outcome, and 487-500 maps a regenerated key over an existing .enc to key-unavailable (not corrupt) as the sanctioned recovery signal — Story 2.3 resolved it.
 
 ### DW-16: Provide a non-env passphrase transport (stdin / file descriptor) for the keychain-unavailable fallback and document the `QS_PASSPHRASE` exposure, so the passphrase is not carried in the process environment on exactly the headless hosts the fallback targets
 
@@ -119,7 +125,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-1-2-one-command-run-mode-select.md), 2026-07-12
 location: `parseCliArgs` (`src/core/cli-args.ts`)
 reason: `parseCliArgs` validates the DB-URL positional only via `new URL(urlArg)` — which accepts any parseable URL — because engine/scheme validation and the actual connect belong to Story 1.3 (the spec scopes 1.2 to "shape only"). So today a nonsense-but-parseable positional (`file:///etc/passwd`, `C:\db.sqlite`) silently selects Ephemeral and carries a meaningless "URL" forward with no error. Not a bug in 1.2 (by-design deferral, and no connection is attempted here), but Story 1.3 is the sanctioned place to reject non-relational schemes with the "distinguishes host vs auth vs network" clear error the epic requires.
-status: open
+status: done 2026-07-15
+resolution: already resolved: src/core/driver.ts:401-414 createDriver + schemeOf (384-390) lower-case and allowlist postgres/postgresql/mysql, rejecting file:/javascript:/data: and C:\db (protocol c:) as unsupported_scheme before any socket.
 
 ### DW-18: Add a distinct "database does not exist" connection-failure kind so a valid host+auth pointed at a nonexistent catalog (PG SQLSTATE `3D000`, MySQL `ER_BAD_DB_ERROR`/errno `1049`) is not misreported as `network` ("could not reach the database")
 
@@ -301,7 +308,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
 location: `src/ui/workspace/ErdTabView.tsx`
 reason: `src/ui/workspace/ErdTabView.tsx` re-runs `schemaToGraph`+dagre whenever the `tables` identity changes, so creating a table via the Epic-3 builder jumps every node to a new position. Low severity (only pan/zoom context is preserved); best solved with the persisted-layout work in Story 4.2.
-status: open
+status: done 2026-07-15
+resolution: already resolved: src/ui/workspace/ErdTabView.tsx:293-296 applyLayout(schemaToGraph(tables), positionsRef.current) overlays saved/dragged positions and re-seeds positionsRef on every graph change (319-322); erd-graph.ts:265-268 is the reshuffle-on-create fix — existing nodes keep positions, only a new table gets a fresh dagre spot. Story 4.2 resolved it.
 
 ### DW-44: Decide how to signal cross-database MySQL foreign keys instead of silently dropping their edges in the ERD
 
@@ -348,7 +356,8 @@ origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sand
 location: `onSignal` / `SandboxFrame` (`setHeight`)
 severity: low
 reason: `isSandboxOutbound` caps `error.message` length but nothing coalesces or rate-limits frames; each valid `height` triggers `setHeight`. Best addressed when Story 5.6 wires the real renderer (debounce/coalesce height via rAF, rate-limit `onSignal`); no containment breach, but a cheap render-thrash DoS from untrusted code.
-status: open
+status: done 2026-07-15
+resolution: already resolved: src/ui/.../SandboxFrame.tsx:109-133 createHeightCoalescer collapses a height flood to one setHeight per animation frame (wired at 196) plus a MAX_FRAME_HEIGHT clamp (147,235) — the cited setHeight/React-render-thrash vector is closed by Story 5.6. (Residual raw onSignal count is unbounded but inert — no render thrash.)
 
 ### DW-50: `SandboxFrame` binds the iframe `contentWindow` exactly once at mount; a null-at-mount window or a later guest-frame reload silently kills the channel (host never built, or the identity gate drops every subsequent message) with no rebind or diagnostic
 
@@ -356,7 +365,8 @@ origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sand
 location: `SandboxFrame` (mount `useEffect`, `event.source === iframeWindow` identity gate)
 severity: low
 reason: The mount `useEffect` has empty deps and returns early if `contentWindow` is null; the host's identity gate is `event.source === iframeWindow` against that single captured window. Both fail closed (no leak) but produce a silently dead sandbox. Re-resolving `contentWindow` on the iframe `load` event and rebuilding/rebinding the host would harden it; low urgency while the component is unwired, natural to fix when 5.6 mounts it for real.
-status: open
+status: done 2026-07-15
+resolution: already resolved: SandboxFrame.tsx:157,182-222,243 rebuilds the host from the live contentWindow on every iframe `load` (loadNonce effect) and rebindHost retries a null-at-load window up to 60 ticks, re-pushing the current doc — no silently dead channel. Story 5.6 resolved it.
 
 ### DW-51: `SandboxFrame` documents `data: null` as "renders an empty guest", but a non-null→null transition pushes nothing, so the guest keeps displaying the prior draw — the documented empty state never happens
 
@@ -364,7 +374,8 @@ origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sand
 location: `SandboxFrame.tsx:36` (contract) / `SandboxFrame.tsx:109` (`if (loaded && data !== null)`)
 severity: low
 reason: `SandboxFrame.tsx:36` promises the empty-guest behavior; `SandboxFrame.tsx:109` guards `if (loaded && data !== null)` and never clears. A correct fix (push an empty `FrozenData` that passes the guard's `decode`, or restate the contract) needs the empty-state semantics 5.6 will define, so it is deferred rather than papered over.
-status: open
+status: done 2026-07-15
+resolution: already resolved: SandboxFrame.tsx:49-58 pushRenderDoc uses `doc ?? EMPTY_RENDER_DOC` (doc-change effect 226-228), so a non-null→null transition clears the prior draw via the guest's replaceChildren — the documented empty state now happens. Story 5.6 resolved it.
 
 ### DW-52: In the Live Report runtime, a `connections.list` failure at initial load leaves the top-level "cannot reach quick-studio" banner and the Default-only picker permanently stale — a later Refresh re-queries and renders live data but never re-lists connections nor clears the banner
 
