@@ -35,7 +35,7 @@ import {
 /** A terse mono field-error or RPC-envelope banner. */
 function ErrorLine({ text }: { text: string }): React.JSX.Element {
   return (
-    <p role="alert" className="font-mono text-xs lowercase text-red-400">
+    <p role="alert" className="font-mono text-xs lowercase text-err">
       {text}
     </p>
   );
@@ -65,19 +65,21 @@ function ProviderRow({
   const configured = summary !== undefined;
   const canSave = validateDraft({ provider, apiKey: value }).ok && !busy && ready;
   return (
-    <div className="flex flex-col gap-2 rounded-[var(--radius)] border border-border bg-card p-3">
+    <div className="flex flex-col gap-2 rounded-[var(--radius)] border border-border bg-card p-4">
       <div className="flex items-center justify-between gap-3">
         <span className="font-mono text-xs lowercase text-foreground">{provider}</span>
         {configured ? (
-          <span className="font-mono text-xs lowercase text-muted-foreground">
-            configured · {summary.keyPreview}
+          <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+            configured · <span className="normal-case">{summary.keyPreview}</span>
           </span>
         ) : (
-          <span className="font-mono text-xs lowercase text-muted-foreground">not configured</span>
+          <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+            not configured
+          </span>
         )}
       </div>
       <label className="flex flex-col gap-1">
-        <span className="font-mono text-[11px] lowercase text-muted-foreground">
+        <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
           {configured ? "api key (replace)" : "api key"}
         </span>
         <input
@@ -88,7 +90,7 @@ function ProviderRow({
           spellCheck={false}
           autoCapitalize="off"
           autoComplete="off"
-          className="rounded-[var(--radius)] border border-border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary"
+          className="rounded-[var(--radius)] border border-border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-coral focus:shadow-[0_0_0_3px_var(--coral-soft)]"
         />
       </label>
       <div className="flex gap-2">
@@ -96,7 +98,7 @@ function ProviderRow({
           type="button"
           disabled={!canSave}
           onClick={onSave}
-          className="rounded-[var(--radius)] border border-border bg-primary px-3 py-1 font-mono text-xs lowercase text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-[var(--radius)] border border-border bg-coral px-3 py-1 font-mono text-xs lowercase text-coral-ink transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {configured ? "replace" : "save"}
         </button>
@@ -186,7 +188,7 @@ export function ProvidersPanel(): React.JSX.Element {
   return (
     <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
       {error !== null ? (
-        <div className="rounded-[var(--radius)] border border-red-700 bg-red-950/40 px-3 py-2">
+        <div className="rounded-[var(--radius)] border border-err-line bg-err-soft px-3 py-2">
           <ErrorLine text={error} />
         </div>
       ) : null}

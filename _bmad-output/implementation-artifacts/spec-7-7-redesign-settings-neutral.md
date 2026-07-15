@@ -2,7 +2,12 @@
 title: 'Redesign Settings/Connections to neutral — port the connect.html ink aesthetic onto the settings surface'
 type: 'refactor'
 created: '2026-07-13'
-status: 'backlog'
+status: 'done'
+review_loop_iteration: 0
+followup_review_recommended: false
+warnings: [oversized]
+baseline_revision: '033857d2d6effcba19e926b9f2991c0c0d4fdf88'
+final_revision: '367baf26329f35f21e7a353fe4a2d534c46918b4'
 context:
   - '{project-root}/design-artifacts/connect.html'
   - '{project-root}/_bmad-output/planning-artifacts/ux-designs/ux-quick-studio-2026-07-07/DESIGN.md'
@@ -66,10 +71,10 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `src/ui/settings/SettingsPanel.tsx` — port the neutral chrome; move every ink-background action to `bg-coral text-coral-ink`; ink focus (`focus:border-coral`); keep RPC/gates/error-envelope behavior and `data-testid` intact.
-- [ ] `src/ui/settings/ProvidersPanel.tsx` — same neutral treatment for the provider rows and save/replace action; ink focus; behavior untouched.
-- [ ] Legibility sweep — grep the settings surface for any ink/accent background paired with a white or near-white foreground and fix it to `text-coral-ink`; confirm no `bg-primary`/`border-primary`/`text-primary-foreground` or hardcoded coral/accent hex remains in these components.
-- [ ] Theme sweep — visually confirm both light and dark themes render every ink-background element with a legible foreground (no white-on-white, no dark-on-dark).
+- [x] `src/ui/settings/SettingsPanel.tsx` — port the neutral chrome; move every ink-background action to `bg-coral text-coral-ink`; ink focus (`focus:border-coral`); keep RPC/gates/error-envelope behavior and `data-testid` intact.
+- [x] `src/ui/settings/ProvidersPanel.tsx` — same neutral treatment for the provider rows and save/replace action; ink focus; behavior untouched.
+- [x] Legibility sweep — grep the settings surface for any ink/accent background paired with a white or near-white foreground and fix it to `text-coral-ink`; confirm no `bg-primary`/`border-primary`/`text-primary-foreground` or hardcoded coral/accent hex remains in these components.
+- [x] Theme sweep — visually confirm both light and dark themes render every ink-background element with a legible foreground (no white-on-white, no dark-on-dark).
 
 **Acceptance Criteria:**
 - Given the Settings surface, when it renders, then Connections and AI-providers sections match the neutral, ink-accented look of `design-artifacts/connect.html` (step-card chrome, mono uppercase labels, ink primary actions).
@@ -78,6 +83,37 @@ context:
 - Given color usage, then it is strictly functional: `ok` (green) only for a successful test / unlocked vault, `err` (red) only for a failed test / unreachable / error envelope / destructive confirm.
 - Given the connection and provider flows (add / edit / remove / set / replace, error envelopes, mutation gates), when exercised, then behavior is identical to before the refactor and the existing test suite still passes with no test changes required to pass.
 - Given `connections-model.ts` and `globals.css`, then they are unchanged by this story.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-07-15 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2: (high 0, medium 0, low 2)
+- defer: 1: (high 0, medium 0, low 1)
+- reject: 10: (high 0, medium 0, low 10)
+- addressed_findings:
+  - `[low]` `[patch]` The provider `configured · {keyPreview}` line was rendered under `uppercase`, distorting a case-sensitive API-key preview tail (e.g. `ab12`→`AB12`) — contradicting the codebase's verbatim-identifier idiom (`HostEngine`). Wrapped the value in `<span className="normal-case">` so the caption stays uppercase but the key tail renders verbatim (`ProvidersPanel.tsx`). tsc + all suites still green.
+  - `[low]` `[patch]` A focused **invalid** input dropped its red `border-err` cue and gained a positive ink glow (`focus:border-coral` + `--coral-soft` ring won on `:focus`), so a bad field read as "good" while being corrected. Made the invalid branch keep an err border + soft-err ring on focus (`invalid ? border-err focus:border-err focus:shadow-[…--err-soft] : border-border focus:border-coral focus:shadow-[…--coral-soft]`) in the shared `Field` (`SettingsPanel.tsx`). tsc + all suites still green.
+
+Deferred (1): the solid `bg-err` destructive-confirm fill with `text-white` is ~3:1 in dark theme (below AA; the prior `bg-red-600` was ~4.8:1) — a proper fix needs a darker destructive-red or an on-err foreground token in `globals.css`, which this story is contract-forbidden to edit. Logged to `deferred-work.md`.
+
+Rejected (10, all low): label metric `text-[11px]` vs source `--label-size:10.5px` (0.5px, pre-existing idiom); add/provider card `p-3→p-4` vs sibling rows (cosmetic rhythm, defensible card chrome); selective uppercase of captions but not values/microcopy (by design — matches `connect.html`, only `.f-label`/`.vault-tag` are uppercased); doubled focus indicator (`:focus` shadow + global `:focus-visible` outline — more visible, not less; shadow is the only mouse-focus cue); `transition-colors` not tweening `hover:opacity-90` (pre-existing, unchanged by this story); active-tab `border-b-2` crowds/≈-color the header rule (functional non-color cue, Tailwind equivalent of the prototype's pseudo-element); `border-err-line` 40%-alpha edge over solid `bg-err` (cosmetic edge definition); light-theme `--err` text contrast (refuted — a light `--err`=#c23b34 override exists); light-theme `--err-soft`/`--err-line` banner and `--coral-soft` focus-ring faintness (globals.css token values, out of scope; keyboard `:focus-visible` ring still present).
+
+## Design Notes
+
+**This restyle is fully test-safe — there are no component/DOM tests over these panels.** The only tests touching the settings surface are the pure view-models `connections-model.test.ts` and `providers-model.test.ts` (validation + reducers; no React render, no DOM strings, testids, roles, or class-name assertions). A class-only restyle cannot break them, so **no test edits are required to keep `bun test` green**. Still preserve `data-testid="settings-panel"` (`SettingsPanel.tsx:297`), the `role="alert"` error lines, `aria-label`s, and the visible labels/button text verbatim — they are the obvious future/e2e assertion targets even though nothing locks them today.
+
+**Exact accents to neutralize (validated against the current source):**
+- `bg-primary` + `text-primary-foreground` → `bg-coral text-coral-ink` at 3 sites: the add-connection `add` button (`SettingsPanel.tsx:370`), the `EditRow` `save` button (`SettingsPanel.tsx:123`), and the `ProviderRow` save/replace button (`ProvidersPanel.tsx:99`). These are the white-on-ink fix.
+- `focus:border-primary` → `focus:border-coral` on the 2 input components: `Field` (`SettingsPanel.tsx:76`, shared by add + edit) and the `ProviderRow` api-key input (`ProvidersPanel.tsx:91`). The `@theme inline` block aliases `--color-coral*`/`--color-ok*`/`--color-err*`, so `bg-coral`, `text-coral-ink`, `border-coral`, `bg-coral-soft`, `text-ok`, `text-err`, `border-err-line` all resolve as utilities — but there is **no** `--color-focus-ring` alias, so use `border-coral` (same value as `--focus-ring`), not `border-focus-ring`. For the prototype's soft ink focus halo, pair it with `focus:shadow-[0_0_0_3px_var(--coral-soft)]` (matches `.mono-input:focus`); the global `:focus-visible` ink ring already exists.
+- Keep the destructive/error reds **functional**: the remove-confirm `yes` button (`SettingsPanel.tsx:166`), the invalid-input border (`SettingsPanel.tsx:78`), and the error banners/`ErrorLine` (`SettingsPanel.tsx:36,340` / `ProvidersPanel.tsx:38,189`). Prefer the semantic `err` tokens (`text-err`, `bg-err-soft`, `border-err-line`) over raw `text-red-*`/`bg-red-*` scales for consistency with the neutral palette, but the red *meaning* stays.
+
+**Labels: prototype is UPPERCASE mono, panels are currently lowercase mono.** The prototype's `.f-label`/`.label` are `text-transform:uppercase`; the panels render `font-mono text-[11px] lowercase text-muted-foreground`. Move field/section labels to the uppercase mono idiom (`uppercase tracking-[0.08em]`) per the visual source of truth — this is a class-only change and touches no asserted text.
+
+**Prototype-only chrome is out of scope.** `connect.html` shows an engine picker (with selected-state ink check glyph), a live Test-connection ok/err result, and a locked/unlocked credential-store vault panel. None of these affordances exist in the current `SettingsPanel`/`ProvidersPanel` (plain add/edit/remove + provider-key rows). Per the contract's **Never**, style only what is present — do NOT wire the picker, test round-trip, or vault panel to satisfy the richer prototype mock.
 
 ## Verification
 
@@ -88,3 +124,37 @@ context:
 
 **Manual checks:**
 - Launch the app, open Settings → Connections and Settings → AI providers, and confirm against `design-artifacts/connect.html`: ink primary actions read with a dark legible label, input focus is ink (not blue), the error banner and destructive confirm are red (functional), and — toggling the theme — no element renders white-on-white or dark-on-dark.
+
+## Auto Run Result
+
+Status: done
+
+### Summary
+Presentation-only neutral/ink (ChatGPT-style) port of the Settings surface onto `design-artifacts/connect.html`. Every ink-accent BACKGROUND action moved from the illegible-in-dark `bg-primary text-primary-foreground` (blue fill + near-white label) to `bg-coral text-coral-ink` (ink fill + dark legible label) — the white-on-ink fix — at all 3 sites: the add-connection `add` button, the `EditRow` `save` button, and the `ProviderRow` save/replace button. Input focus flipped from blue `focus:border-primary` to ink `focus:border-coral` plus the prototype's soft ink ring (`focus:shadow-[0_0_0_3px_var(--coral-soft)]`) on both the shared `Field` and the api-key input. Caption-style labels (field labels, section/status captions, "add connection") moved to the mono UPPERCASE idiom (`uppercase tracking-[0.08em]`) matching `.f-label`/`.label`; values and microcopy stayed as-is. Functional color was retained but re-tokenized to the semantic palette: `text-red-400`→`text-err` (error lines), `border-red-700 bg-red-950/40`→`border-err-line bg-err-soft` (error banners), invalid input `border-red-500`→`border-err`, and the destructive remove-confirm `yes` button `bg-red-600`→`bg-err` (red MEANING preserved). The section switcher gained a neutral active-tab underline (`border-b-2 border-coral`, inactive `border-transparent` so no layout shift). No behavior change: the `connections.*`/`providers.*` RPC calls, the `busy`/`loading`/`listLoaded` mutation gates, the `envelopeText`/`role="alert"` error envelope, `data-testid="settings-panel"`, all `aria-label`s, and every visible label/button text are byte-identical. The pure view-models `connections-model.ts`/`providers-model.ts` and the token source `globals.css` are untouched.
+
+### Files changed
+- `src/ui/settings/SettingsPanel.tsx` — ink primary actions (`bg-coral text-coral-ink`) on add + EditRow save; ink focus + soft ring on `Field`; UPPERCASE captions; semantic err tokens on ErrorLine / invalid border / error banner / destructive confirm; active-tab underline chrome. No handler/RPC/gate change. (Review patch: invalid input keeps its err border + soft-err ring on focus instead of reading as a positive ink glow.)
+- `src/ui/settings/ProvidersPanel.tsx` — ink save/replace action; ink focus + soft ring on the api-key input; UPPERCASE captions; semantic err tokens on ErrorLine / banner. No `providers.*`/gate change. (Review patch: the case-sensitive `keyPreview` tail wrapped in `normal-case` so `uppercase` no longer distorts it.)
+- `src/ui/styles/globals.css` — NOT modified (token source only).
+- `src/ui/settings/connections-model.ts` / `providers-model.ts` — NOT modified (pure view-models).
+- `src/core/*-bundle.generated.ts` — regenerated by `bun run build` (embed the restyled UI/CSS).
+
+### Review findings breakdown
+- **Patches applied (2, both low):** (1) provider `configured · {keyPreview}` was under `uppercase`, distorting a case-sensitive key tail — wrapped the value in `normal-case`, caption stays uppercase. (2) a focused invalid input dropped its red cue and gained a positive ink glow — the invalid branch now keeps an err border + soft-err ring on focus.
+- **Deferred (1, low):** the solid `bg-err` destructive-confirm fill with `text-white` is ~3:1 in dark (below AA; prior `bg-red-600` was ~4.8:1) — a darker destructive-red / on-err foreground token is needed in `globals.css`, which this story is contract-forbidden to edit. Logged to `deferred-work.md` (epic-wide contrast concern, cf. DW-58/67).
+- **Rejected (10, all low):** label 11px vs source 10.5px (pre-existing idiom); card `p-3→p-4` rhythm (defensible card chrome); selective caption casing (by design, matches prototype); doubled focus indicator (more visible, not less; shadow is the sole mouse-focus cue); `transition-colors` vs `hover:opacity-90` (pre-existing); active-tab underline crowding/≈color (functional non-color cue); `border-err-line` edge over solid fill (cosmetic); light-theme `--err` text (refuted — a light override exists); light-theme `--err-soft`/`--err-line`/`--coral-soft` faintness (globals.css token values, out of scope; keyboard focus-visible ring still present).
+
+### Verification
+- `bunx tsc --noEmit` → clean (exit 0), before and after review patches.
+- `bun test` → **1065 pass, 0 fail** (2621 expects, 68 files); no test file modified (settings tests are pure view-models — `connections-model.test.ts`/`providers-model.test.ts` — with no DOM coupling).
+- `bun run build` → OK (ui/sandbox/snapshot/live-report bundles all wrote).
+- `rg 'bg-primary|text-primary-foreground|focus:border-primary|border-primary' src/ui/settings/{SettingsPanel,ProvidersPanel}.tsx` → no matches. `rg 'coral|#[0-9a-fA-F]{6}'` on both files → only sanctioned utilities (`bg-coral`, `text-coral-ink`, `border-coral`, `var(--coral-soft)`/`var(--err-soft)` in arbitrary shadows), no hardcoded hex.
+- `git diff` scope confirmed: only `SettingsPanel.tsx` + `ProvidersPanel.tsx` (source), plus regenerated bundles and bookkeeping; `connections-model.ts`/`providers-model.ts`/`globals.css` untouched.
+
+### Follow-up review recommendation
+`false` — the final pass applied only two localized, low-consequence class-level patches (a `normal-case` wrapper + a focus-state class conditional) and one deferred cosmetic contrast note. No behavior, RPC, API, security, persistence, or data-flow change; every seam is byte-identical and the full suite stays green. Not significant enough to warrant an independent follow-up review.
+
+### Residual risks
+- **Visual fidelity is Tailwind-approximated**, not a pixel clone of the prototype's bespoke CSS; a manual light/dark pass in the running app is the only check a CLI cannot perform.
+- **Dark-theme destructive-confirm contrast** is the deferred item (`bg-err` + white ~3:1) — the button still reads and sits behind a two-step confirm, but a darker-red token is the real fix.
+- **Light theme is opt-in** (`data-theme="light"`) and, as across Epic 7, less battle-tested than dark; the re-tokenized error surfaces carry the epic-wide small-text/soft-overlay contrast risk (cf. DW-58/67), out of scope here since `globals.css` is frozen for this story.

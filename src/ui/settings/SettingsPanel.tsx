@@ -33,7 +33,7 @@ type SettingsSection = "connections" | "providers";
 /** A terse mono field-error or RPC-envelope banner. */
 function ErrorLine({ text }: { text: string }): React.JSX.Element {
   return (
-    <p role="alert" className="font-mono text-xs lowercase text-red-400">
+    <p role="alert" className="font-mono text-xs lowercase text-err">
       {text}
     </p>
   );
@@ -64,7 +64,7 @@ function Field({
 }): React.JSX.Element {
   return (
     <label className="flex flex-col gap-1">
-      <span className="font-mono text-[11px] lowercase text-muted-foreground">{label}</span>
+      <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">{label}</span>
       <input
         type="text"
         value={value}
@@ -73,8 +73,10 @@ function Field({
         spellCheck={false}
         autoCapitalize="off"
         autoComplete="off"
-        className={`rounded-[var(--radius)] border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary ${
-          invalid ? "border-red-500" : "border-border"
+        className={`rounded-[var(--radius)] border bg-background px-2 py-1 font-mono text-xs text-foreground outline-none ${
+          invalid
+            ? "border-err focus:border-err focus:shadow-[0_0_0_3px_var(--err-soft)]"
+            : "border-border focus:border-coral focus:shadow-[0_0_0_3px_var(--coral-soft)]"
         }`}
       />
     </label>
@@ -120,7 +122,7 @@ function EditRow({
           type="button"
           disabled={!validation.ok || busy}
           onClick={() => onSave(draft)}
-          className="rounded-[var(--radius)] border border-border bg-primary px-3 py-1 font-mono text-xs lowercase text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          className="rounded-[var(--radius)] border border-border bg-coral px-3 py-1 font-mono text-xs lowercase text-coral-ink transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
           save
         </button>
@@ -163,7 +165,7 @@ function ConnectionRow({
               type="button"
               disabled={busy}
               onClick={onRemove}
-              className="rounded-[var(--radius)] border border-red-700 bg-red-600 px-2 py-1 font-mono text-xs lowercase text-white transition-colors hover:opacity-90 disabled:opacity-50"
+              className="rounded-[var(--radius)] border border-err-line bg-err px-2 py-1 font-mono text-xs lowercase text-white transition-colors hover:opacity-90 disabled:opacity-50"
             >
               yes
             </button>
@@ -305,8 +307,10 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
             <button
               type="button"
               onClick={() => setSection("connections")}
-              className={`font-mono text-xs lowercase transition-colors ${
-                section === "connections" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+              className={`border-b-2 pb-0.5 font-mono text-xs lowercase transition-colors ${
+                section === "connections"
+                  ? "border-coral text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
             >
               connections
@@ -314,8 +318,10 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
             <button
               type="button"
               onClick={() => setSection("providers")}
-              className={`font-mono text-xs lowercase transition-colors ${
-                section === "providers" ? "text-foreground" : "text-muted-foreground hover:text-foreground"
+              className={`border-b-2 pb-0.5 font-mono text-xs lowercase transition-colors ${
+                section === "providers"
+                  ? "border-coral text-foreground"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
               }`}
             >
               ai providers
@@ -337,14 +343,16 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
       ) : (
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
         {error !== null ? (
-          <div className="rounded-[var(--radius)] border border-red-700 bg-red-950/40 px-3 py-2">
+          <div className="rounded-[var(--radius)] border border-err-line bg-err-soft px-3 py-2">
             <ErrorLine text={error} />
           </div>
         ) : null}
 
         {/* Add form */}
-        <div className="flex flex-col gap-2 rounded-[var(--radius)] border border-border bg-card p-3">
-          <span className="font-mono text-xs lowercase text-muted-foreground">add connection</span>
+        <div className="flex flex-col gap-2 rounded-[var(--radius)] border border-border bg-card p-4">
+          <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+            add connection
+          </span>
           <Field
             label="name"
             placeholder="prod db"
@@ -367,7 +375,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
               type="button"
               disabled={!addValidation.ok || busy || loading || !listLoaded}
               onClick={onAdd}
-              className="rounded-[var(--radius)] border border-border bg-primary px-3 py-1 font-mono text-xs lowercase text-primary-foreground transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-[var(--radius)] border border-border bg-coral px-3 py-1 font-mono text-xs lowercase text-coral-ink transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
             >
               add
             </button>
