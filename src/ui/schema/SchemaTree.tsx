@@ -154,7 +154,7 @@ export function SchemaTree({
   return (
     <nav
       aria-label="Schema tables"
-      className="flex h-full w-full min-w-0 flex-col overflow-hidden border-l border-border bg-background"
+      className="flex h-full w-full min-w-0 flex-col overflow-hidden bg-background"
       style={{ fontFamily: "var(--font-mono)" }}
     >
       {/* Connection status row (prototype `.conn-row`): dot + terse status text. The

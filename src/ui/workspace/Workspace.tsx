@@ -312,7 +312,7 @@ export function Workspace({
           </div>
         </Panel>
 
-        <PanelResizeHandle className="w-1 bg-border transition-colors hover:bg-primary data-[resize-handle-state=drag]:bg-primary" />
+        <PanelResizeHandle className="w-1 bg-transparent transition-colors hover:bg-primary focus-visible:bg-primary data-[resize-handle-state=drag]:bg-primary" />
 
         <Panel defaultSize={panelSizes[1] ?? 80} minSize={30}>
           {/* Chrome-style shell: a transparent .topbar hosting the Tab strip + new-tab
