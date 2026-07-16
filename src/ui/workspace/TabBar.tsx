@@ -46,6 +46,14 @@ const TAB_ICON: Readonly<Record<TabKind, React.JSX.Element>> = {
       <path d="M9 8h6M9 12h6M9 16h3" />
     </svg>
   ),
+  // The `settings` singleton tab's leading icon (Story 8.6) — reuses the rail gear glyph
+  // at the same strokeWidth (1.7) so the tab-strip gear matches the rail gear exactly.
+  settings: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" />
+    </svg>
+  ),
 };
 
 export function TabBar({

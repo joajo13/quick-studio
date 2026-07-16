@@ -50,6 +50,7 @@ import { ErdTabView } from "./ErdTabView.tsx";
 import { QueryTabView } from "./QueryTabView.tsx";
 import { ReportTabView } from "../report/ReportTabView.tsx";
 import { emptyReport, type ReportState, type ReportStateUpdate } from "../report/report-state.ts";
+import { SettingsPanel } from "../settings/SettingsPanel.tsx";
 import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
 
 /** Short human blurb per Tab kind for the (non-table) placeholder body. */
@@ -59,6 +60,9 @@ const KIND_BLURB: Readonly<Record<TabKind, string>> = {
   erd: "Visualize the schema as an entity-relationship diagram. (Epic 4.)",
   chat: "Ask questions about your data in natural language. (Epic 5.)",
   report: "Assemble and export a data report. (Epic 6.)",
+  // The `settings` tab renders SettingsPanel, never the placeholder body — this entry
+  // only keeps the Record<TabKind,…> exhaustive under tsc.
+  settings: "Manage connections and AI providers.",
 };
 
 function EmptyState(): React.JSX.Element {
@@ -463,6 +467,7 @@ export function TabContent({
   onReportStateChange,
   erdLayout,
   onErdLayoutChange,
+  onCloseTab,
 }: {
   tab: WorkspaceTab | null;
   /** PK column names of the active table tab's bound table (for the grid key icon). */
@@ -489,6 +494,8 @@ export function TabContent({
   erdLayout?: ErdTabLayout;
   /** Report the active ERD tab's captured geometry up, keyed by tab id (Story 4.2). */
   onErdLayoutChange?: (tabId: number, layout: ErdTabLayout) => void;
+  /** Close a tab by id — wired to the settings tab body's in-panel "close" (Story 8.6). */
+  onCloseTab?: (id: number) => void;
 }): React.JSX.Element {
   if (tab === null) {
     return <EmptyState />;
@@ -563,6 +570,16 @@ export function TabContent({
         onStateChange={onReportStateChange ?? (() => {})}
       />
     );
+  }
+
+  if (tab.kind === "settings") {
+    // The Settings tab body (Story 8.6): SettingsPanel mounts here in the normal tab-body
+    // slot (it used to be an overlay). Its in-panel "close" closes this settings tab via
+    // the normal closeTab path — a redundant-but-harmless affordance alongside the tab `×`.
+    // key={tab.id} mirrors every sibling branch so the body remounts per tab id — a
+    // no-op while the singleton holds, but robust if two settings tabs ever coexist
+    // (e.g. a legacy snapshot before restore's collapse defense runs).
+    return <SettingsPanel key={tab.id} onClose={() => onCloseTab?.(tab.id)} />;
   }
 
   return (

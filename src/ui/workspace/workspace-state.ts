@@ -30,9 +30,10 @@ import {
 } from "../../shared/contract.ts";
 
 /**
- * The five kinds of document Tab the Workspace can hold. Alias of the shared
- * contract's {@link WorkspaceTabKind} — kept as `TabKind` so every existing UI
- * importer keeps working unchanged; `contract.ts` is the single source of truth.
+ * The kinds of Tab the Workspace can hold — the five document kinds plus the
+ * `settings` system singleton (Story 8.6). Alias of the shared contract's
+ * {@link WorkspaceTabKind} — kept as `TabKind` so every existing UI importer keeps
+ * working unchanged; `contract.ts` is the single source of truth.
  */
 export type TabKind = WorkspaceTabKind;
 
@@ -77,10 +78,18 @@ const KIND_LABEL: Readonly<Record<TabKind, string>> = {
   erd: "ERD",
   chat: "Chat",
   report: "Report",
+  settings: "Settings",
 };
 
-/** All Tab kinds in launcher order — handy for the sidebar rail. */
+/** All Tab kinds (includes the `settings` system singleton) — the widened contract enum. */
 export const TAB_KINDS: ReadonlyArray<TabKind> = WORKSPACE_TAB_KINDS;
+
+/**
+ * The FIVE document kinds only, in launcher order — the sidebar rail iterates THIS
+ * subset so `settings` never gains a per-kind launcher button (it stays the separate
+ * bottom-pinned rail toggle). `settings` is a system singleton tab, not a document kind.
+ */
+export const LAUNCHER_KINDS: ReadonlyArray<TabKind> = TAB_KINDS.filter((k) => k !== "settings");
 
 /** An empty Workspace: no Tabs, nothing active, ids start at 1. */
 export function emptyWorkspace(): WorkspaceState {
@@ -92,6 +101,10 @@ export function emptyWorkspace(): WorkspaceState {
  * may coexist) and makes it active. Pure — returns a new state.
  */
 export function openTab(state: WorkspaceState, kind: TabKind): WorkspaceState {
+  // Settings is a SINGLETON — route it through the sole open-or-focus seam even if a
+  // caller reaches openTab with it (the widened enum now type-accepts "settings"), so
+  // no path can mint a duplicate "Settings 2" tab that bypasses the singleton guard.
+  if (kind === "settings") return openOrFocusSettings(state);
   const id = state.nextId;
   // Suffix the title with the tab's unique, monotonic id (never reused) so two
   // coexisting tabs of the same kind can never share a title — even after an
@@ -153,6 +166,21 @@ export function activateTab(state: WorkspaceState, id: number): WorkspaceState {
 }
 
 /**
+ * Open the Settings tab, or FOCUS it if one is already open (Story 8.6). Settings is
+ * a SINGLETON — you can't configure two in parallel — so this is the SOLE open seam:
+ * if a `settings` tab exists it delegates to {@link activateTab} (a no-op when it is
+ * already active), else it appends exactly one `settings` tab (title `"Settings"`, no
+ * numeric suffix — unlike {@link openTab}) and makes it active. Pure — returns a new state.
+ */
+export function openOrFocusSettings(state: WorkspaceState): WorkspaceState {
+  const existing = state.tabs.find((t) => t.kind === "settings");
+  if (existing) return activateTab(state, existing.id);
+  const id = state.nextId;
+  const tab: WorkspaceTab = { id, kind: "settings", title: "Settings" };
+  return { ...state, tabs: [...state.tabs, tab], activeTabId: id, nextId: id + 1 };
+}
+
+/**
  * Bind a live table to the active data Tab (Story 3.2). If the active Tab is a
  * `table` Tab, it is REUSED — rebound to `ref` and renamed to the table name (so
  * clicking table after table in the tree reuses one grid Tab). Otherwise a new,
@@ -198,11 +226,25 @@ export function bindTableToActiveTab(state: WorkspaceState, ref: TableRef): Work
  */
 export function restoreWorkspace(snapshot: WorkspaceSnapshot): WorkspaceState {
   const seenIds = new Set<number>();
-  const tabs: WorkspaceTab[] = [];
+  const deduped: WorkspaceTab[] = [];
   for (const t of snapshot.tabs) {
     if (seenIds.has(t.id)) continue; // keep the first tab per id; drop later dupes
     seenIds.add(t.id);
-    tabs.push({ id: t.id, kind: t.kind, title: t.title });
+    deduped.push({ id: t.id, kind: t.kind, title: t.title });
+  }
+  // Settings-singleton defense (Story 8.6): a hand-edited/legacy snapshot could carry
+  // two `settings` tabs with DISTINCT ids (which the id-dedupe above keeps). Settings is
+  // a singleton, so collapse to the FIRST `kind:"settings"` tab and drop any later ones —
+  // a second, independent guard alongside `openOrFocusSettings`'s open seam. `activeTabId`
+  // is recomputed below and defensively falls back if it pointed at a dropped tab.
+  let seenSettings = false;
+  const tabs: WorkspaceTab[] = [];
+  for (const t of deduped) {
+    if (t.kind === "settings") {
+      if (seenSettings) continue; // drop extra settings tabs
+      seenSettings = true;
+    }
+    tabs.push(t);
   }
   const maxId = tabs.reduce((max, t) => Math.max(max, t.id), 0);
   const nextId = Math.max(snapshot.nextId, maxId + 1);

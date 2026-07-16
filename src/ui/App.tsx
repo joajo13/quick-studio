@@ -41,6 +41,7 @@ import {
   bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
+  openOrFocusSettings,
   openTab,
   restoreErdLayouts,
   restoreLastProvider,
@@ -73,6 +74,7 @@ type WorkspaceAction =
   | { type: "close"; id: number }
   | { type: "activate"; id: number }
   | { type: "bindTable"; ref: TableRef }
+  | { type: "openSettings" }
   | { type: "restore"; snapshot: WorkspaceSnapshot };
 
 function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
@@ -85,6 +87,8 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       return activateTab(state, action.id);
     case "bindTable":
       return bindTableToActiveTab(state, action.ref);
+    case "openSettings":
+      return openOrFocusSettings(state);
     case "restore":
       return restoreWorkspace(action.snapshot);
   }
@@ -559,6 +563,7 @@ export function App(): React.JSX.Element {
       <Workspace
         state={workspace}
         onOpen={(kind) => dispatch({ type: "open", kind })}
+        onOpenSettings={() => dispatch({ type: "openSettings" })}
         onActivate={(id) => dispatch({ type: "activate", id })}
         onClose={(id) => {
           dispatch({ type: "close", id });

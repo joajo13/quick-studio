@@ -670,11 +670,17 @@ export function isSandboxOutbound(value: unknown): value is SandboxOutbound {
  * ------------------------------------------------------------------ */
 
 /**
- * The five kinds of document Tab the Workspace can hold — the SINGLE source of
- * truth (Core validation and the UI's `workspace-state.ts` both import this, so
- * they can never drift). Order matches the launcher-rail order.
+ * The kinds of Tab the Workspace can hold — the SINGLE source of truth (Core
+ * validation and the UI's `workspace-state.ts` both import this, so they can never
+ * drift). The FIRST FIVE are document kinds; their order matches the launcher-rail
+ * order (the UI iterates that subset via `LAUNCHER_KINDS`). `"settings"` is a SYSTEM
+ * SINGLETON tab (at most one open), NOT a launcher-rail kind — it is reached from the
+ * bottom-pinned rail Settings control, never a per-kind launcher button. Added as an
+ * ADDITIVE enum member (Story 8.6), so Core validation, both `isTabKind` guards, and
+ * the persisted {@link WorkspaceSnapshotTab.kind} accept it with no hand-edit and no
+ * snapshot-version bump (a pre-8.6 snapshot of only document kinds still loads).
  */
-export const WORKSPACE_TAB_KINDS = ["table", "query", "erd", "chat", "report"] as const;
+export const WORKSPACE_TAB_KINDS = ["table", "query", "erd", "chat", "report", "settings"] as const;
 
 /** A Tab kind, derived from {@link WORKSPACE_TAB_KINDS} (not hand-duplicated). */
 export type WorkspaceTabKind = (typeof WORKSPACE_TAB_KINDS)[number];

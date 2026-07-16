@@ -18,12 +18,11 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { ErdTabLayout, ExposureInfo, ProviderKind, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
 import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
-import { SettingsPanel } from "../settings/SettingsPanel.tsx";
 import type { ChatState } from "./chat-model.ts";
 import type { ReportState, ReportStateUpdate } from "../report/report-state.ts";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
-import { TAB_KINDS, type TabKind, type WorkspaceState } from "./workspace-state.ts";
+import { LAUNCHER_KINDS, type TabKind, type WorkspaceState } from "./workspace-state.ts";
 
 /** Launcher-rail tooltip/aria-label per kind — every rail button opens a NEW tab of
  * that kind, so the (now icon-only) button keeps its accurate "New …" wording as its
@@ -34,6 +33,9 @@ const LAUNCH_LABEL: Readonly<Record<TabKind, string>> = {
   erd: "New ERD",
   chat: "New chat",
   report: "New report",
+  // `settings` is a system singleton tab, not a launcher-rail kind — the rail loop
+  // iterates LAUNCHER_KINDS, so this entry only satisfies the Record's exhaustiveness.
+  settings: "Settings",
 };
 
 /** Per-kind rail icon (also reused by `TabBar`'s per-tab leading icon). */
@@ -69,6 +71,15 @@ const KIND_ICON: Readonly<Record<TabKind, React.JSX.Element>> = {
       <path d="M9 8h6M9 12h6M9 16h3" />
     </svg>
   ),
+  // `settings` is not a launcher-rail kind (the rail loop iterates LAUNCHER_KINDS); this
+  // gear entry only satisfies the Record's exhaustiveness. The rail's own Settings toggle
+  // renders its gear inline below, and the tab strip's leading icon lives in TabBar.
+  settings: (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" />
+    </svg>
+  ),
 };
 
 /**
@@ -82,14 +93,15 @@ const KIND_ICON: Readonly<Record<TabKind, React.JSX.Element>> = {
  */
 function LauncherRail({
   onOpen,
-  settingsOpen,
-  onToggleSettings,
+  settingsActive,
+  onOpenSettings,
   createOpen,
   onToggleCreate,
 }: {
   onOpen: (kind: TabKind) => void;
-  settingsOpen: boolean;
-  onToggleSettings: () => void;
+  /** Whether the Settings tab is the active tab (drives the toggle's `aria-pressed`). */
+  settingsActive: boolean;
+  onOpenSettings: () => void;
   createOpen: boolean;
   onToggleCreate: () => void;
 }): React.JSX.Element {
@@ -104,7 +116,7 @@ function LauncherRail({
         q
       </div>
 
-      {TAB_KINDS.map((kind) => (
+      {LAUNCHER_KINDS.map((kind) => (
         <button
           key={kind}
           type="button"
@@ -139,16 +151,18 @@ function LauncherRail({
         </svg>
       </button>
 
-      {/* Bottom-pinned Settings control. */}
+      {/* Bottom-pinned Settings control — opens the Settings tab, or focuses it if one
+          is already open (open-or-focus singleton). `aria-pressed` reflects that the
+          Settings tab is the active view. */}
       <button
         type="button"
         aria-label="Settings"
-        aria-pressed={settingsOpen}
+        aria-pressed={settingsActive}
         data-testid="settings-toggle"
         title="Settings"
-        onClick={onToggleSettings}
+        onClick={onOpenSettings}
         className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-accent hover:text-foreground ${
-          settingsOpen ? "bg-accent text-foreground" : "text-muted-foreground"
+          settingsActive ? "bg-accent text-foreground" : "text-muted-foreground"
         }`}
       >
         <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} className="h-[18px] w-[18px]">
@@ -189,6 +203,7 @@ function ExposureBanner({ exposure }: { exposure: ExposureInfo }): React.JSX.Ele
 export function Workspace({
   state,
   onOpen,
+  onOpenSettings,
   onActivate,
   onClose,
   onActivateTable,
@@ -218,6 +233,8 @@ export function Workspace({
 }: {
   state: WorkspaceState;
   onOpen: (kind: TabKind) => void;
+  /** Open the Settings tab, or focus it if already open (open-or-focus singleton). */
+  onOpenSettings: () => void;
   onActivate: (id: number) => void;
   onClose: (id: number) => void;
   /** Route a schema-tree table activation into the workspace reducer (Story 3.2). */
@@ -270,21 +287,13 @@ export function Workspace({
   const activeTable =
     activeTab !== null && activeTab.kind === "table" ? (activeTab.table ?? null) : null;
 
-  // Settings surface open/closed lives in React memory only — it is NOT part of
-  // the persisted Workspace snapshot (out of scope for Story 2.5's Panel-sizes +
-  // Tabs restore; see the spec's Block-If).
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  // The create-table surface (Story 3.4) shares the main Panel with Settings and is
-  // MUTUALLY EXCLUSIVE with it — opening one closes the other. Like Settings, it is
-  // React-memory-only (not part of the persisted Workspace snapshot).
+  // The create-table surface (Story 3.4) is an overlay over the main Panel — it is
+  // React-memory-only (not part of the persisted Workspace snapshot). Settings is no
+  // longer an overlay: it is a normal singleton tab (Story 8.6), so no settings flag
+  // lives here anymore.
   const [createOpen, setCreateOpen] = useState(false);
-  const toggleSettings = (): void => {
-    setSettingsOpen((v) => !v);
-    setCreateOpen(false);
-  };
   const toggleCreate = (): void => {
     setCreateOpen((v) => !v);
-    setSettingsOpen(false);
   };
 
   return (
@@ -298,8 +307,15 @@ export function Workspace({
             <div className="shrink-0" style={{ width: "52px" }}>
               <LauncherRail
                 onOpen={onOpen}
-                settingsOpen={settingsOpen}
-                onToggleSettings={toggleSettings}
+                settingsActive={activeTab?.kind === "settings" && !createOpen}
+                onOpenSettings={() => {
+                  // Opening/focusing Settings must dismiss the create-table overlay (which
+                  // otherwise keeps covering the pane) — restoring the mutual exclusion the
+                  // old `toggleSettings`'s `setCreateOpen(false)` provided before Settings
+                  // became a tab. Without this the Settings click appears inert.
+                  setCreateOpen(false);
+                  onOpenSettings();
+                }}
                 createOpen={createOpen}
                 onToggleCreate={toggleCreate}
               />
@@ -319,12 +335,12 @@ export function Workspace({
 
         <Panel defaultSize={panelSizes[1] ?? 80} minSize={30}>
           {/* Chrome-style shell: a transparent .topbar hosting the Tab strip + new-tab
-              "+" (hidden while Settings/Create fill the pane, exactly as the Tab strip
-              itself did before), and a rounded, detached `.content-panel` below it that
-              always hosts the neutral status bar (connection + Stop stay reachable no
-              matter which of the three panes — Tabs, Settings, or Create — is showing). */}
+              "+" (hidden while the create-table overlay fills the pane, exactly as the Tab
+              strip itself did before), and a rounded, detached `.content-panel` below it
+              that always hosts the neutral status bar (connection + Stop stay reachable
+              whether the Tabs — Settings now among them — or the Create overlay is showing). */}
           <div className="flex h-full flex-col bg-background">
-            {!settingsOpen && !createOpen ? (
+            {!createOpen ? (
               <div className="flex shrink-0 items-end gap-0.5 pt-[5px] pr-2 pb-0 pl-1.5">
                 <div className="min-w-0 flex-1 self-end">
                   <TabBar state={state} onActivate={onActivate} onClose={onClose} />
@@ -333,7 +349,11 @@ export function Workspace({
                   type="button"
                   title="New tab"
                   aria-label="New tab"
-                  onClick={() => onOpen(activeTab?.kind ?? TAB_KINDS[0]!)}
+                  onClick={() =>
+                    // The `+` duplicates the active tab's kind — but never Settings (a
+                    // singleton). When Settings is active, fall back to a document kind.
+                    onOpen(activeTab && activeTab.kind !== "settings" ? activeTab.kind : LAUNCHER_KINDS[0]!)
+                  }
                   className="mx-[2px] grid h-9 w-[34px] shrink-0 place-items-center self-end rounded-[10px] p-0 text-[19px] font-normal leading-none text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 >
                   +
@@ -343,9 +363,7 @@ export function Workspace({
 
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-xl bg-card">
               <div className="min-h-0 flex-1 overflow-auto">
-                {settingsOpen ? (
-                  <SettingsPanel onClose={() => setSettingsOpen(false)} />
-                ) : createOpen ? (
+                {createOpen ? (
                   <CreateTablePanel
                     schemas={schemas}
                     onCreated={onTableCreated}
@@ -354,6 +372,7 @@ export function Workspace({
                 ) : (
                   <TabContent
                     tab={activeTab}
+                    onCloseTab={onClose}
                     primaryKeys={primaryKeys}
                     indexes={indexes}
                     tables={allTables}

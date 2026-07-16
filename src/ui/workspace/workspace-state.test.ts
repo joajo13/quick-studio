@@ -11,6 +11,7 @@ import {
   bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
+  openOrFocusSettings,
   openTab,
   restoreErdLayouts,
   restoreLastProvider,
@@ -150,6 +151,53 @@ describe("activateTab", () => {
   });
 });
 
+describe("openOrFocusSettings (Story 8.6 — singleton)", () => {
+  test("opens a single active Settings tab when none exists (title 'Settings', no suffix)", () => {
+    const s = openOrFocusSettings(openMany("table", "query")); // ids 1,2 → settings id 3
+    expect(s.tabs).toHaveLength(3);
+    const settings = s.tabs[2]!;
+    expect(settings).toEqual({ id: 3, kind: "settings", title: "Settings" });
+    expect(s.activeTabId).toBe(3);
+    expect(s.nextId).toBe(4);
+  });
+
+  test("focuses the existing Settings tab instead of opening a second (no duplicate)", () => {
+    let s = openOrFocusSettings(openMany("table", "query")); // settings id 3, active
+    s = activateTab(s, 1); // switch away from settings
+    const before = s;
+    s = openOrFocusSettings(s); // click Settings again
+    expect(s.tabs.filter((t) => t.kind === "settings")).toHaveLength(1);
+    expect(s.tabs).toHaveLength(before.tabs.length); // no new tab
+    expect(s.activeTabId).toBe(3); // the existing settings tab is focused
+    expect(s.nextId).toBe(before.nextId); // nextId unchanged
+  });
+
+  test("is a no-op when the Settings tab is already active", () => {
+    const s = openOrFocusSettings(openMany("table")); // settings active
+    expect(openOrFocusSettings(s)).toBe(s); // identical reference — true no-op
+  });
+
+  test("does not mutate the input state", () => {
+    const a = openMany("table");
+    const b = openOrFocusSettings(a);
+    expect(a.tabs).toHaveLength(1);
+    expect(b).not.toBe(a);
+  });
+
+  test("openTab('settings') routes through the singleton seam (no duplicate 'Settings 2')", () => {
+    // The widened enum type-accepts "settings"; openTab must not mint a numeric-suffixed
+    // duplicate — it delegates to openOrFocusSettings (open-then-focus, never two).
+    let s = openTab(openMany("table"), "settings"); // opens the one settings tab (id 2)
+    const settingsTabs = () => s.tabs.filter((t) => t.kind === "settings");
+    expect(settingsTabs()).toHaveLength(1);
+    expect(settingsTabs()[0]?.title).toBe("Settings");
+    const nextIdAfterOpen = s.nextId;
+    s = openTab(s, "settings"); // second call focuses, does not append
+    expect(settingsTabs()).toHaveLength(1);
+    expect(s.nextId).toBe(nextIdAfterOpen); // no id burned on the focus path
+  });
+});
+
 describe("restoreWorkspace", () => {
   test("rebuilds tabs/activeTabId/nextId verbatim from a well-formed snapshot", () => {
     const snapshot: WorkspaceSnapshot = {
@@ -267,6 +315,58 @@ describe("restoreWorkspace — duplicate tab ids (DW-26)", () => {
     const closed = closeTab(state, 1);
     expect(closed.tabs).toHaveLength(1);
     expect(closed.tabs.map((t) => t.id)).toEqual([2]);
+  });
+});
+
+describe("restoreWorkspace — settings-singleton defense (Story 8.6)", () => {
+  test("collapses two settings tabs (distinct ids) to the FIRST occurrence", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [
+        { id: 1, kind: "table", title: "Table 1" },
+        { id: 2, kind: "settings", title: "Settings" }, // first settings — kept
+        { id: 3, kind: "settings", title: "Settings" }, // second settings — dropped
+      ],
+      activeTabId: 1,
+      nextId: 4,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.tabs).toEqual([
+      { id: 1, kind: "table", title: "Table 1" },
+      { id: 2, kind: "settings", title: "Settings" },
+    ]);
+    expect(state.tabs.filter((t) => t.kind === "settings")).toHaveLength(1);
+  });
+
+  test("recomputes activeTabId when it pointed at a dropped settings tab (falls back to first)", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [
+        { id: 1, kind: "table", title: "Table 1" },
+        { id: 2, kind: "settings", title: "Settings" },
+        { id: 3, kind: "settings", title: "Settings" }, // dropped
+      ],
+      activeTabId: 3, // pointed at the dropped tab
+      nextId: 4,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.tabs.some((t) => t.id === 3)).toBe(false);
+    expect(state.activeTabId).toBe(1); // dangling → first restored tab
+  });
+});
+
+describe("settings tab persistence (Story 8.6)", () => {
+  test("a settings tab round-trips through toWorkspaceSnapshot → restoreWorkspace", () => {
+    let state = openMany("table"); // id 1
+    state = openOrFocusSettings(state); // settings id 2, active
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    expect(snapshot.tabs).toEqual([
+      { id: 1, kind: "table", title: "Table 1" },
+      { id: 2, kind: "settings", title: "Settings" },
+    ]);
+    expect(restoreWorkspace(snapshot)).toEqual(state);
   });
 });
 
