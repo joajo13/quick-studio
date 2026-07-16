@@ -118,3 +118,15 @@ development_status:
   7-6-redesign-report-neutral: done            # Story 7.6: Redesign the Report to neutral
   7-7-redesign-settings-neutral: done       # Story 7.7: Redesign Settings/Connections to neutral
   epic-7-retrospective: optional
+
+  # Epic 8: UI Refinements — Artifact Fidelity & Interaction Polish
+  epic-8: backlog
+  8-1-shadcn-ui-foundation: backlog          # Story 8.1: shadcn/ui + Radix foundation
+  8-2-chrome-tabs-fidelity: backlog          # Story 8.2: Chrome-tab fidelity + content-panel fusion
+  8-3-custom-scrollbars-no-divider: backlog  # Story 8.3: Custom scrollbars + remove left-panel divider
+  8-4-chat-markdown-rendering: backlog       # Story 8.4: Render Markdown/MDX in chat message bubbles
+  8-5-chat-provider-autoselect: backlog      # Story 8.5: Chat provider auto-select + shadcn dropdown
+  8-6-settings-singleton-tab: backlog        # Story 8.6: Settings as a singleton tab
+  8-7-surface-active-connection: backlog     # Story 8.7: Surface the active connection in Settings/Connections
+  8-8-sql-editor-autocomplete: backlog       # Story 8.8: SQL editor — CodeMirror 6 highlighting + autocomplete
+  epic-8-retrospective: optional

@@ -891,3 +891,135 @@ So that connecting and managing credentials feels consistent.
 **Given** the Providers settings
 **When** I view them
 **Then** they follow the same neutral language, preserving the existing connection/provider RPC + credential-store behavior
+
+## Epic 8: UI Refinements — Artifact Fidelity & Interaction Polish
+
+> **Refinement pass.** Epic 7 moved the whole UI to the neutral / ChatGPT-style language, but several surfaces DRIFTED from the `design-artifacts/*.html` prototypes — most visibly the Chrome-style tabs, whose concave "feet" a review pass removed to dodge an `overflow-y` clipping bug, and which shipped without a live visual render. This epic RESTORES that fidelity and adds the interaction polish the prototypes imply. The prototypes remain the **visual source of truth**. Two build decisions were made up front: dropdowns use **shadcn/ui + Radix** (introduced in 8.1 — the project previously carried only the shadcn token layer, no components), and the SQL editor uses **CodeMirror 6**. Every story preserves logic, RPC contracts, a11y roles, and passing tests unless it explicitly changes behavior, and each REQUIRES a live visual check against its prototype at `http://127.0.0.1:6061` (the gap that let Epic 7 drift).
+
+### Story 8.1: shadcn/ui + Radix foundation
+
+As a developer,
+I want a shadcn/ui + Radix foundation styled with the existing neutral tokens,
+So that later stories replace native selects with consistent custom dropdowns.
+
+**Acceptance Criteria:**
+
+**Given** the app (Bun + Tailwind v4 + custom `scripts/build-ui.ts`, not Next.js)
+**When** shadcn/ui + Radix are added — the `cn()` util plus `src/ui/components/ui/*` base primitives (button, select, popover, command, dialog) authored against the EXISTING tokens
+**Then** `bunx tsc --noEmit`, `bun test`, and `bun run build` all stay green and NO existing surface changes look or behavior — foundation only
+
+**Given** the custom bundler
+**When** the new components are built
+**Then** they render with the neutral tokens and are ready to consume in 8.5 and 8.6
+
+### Story 8.2: Chrome-tab fidelity + content-panel fusion
+
+As a user,
+I want the top tabs to match the Chrome-style prototype,
+So that the workspace reads like a finished tool, not a skeleton.
+
+**Acceptance Criteria:**
+
+**Given** open tabs
+**When** I view the tab strip
+**Then** tabs match `design-artifacts/ai-chat-chatgpt.html`: Chrome-style concave feet, the active tab fused seamlessly into the content panel (no dividing line), a reduced tab height with no spurious vertical scroll, and a centered close ×; inactive-tab hover renders as a chip/pill, not a tab shape
+
+**Given** the active tab's content panel
+**When** it renders
+**Then** it has rounded TOP corners only and a square bottom flush to the window (no gap, no rounded bottom), with `role`/`aria-selected`/keyboard operability preserved
+
+### Story 8.3: Custom scrollbars + remove left-panel divider
+
+As a user,
+I want custom scrollbars and no stray panel divider,
+So that the chrome reads clean like the prototype.
+
+**Acceptance Criteria:**
+
+**Given** any scroll container
+**When** it overflows
+**Then** it shows a custom neutral scrollbar (not the browser default) in both Chromium and Firefox
+
+**Given** the left schema panel
+**When** I view its edge
+**Then** there is NO divider line — the boundary comes from surface contrast alone — while the resizable-panel drag behavior stays intact
+
+### Story 8.4: Render Markdown/MDX in chat message bubbles
+
+As a user,
+I want assistant messages rendered as markdown,
+So that code and formatting read properly instead of raw syntax.
+
+**Acceptance Criteria:**
+
+**Given** an assistant message containing a ```sql fenced block
+**When** it renders
+**Then** the fence markers are not visible and the code shows as a styled neutral code block — markdown rendered safely via micromark (no raw-HTML/XSS), matching `design-artifacts/ai-chat-chatgpt.html`
+
+**Given** the schema-only chat
+**When** messages render as markdown
+**Then** the Provider/sandbox RPC, streaming, and chat-model behavior are unchanged
+
+### Story 8.5: Chat provider auto-select + shadcn dropdown
+
+As a user,
+I want the chat provider selected for me,
+So that I don't have to re-pick it every time I open a chat.
+
+**Acceptance Criteria:**
+
+**Given** a chat opens
+**When** there is a last-used provider or a single connected provider
+**Then** it is auto-selected (last-used preferred; the sole connected provider otherwise) and the selection persists across reopen
+
+**Given** the provider picker
+**When** I open it
+**Then** it is a custom shadcn dropdown (from 8.1), not a native `<select>`, styled per the prototype with the schema-only exposure note preserved
+
+### Story 8.6: Settings as a singleton tab
+
+As a user,
+I want Settings to be a normal singleton tab,
+So that I can move between it and my work without an overlay.
+
+**Acceptance Criteria:**
+
+**Given** I open Settings
+**When** it appears
+**Then** it is a normal tab in the strip (not an overlay), routed through the tab model like any other tab
+
+**Given** a Settings tab is already open
+**When** I click Settings again
+**Then** the existing tab is focused (no duplicate, no parallel settings), with the credential/provider behavior inside preserved
+
+### Story 8.7: Surface the active connection in Settings/Connections
+
+As a user,
+I want to see the connection I'm actually using in Settings,
+So that Connections reflects reality, not just the persisted store.
+
+**Acceptance Criteria:**
+
+**Given** the app running with an active (ephemeral) connection
+**When** I open Settings → Connections
+**Then** the active connection appears as a read-only "current connection" entry (engine/host/db/mode), distinct from saved connections, with NO secret shown, styled per `design-artifacts/connect.html`
+
+**Given** the ephemeral-vs-persisted root cause
+**When** surfacing the active connection needs a Core signal
+**Then** it is exposed without leaking credentials and preserves the schema-only / security guarantees
+
+### Story 8.8: SQL editor — CodeMirror 6 syntax highlighting + autocomplete
+
+As a developer,
+I want a real SQL editor with highlighting and schema autocomplete,
+So that writing queries feels like a proper SQL editor.
+
+**Acceptance Criteria:**
+
+**Given** the Query tab
+**When** I type SQL
+**Then** keywords are syntax-highlighted via CodeMirror 6, themed to the neutral tokens per `design-artifacts/workspace.html`
+
+**Given** a schema/table/column prefix
+**When** I press Ctrl+Space (or continue typing)
+**Then** matching schemas/tables/columns from the loaded schema are suggested and insert on select; ⌘↵ still runs and the guarded-execute RPC behavior is unchanged
