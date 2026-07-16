@@ -65,7 +65,7 @@ export function TabBar({
     <div
       role="tablist"
       aria-label="Open tabs"
-      className="flex shrink-0 items-end gap-0.5 overflow-x-auto px-1"
+      className="flex shrink-0 items-end gap-[3px] overflow-visible"
     >
       {state.tabs.map((tab) => {
         const active = tab.id === state.activeTabId;
@@ -74,6 +74,7 @@ export function TabBar({
             key={tab.id}
             role="tab"
             aria-selected={active}
+            data-active={active ? "true" : undefined}
             tabIndex={0}
             onClick={() => onActivate(tab.id)}
             onKeyDown={(e) => {
@@ -88,10 +89,10 @@ export function TabBar({
               }
             }}
             className={[
-              "group relative mx-1 flex h-9 shrink-0 cursor-pointer select-none items-center gap-2 rounded-t-xl px-3.5 text-xs transition-colors",
+              "wtab group relative mx-2 flex h-9 shrink-0 cursor-pointer select-none items-center gap-2 rounded-t-xl px-3.5 text-xs transition-colors",
               active
                 ? "-mb-px h-[37px] bg-card text-foreground"
-                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                : "text-muted-foreground hover:text-foreground",
             ].join(" ")}
           >
             <span aria-hidden className="h-[13px] w-[13px] shrink-0 opacity-85">
@@ -106,7 +107,7 @@ export function TabBar({
                 e.stopPropagation();
                 onClose(tab.id);
               }}
-              className="flex h-4 w-4 items-center justify-center rounded text-muted-foreground opacity-70 transition hover:bg-accent hover:text-foreground hover:opacity-100"
+              className="ml-0.5 grid h-[15px] w-[15px] shrink-0 place-items-center rounded-[4px] text-muted-foreground transition hover:bg-accent hover:text-foreground"
             >
               ×
             </button>

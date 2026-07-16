@@ -241,3 +241,54 @@ body {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 }
+
+/* Story 8.2: Chrome-tab concave feet (active) + floating hover pill (inactive) —
+   pseudo-elements Tailwind utilities can't express, ported verbatim from
+   design-artifacts/workspace.html `.tab.on::before/::after` and
+   `.tab:hover:not(.on)::before`. `.wtab` is TabBar's per-tab hook; `[data-active]`
+   marks the active tab. The feet resolve strictly from existing surface tokens —
+   --card (prototype --bg — active tab + content panel surface, they fuse) and
+   --background (prototype --bg-deep — window/strip surface revealed through the
+   feet's punched-out notch). The hover pill uses the prototype's faint raw wash
+   (#ffffff0a dark / #00000008 light) — there is no token for it. No new color
+   token. Light activates ONLY via explicit data-theme="light" (this file's
+   dark-first convention — no prefers-color-scheme auto-activation). */
+.wtab::before,
+.wtab::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    opacity 0.12s,
+    background 0.12s;
+}
+.wtab:hover:not([data-active])::before {
+  inset: 4px;
+  border-radius: 10px;
+  background: #ffffff0a;
+  z-index: -1;
+  opacity: 1;
+}
+:root[data-theme="light"] .wtab:hover:not([data-active])::before {
+  background: #00000008;
+}
+.wtab[data-active]::before,
+.wtab[data-active]::after {
+  bottom: 0;
+  width: 12px;
+  height: 12px;
+  background: var(--card);
+  z-index: 2;
+  opacity: 1;
+}
+.wtab[data-active]::before {
+  left: -12px;
+  -webkit-mask: radial-gradient(circle at top left, transparent 11.5px, #000 12.1px);
+  mask: radial-gradient(circle at top left, transparent 11.5px, #000 12.1px);
+}
+.wtab[data-active]::after {
+  right: -12px;
+  -webkit-mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
+  mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
+}

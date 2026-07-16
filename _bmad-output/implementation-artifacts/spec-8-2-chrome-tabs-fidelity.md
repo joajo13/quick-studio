@@ -2,7 +2,11 @@
 title: 'Restore Chrome-tab fidelity + fuse the active tab into the content panel'
 type: 'refactor'
 created: '2026-07-16'
-status: 'backlog'
+status: 'done'
+baseline_revision: 'a2d6cabadf91aad0cd708a6056fcb874ccd0c1f7'
+review_loop_iteration: 0
+followup_review_recommended: false
+final_revision: 'ee7152ef85eea03989fb58975b5edac9751e8d4f'
 context:
   - '{project-root}/design-artifacts/ai-chat-chatgpt.html'
   - '{project-root}/design-artifacts/workspace.html'
@@ -97,3 +101,50 @@ context:
 - With ≥2 tabs open, confirm side-by-side: (a) the active tab shows concave Chrome **feet** and fuses seamlessly into the content panel with NO dividing line; (b) inactive-tab hover is a floating **pill/chip**, not a tab shape; (c) the strip is short — no vertical scrollbar, no up/down chevrons — even when tabs overflow horizontally; (d) the close `×` hover target is centered on the glyph; (e) the content panel is rounded on the TOP corners only and square + flush at the window bottom.
 - Set `document.documentElement.dataset.theme = "light"` and confirm the tabs/feet/pill/panel flip to light values with no coral in either mode.
 - Grep the diff to confirm no coral/orange hex was introduced and no tab role / `aria-*` / `data-testid` / handler was removed or renamed.
+
+## Review Triage Log
+
+### 2026-07-16 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 1: (high 0, medium 1, low 0)
+- defer: 1: (high 0, medium 1, low 0)
+- reject: 16
+- addressed_findings:
+  - `[medium]` `[patch]` The `globals.css` hover-pill block ported the prototype's `@media (prefers-color-scheme: light)` auto-activation rule verbatim, violating this file's documented dark-first convention (light activates ONLY via explicit `data-theme="light"` — no OS-preference auto-activation, because auto-flipping would break not-yet-redesigned surfaces). Nothing in the app source sets `data-theme` at all, so on a light-OS machine that rule fired over the still-dark UI and painted the inactive-tab hover pill `#00000008` (~3% black) on the near-black strip — effectively invisible — while also reintroducing exactly the OS-preference dependency the project banned. Removed the `@media (prefers-color-scheme: light)` block (kept the `:root[data-theme="light"]` pill rule so the real light theme still flips to `#00000008`, and the dark default keeps the visible `#ffffff0a`), and tightened the block comment to state the feet resolve from surface tokens while the pill uses the prototype's raw faint wash, and that light activates only via `data-theme`. Rebuilt; confirmed the `:root:not([data-theme…])` signature is gone from the served bundle and both pill states remain. (`src/ui/styles/globals.css`)
+
+Rejected findings (prototype-faithful, spec-mandated, hypothetical-future, or verified-fine via the live render): leftmost active-tab left foot "blob" (live-rendered a first-tab-active shot — the `-12px` foot sits within the full-bleed panel's horizontal extent and reads as a natural Chrome first-tab foot, no stray blob); feet/fusion alignment "unverified" (verified seamless in the live dark + light renders); hover-pill `z-index:-1` fragility if an ancestor ever gains a stacking context (currently correct, prototype-faithful, hypothetical); `aria-selected`/`data-active` duplication (both derive from one `active` boolean; a dedicated `data-*` styling hook is consistent with the codebase's explicit-hook idiom); weaker inactive-hover affordance (spec-mandated — the floating pill with the prototype's faint wash explicitly replaces the tab-shaped `bg-accent/60` hover; the label still brightens via `hover:text-foreground`); active-feet `opacity` cross-fade on rapid tab switch (prototype-verbatim `transition: opacity .12s`; tab body/fusion is instant, only the corner feet cross-fade); inert `transition: background` on the feet (shared `::before` rule also serves the hover pill; harmless, prototype-faithful); `-webkit-mask`/`mask` unsupported (modern Chromium render target; feet verified rendering correctly); feet vs `:focus-visible` ring z-stacking (minor cosmetic, prototype-faithful); 12px feet extending into the neighbor over the 3px gap (by design — Chrome feet flare over the gap; `mx-2` gives room; verified fine); mask stop `12.1px` on a 12px element "thin seam" (prototype-verbatim values; feet verified clean, no seam); pill→foot `::before` geometry "snap flash" (geometry is not transitioned, snaps instantly; only opacity/background transition); status bar clipped by rounded OS window corners at flush bottom (the flush bottom is spec-MANDATED per the user complaint; the app renders in a browser viewport); zero-tabs bare rounded-top panel (correct — no active tab means nothing to fuse; `TabBar` returns `null`); `data-active` + hover coexistence (`:not([data-active])` correctly excludes the active tab — non-issue).
+
+## Auto Run Result
+
+Status: done
+
+### Summary of implemented change
+Restored the Chrome-tab fidelity that the Epic-7 neutral redesign (Story 7.1) dropped, and re-fused the active tab into the content panel — presentation-only. `TabBar`'s tablist stops clipping (`overflow-x-auto` → `overflow-visible`, the exact Story-7.1 trap that clipped the feet and spawned a phantom vertical scrollbar); each tab is reshaped to the prototype `.tab` (36px rest / 37px active `-mb-px`, `rounded-t-xl`, `px-3.5`, 13px leading icon); the active tab regains its concave **feet** (masked `::before`/`::after` radial-gradients in `globals.css`, `var(--card)` squares punched at the inner-top corner and revealed against `var(--background)`) and fuses seamlessly onto the panel (shared `bg-card`, `-1px` overlap, no seam); inactive-tab hover became a floating **pill/chip** (`inset:4px`, `border-radius:10px`, the prototype's faint ink wash) instead of a tab-shaped hover; and the close `×` became a centered 15×15 `rounded-[4px]` target. `Workspace` tightened the topbar to the prototype `.topbar` padding (`5px 8px 0 6px`), reshaped the content panel to rounded-**top**-only + square/flush bottom with no top gap (deviation from the prototype's floating card, per the explicit user complaint), and restyled the new-tab `+` to the prototype `.tab-add` floating pill (34×36, `rounded-[10px]`, 19px). All color resolves from existing `globals.css` tokens (`bg-card`/`bg-background`/`text-foreground`/`text-muted-foreground` + the prototype's raw faint hover wash); no coral, no new token.
+
+### Files changed
+- `src/ui/workspace/TabBar.tsx` — tablist `overflow-x-auto px-1` → `overflow-visible` (feet/fusion never clipped); added `.wtab` hook + `data-active` attribute; active tab `-mb-px h-[37px] bg-card text-foreground`; inactive hover reduced to `hover:text-foreground` (pill handled in CSS); close button → centered `grid h-[15px] w-[15px] rounded-[4px]`. All `role`/`aria-*`/`tabIndex`/`onKeyDown` guard/close-button handlers/`null`-on-zero preserved verbatim.
+- `src/ui/workspace/Workspace.tsx` — topbar padding → `pt-[5px] pr-2 pb-0 pl-1.5`; content panel `m-1.5 … rounded-xl` → `rounded-t-xl` (flush bottom, no top gap → fuses with the active tab); new-tab `+` → prototype `.tab-add` floating pill (`grid h-9 w-[34px] rounded-[10px] text-[19px] self-end`). No logic/state/RPC/handler touched.
+- `src/ui/styles/globals.css` — added the scoped `.wtab` feet (`[data-active]::before/::after` radial-gradient masks) + hover pill (`:hover:not([data-active])::before`) rules Tailwind can't express, colored strictly from surface tokens / the prototype's raw wash. (Review patch: removed the OS-auto `@media (prefers-color-scheme: light)` variant that violated the file's dark-first convention; kept the `:root[data-theme="light"]` pill rule.)
+- `_bmad-output/implementation-artifacts/deferred-work.md` — one new deferred entry (many-tab horizontal overflow spill).
+- `_bmad-output/implementation-artifacts/epic-8-context.md` — compiled Epic-8 planning context (new).
+- (Build output `src/core/*-bundle.generated.ts` regenerated by `bun run build`; gitignored, not committed.)
+
+### Review findings breakdown
+- **Patches applied (1, medium):** removed the convention-violating `@media (prefers-color-scheme: light)` hover-pill rule that made the pill invisible on light-OS machines; tightened the accompanying comment.
+- **Deferred (1, medium):** the tab strip's many-tab horizontal-overflow spill (no in-box scroller is possible without re-clipping the feet — accepted tradeoff, needs a dedicated overflow-affordance story). Recorded in `deferred-work.md`.
+- **Rejected (16):** prototype-faithful, spec-mandated, hypothetical-future, or verified-fine-via-live-render — see the Review Triage Log above.
+
+### Follow-up review recommendation
+`false` — the only review-driven change was a single localized CSS patch (delete one media-query block + reword a comment) with no behavioral, API, security, or data impact; an independent follow-up review is not warranted.
+
+### Verification performed
+- `bunx tsc --noEmit` → clean (pre- and post-patch).
+- `bun test` → 1141 pass / 0 fail / 2828 expect() across 70 files; unchanged test count, no test added/edited/weakened (the change touches only className strings + a scoped CSS block, none under test).
+- `bun run build` → all four build scripts succeeded; `ui-bundle.generated.ts` regenerated (the new arbitrary utilities `w-[34px]`/`rounded-[10px]`/`text-[19px]` and the `.wtab` feet/pill rules confirmed emitted into the served CSS).
+- **LIVE VISUAL CHECK (the Story-7.1 gap being closed) — performed via headless Chrome against the actual shipped compiled CSS + a DOM mirror of the real `Workspace`/`TabBar` markup, rendered and inspected in both themes:** confirmed (a) the active tab's concave **feet** carve correctly and it **fuses** into the content panel with NO dividing line/seam; (b) inactive-tab hover is a floating **pill/chip** (verified geometry via an amplified-wash debug shot — rounded on all four corners, inset from the tab edge, NOT a tab/trapezoid); (c) the strip is compact with no vertical scrollbar/chevrons; (d) the close `×` is centered; (e) the content panel is rounded-top-only and flush; (f) a first-tab-active shot confirmed the leftmost foot sits within the panel (no stray blob); (g) `data-theme="light"` flips feet/pill/panel to the light values with no coral in either mode. Also confirmed at the served-artifact level that the `.wtab[data-active]::before/::after` masks and both pill states are present in the compiled `/app.css` (the concrete "did the CSS reach the app" gap Story 7.1 missed).
+- Diff grep: no coral/orange hex; no tab `role`/`aria-*`/`data-testid`/handler removed or renamed; no `overflow-x-auto`/`overflow-y-auto` on the tab strip; the removed OS-auto rule's `:root:not([data-theme…])` signature absent from the rebuilt bundle.
+
+### Residual risks
+- **Many-tab horizontal overflow (deferred):** with enough open tabs to exceed the strip width, tabs spill over the `+`/panel edge with no scroller — an accepted consequence of the feet-never-clipped mandate, deferred for a dedicated overflow-affordance design.
+- The hover pill uses the prototype's intentionally faint wash (`#ffffff0a` / `#00000008`), so the inactive-hover affordance is subtle by design (the label still brightens); a stronger affordance would deviate from the prototype.

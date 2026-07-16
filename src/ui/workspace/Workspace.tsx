@@ -322,7 +322,7 @@ export function Workspace({
               matter which of the three panes — Tabs, Settings, or Create — is showing). */}
           <div className="flex h-full flex-col bg-background">
             {!settingsOpen && !createOpen ? (
-              <div className="flex shrink-0 items-end gap-0.5 px-2 pt-2">
+              <div className="flex shrink-0 items-end gap-0.5 pt-[5px] pr-2 pb-0 pl-1.5">
                 <div className="min-w-0 flex-1 self-end">
                   <TabBar state={state} onActivate={onActivate} onClose={onClose} />
                 </div>
@@ -331,14 +331,14 @@ export function Workspace({
                   title="New tab"
                   aria-label="New tab"
                   onClick={() => onOpen(activeTab?.kind ?? TAB_KINDS[0]!)}
-                  className="mx-1 mb-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-t-lg text-lg leading-none text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  className="mx-[2px] grid h-9 w-[34px] shrink-0 place-items-center self-end rounded-[10px] p-0 text-[19px] font-normal leading-none text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
                 >
                   +
                 </button>
               </div>
             ) : null}
 
-            <div className="m-1.5 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl bg-card">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-xl bg-card">
               <div className="min-h-0 flex-1 overflow-auto">
                 {settingsOpen ? (
                   <SettingsPanel onClose={() => setSettingsOpen(false)} />
