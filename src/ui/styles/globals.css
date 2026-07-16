@@ -330,3 +330,113 @@ body {
   -webkit-mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
   mask: radial-gradient(circle at top right, transparent 11.5px, #000 12.1px);
 }
+
+/* Story 8.4: the COMMITTED assistant chat body, rendered from sanitized micromark HTML
+   (`renderReportMarkdown`). Additive + neutral — all colors read existing tokens, so it
+   resolves in both dark and light (via the `:root[data-theme="light"]` overrides) with
+   no coral, no new hue. Code blocks are a plain mono surface (NOT syntax-highlighted). */
+.chat-md {
+  color: var(--foreground);
+  font-size: 16px;
+  line-height: 1.75;
+}
+.chat-md p {
+  margin: 0 0 1rem;
+}
+/* Zero the outer margins so the body sits flush with the avatar (top) and the action row
+   below (bottom) regardless of which block type the answer opens/closes with. */
+.chat-md > :first-child {
+  margin-top: 0;
+}
+.chat-md > :last-child {
+  margin-bottom: 0;
+}
+.chat-md strong {
+  font-weight: 650;
+}
+.chat-md em {
+  font-style: italic;
+}
+.chat-md ul,
+.chat-md ol {
+  margin: 0 0 1rem;
+  padding-left: 1.5rem;
+}
+.chat-md li {
+  margin: 0.25rem 0;
+  line-height: 1.65;
+}
+.chat-md li::marker {
+  color: var(--muted-foreground);
+}
+.chat-md h1,
+.chat-md h2,
+.chat-md h3,
+.chat-md h4,
+.chat-md h5,
+.chat-md h6 {
+  font-weight: 650;
+  line-height: 1.35;
+  margin: 1.25rem 0 0.75rem;
+}
+.chat-md h1 {
+  font-size: 1.25em;
+}
+.chat-md h2 {
+  font-size: 1.15em;
+}
+.chat-md h3 {
+  font-size: 1.05em;
+}
+.chat-md h4,
+.chat-md h5,
+.chat-md h6 {
+  font-size: 1em;
+}
+.chat-md hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.25rem 0;
+}
+.chat-md code {
+  font-family: var(--font-mono-stack);
+  font-size: 0.9em;
+  background: var(--muted);
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+}
+.chat-md pre {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.85rem 1rem;
+  margin: 0 0 1rem;
+  overflow-x: auto;
+}
+.chat-md pre code {
+  font-family: var(--font-mono-stack);
+  color: var(--foreground);
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: 0.875em;
+}
+.chat-md a {
+  color: var(--foreground);
+  text-decoration: underline;
+}
+.chat-md a:hover {
+  color: var(--muted-foreground);
+}
+.chat-md img {
+  max-width: 100%;
+  height: auto;
+}
+.chat-md blockquote {
+  margin: 0 0 1rem;
+  padding-left: 1rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted-foreground);
+}

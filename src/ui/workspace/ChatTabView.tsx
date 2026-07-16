@@ -63,6 +63,7 @@ import {
 } from "./chat-model.ts";
 import { ConfirmRun } from "./ConfirmRun.tsx";
 import { runRawQuery, type RunOutcome } from "./run-raw-query.ts";
+import { renderReportMarkdown } from "../report/report-markdown.ts";
 
 /**
  * The terminal outcome of one streamed send, decoupled from React state so the flow
@@ -501,6 +502,29 @@ function ReasoningBlock({ text, live }: { text: string; live?: boolean }): React
   );
 }
 
+/**
+ * The COMMITTED assistant answer body, rendered as sanitized Markdown (Story 8.4).
+ *
+ * The model's answer is Markdown (fenced code, inline code, lists, emphasis, headings,
+ * rules). Dropping it into a raw text node showed the markup LITERALLY, so we pass it
+ * through the project's existing security-reviewed `renderReportMarkdown` (micromark with
+ * raw HTML disabled + URL-scheme sanitize — untrusted model text is escaped, never live
+ * markup) and mount the sanitized result the same way `ReportTabView`'s `ProseBlock` does.
+ * The HTML is memoized on the message text so micromark does not re-run for every committed
+ * message on each composer keystroke. Styled by the additive `.chat-md` class in
+ * `globals.css` (neutral, token-driven — no highlighter).
+ */
+function MarkdownBody({ text }: { text: string }): React.JSX.Element {
+  const html = useMemo(() => {
+    const rendered = renderReportMarkdown(text);
+    // `renderReportMarkdown` already sanitizes link/image URL schemes; on top of that, force any
+    // surviving anchor to open in a new tab (`rel="noopener noreferrer"`). A model-authored link
+    // must never navigate the app document away and destroy the ephemeral chat session on a click.
+    return rendered.replace(/<a /g, '<a target="_blank" rel="noopener noreferrer" ');
+  }, [text]);
+  return <div className="chat-md mb-3.5 break-words" dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
 export function ChatTabView({
   state,
   onStateChange,
@@ -793,11 +817,7 @@ export function ChatTabView({
                   </div>
                   <div className="min-w-0 flex-1">
                     {m.reasoning !== null ? <ReasoningBlock text={m.reasoning} /> : null}
-                    {showBubble ? (
-                      <p className="mb-3.5 whitespace-pre-wrap break-words text-[16px] leading-[1.75] text-[var(--foreground)]">
-                        {bubbleText}
-                      </p>
-                    ) : null}
+                    {showBubble && bubbleText.trim() !== "" ? <MarkdownBody text={bubbleText} /> : null}
                     <div className="mb-3 flex flex-col gap-3">
                       <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
                         schema-only · {m.context.tables} {m.context.tables === 1 ? "table" : "tables"}

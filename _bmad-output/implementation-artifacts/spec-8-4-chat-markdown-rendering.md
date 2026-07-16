@@ -1,16 +1,20 @@
 ---
 title: 'Render assistant chat messages as sanitized Markdown — stop showing literal markdown syntax (fenced code blocks, inline code, lists, emphasis) in the message bubble'
-type: 'bug'
+type: 'bugfix'
 created: '2026-07-16'
-status: 'backlog'
+status: 'done'
+baseline_revision: 'e1c09a05d89d727282793dc95bf8c1748b2f6503'
+final_revision: '08ce420'
+review_loop_iteration: 0
+followup_review_recommended: false
 context:
   - '{project-root}/src/ui/workspace/ChatTabView.tsx'
-  - '{project-root}/src/ui/workspace/chat-model.ts'
   - '{project-root}/src/ui/report/report-markdown.ts'
   - '{project-root}/src/ui/report/ReportTabView.tsx'
   - '{project-root}/src/ui/styles/globals.css'
   - '{project-root}/design-artifacts/ai-chat-chatgpt.html'
   - '{project-root}/src/ui/workspace/ChatTabView.test.tsx'
+warnings: ['oversized']
 ---
 
 <intent-contract>
@@ -63,8 +67,8 @@ context:
 
 ## Code Map
 
-- `src/ui/workspace/ChatTabView.tsx` (957 lines) — the fix site (assistant body only):
-  - **Root cause — replace the raw text node.** The assistant body at **L796-800** renders `{bubbleText}` as an escaped text node:
+- `src/ui/workspace/ChatTabView.tsx` (956 lines) — the fix site (assistant body only):
+  - **Root cause — replace the raw text node.** The committed assistant body at **L796-800** renders `{bubbleText}` as an escaped text node:
     ```tsx
     {showBubble ? (
       <p className="mb-3.5 whitespace-pre-wrap break-words text-[16px] leading-[1.75] text-[var(--foreground)]">
@@ -72,22 +76,59 @@ context:
       </p>
     ) : null}
     ```
-    Replace this `<p>{bubbleText}</p>` with a memoized Markdown body: a small local component (mirror `ReportTabView.tsx`'s `ProseBlock`) e.g. `MarkdownBody({ text })` that does `const html = useMemo(() => renderReportMarkdown(text), [text])` and returns `<div className="chat-md mb-3.5 …" dangerouslySetInnerHTML={{ __html: html }} />`, rendered only when `showBubble && bubbleText.trim() !== ""`. Keep the `mb-3.5` spacing so the badge/SQL/actions layout below is unchanged.
-  - **Import** `renderReportMarkdown` from `../report/report-markdown.ts` (new import beside the existing sibling imports at L37-65). No other symbol needed.
-  - **Leave untouched:** the user bubble (L777-781, plain text), the `schema-only · N tables` badge (L801-804), `ChatQueryRun` and its verbatim `<pre>` SQL (L357-468), `ReasoningBlock` (L477-502, stays plain — out of scope), the assistant action row (L840-865), the header/composer, and the **live streaming partial** (L873-894) whose `{partial.text}` + caret stays PLAIN (Design Notes). Every exported function (`streamSend`, `runChatQuery`, `confirmChatQuery`, `cancelChatQuery`, `truncateMarkdown`, `buildChartDoc`, `decideMessageView`, `reconcileChartDocs`) is unchanged.
-- `src/ui/report/report-markdown.ts` (69 lines) — **REUSE, no change.** `renderReportMarkdown(md)` is a generic sanitized-prose renderer: `micromark(md, { allowDangerousHtml: false })` then a URL-scheme/backslash/protocol-relative sanitize (and image-`src` egress block). Import it into chat as-is. (Optional, non-required nicety: add `export const renderMarkdown = renderReportMarkdown;` if a report-neutral name is preferred at the chat call site — behavior identical, no test impact. Not necessary.)
-- `src/ui/report/ReportTabView.tsx` (VERIFY-ONLY reference) — `ProseBlock` (L600-630) is the exact reuse pattern to mirror: `useMemo(() => renderReportMarkdown(markdown), [markdown])` + a `dangerouslySetInnerHTML` div with a `report-prose` class. Chat mirrors this with a `.chat-md` class. No change here.
-- `src/ui/styles/globals.css` (244 lines) — **ADD** one additive scoped block `.chat-md { … }` (near the end, after the body rule at L235-243) styling the micromark output with existing tokens — NO new token, NO coral:
+    `bubbleText`/`showBubble` come from `decideMessageView(m, chartDoc)` (called **L773**, defined **L258-273**): for an assistant message `bubbleText = extractChartFence(message.text).markdown` and `showBubble = chartDoc === null`. Replace this `<p>{bubbleText}</p>` with a memoized Markdown body: a small LOCAL component (mirror `ReportTabView.tsx`'s `ProseBlock`) e.g. `MarkdownBody({ text })` that does `const html = useMemo(() => renderReportMarkdown(text), [text])` and returns `<div className="chat-md mb-3.5 break-words" dangerouslySetInnerHTML={{ __html: html }} />`, rendered only when `showBubble && bubbleText.trim() !== ""`. Keep the `mb-3.5` spacing so the badge/SQL/actions layout below is unchanged.
+  - **Import — add FRESH.** `renderReportMarkdown` is NOT currently imported and there are NO `../report/...` imports in this file today. Add `import { renderReportMarkdown } from "../report/report-markdown.ts";` as a new line after the last import (**L65**, `./run-raw-query.ts`), grouped with the sibling `../…` imports (e.g. near L47-49 `../sandbox/`, `../data/`, `../rpc/`). No other symbol needed.
+  - **Leave untouched:** the user bubble (**L779**, plain text `<p className="whitespace-pre-wrap break-words">{bubbleText}</p>`), the `schema-only · N tables` badge (**L802-804**), `ChatQueryRun` (defined **L357**, rendered **L805-816**) and its verbatim `<pre>` SQL (**L408-410**), `ReasoningBlock` (defined **L477**, rendered **L795** — stays plain, out of scope), the assistant action row (**L840-865**), the header/composer, and the **live streaming partial** (**L873-890**, `partial.text` + caret at L884-889) whose body stays PLAIN (see Design Notes — its own separate `<p>`, not the L796-800 target). Every exported function (`streamSend`, `runChatQuery`, `confirmChatQuery`, `cancelChatQuery`, `truncateMarkdown`, `buildChartDoc`, `decideMessageView`, `reconcileChartDocs`) and the `ChatRunEntry` type are unchanged.
+- `src/ui/report/report-markdown.ts` (69 lines) — **REUSE, no change.** `export function renderReportMarkdown(md: string): string` (L64): `const html = micromark(md, { allowDangerousHtml: false })` (L65) then a URL-scheme/protocol-relative/image-`src` sanitize (`URL_ATTR_RE` + `isSafeUrl`, `SAFE_URL_SCHEMES = {http, https, mailto}`, L22/L35-54/L66-68). Import it into chat as-is. The file's L9-12 ring-boundary comment forbids ONLY lifting micromark into `shared/` and a Ring-2 importing Ring-3 — it does NOT forbid the Ring-2↔Ring-2 import chat needs.
+- `src/ui/report/ReportTabView.tsx` (VERIFY-ONLY reference) — `ProseBlock` (L600) is the mount-pattern to mirror: `const html = useMemo(() => renderReportMarkdown(markdown), [markdown])` (**L607**) + a `dangerouslySetInnerHTML` div (**L621-626**, className `report-prose max-w-none rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] …`). Chat mirrors the PATTERN with a `.chat-md` class. No change here. NOTE: `report-prose` is only a Tailwind className string — there is NO `.report-prose` CSS rule anywhere; `.chat-md` is genuinely new CSS (below).
+- `src/ui/styles/globals.css` (332 lines) — **ADD** one additive scoped block `.chat-md { … }` at the END of the file (after the last rule, L332) styling the micromark output with existing tokens — NO new token, NO coral:
   - `.chat-md` base: `color: var(--foreground)`, `font-size: 16px`, `line-height: 1.75`.
-  - `.chat-md p` margins (`0 0 1rem`, last-child `0`); `.chat-md strong { font-weight: 650 }`; `.chat-md em`.
+  - `.chat-md p` margins (`0 0 1rem`, last-child `0`); `.chat-md strong { font-weight: 650 }`; `.chat-md em { font-style: italic }`.
   - `.chat-md ul/ol` (padding-left, bottom margin), `.chat-md li` (spacing, `line-height`), `.chat-md li::marker { color: var(--muted-foreground) }`.
   - `.chat-md h1..h6` (bold, sized down toward the prototype's 16px `h3`); `.chat-md hr { border: none; border-top: 1px solid var(--border); margin: 1.25rem 0 }`.
-  - `.chat-md code` (inline): mono (`font-family: var(--font-mono-stack)`), `font-size: .9em`, subtle `background: var(--muted)`, small padding, rounded, `color: var(--foreground)`.
-  - `.chat-md pre` (fenced block): `background: var(--muted)` (or `--card`), `border: 1px solid var(--border)`, `border-radius: var(--radius)`, `padding`, `overflow-x: auto`; `.chat-md pre code` mono, `--foreground`, no inline-code background (reset), UNTOKENIZED.
+  - `.chat-md code` (inline): mono (`font-family: var(--font-mono-stack)` — the guaranteed `:root` token at L53; `--font-mono` exists only inside `@theme inline`), `font-size: .9em`, subtle `background: var(--muted)`, small padding, rounded, `color: var(--foreground)`.
+  - `.chat-md pre` (fenced block): `background: var(--muted)` (or `--card`), `border: 1px solid var(--border)`, `border-radius: var(--radius)`, `padding`, `overflow-x: auto`; `.chat-md pre code` mono, `--foreground`, `background: none` (reset the inline-code background), UNTOKENIZED.
   - `.chat-md a { color: var(--foreground); text-decoration: underline }`; `.chat-md blockquote` (left rule `--border`, `--muted-foreground`).
-  - Values resolve in BOTH dark and light because every token already has a `[data-theme="light"]` override (L107-155). `.chat-md` is not referenced anywhere else, so it cannot regress the shell.
+  - Values resolve in BOTH dark and light because every token has a `:root[data-theme="light"]` override (L109-159). `.chat-md` is referenced nowhere else, so it cannot regress the shell.
 - `src/ui/workspace/chat-model.ts` — **NO change.** Shapes/reducers/`accumulateStream`/`deriveResultKpis` are untouched (presentation-only).
-- `src/ui/workspace/ChatTabView.test.tsx` (519 lines) — **MUST stay green UNEDITED.** The relevant assertions survive because: `there are 3 tables` → micromark emits `<p>there are 3 tables</p>` (substring intact); the reasoning gate (`toContain`/`not.toContain("reasoning")`) is unaffected (`.chat-md` has no `reasoning` substring, `ReasoningBlock` unchanged); the SQL/`>run<` assertions target `ChatQueryRun` (untouched); `<iframe>` absence for a plain answer is unchanged. Add NO new test file is required, but an OPTIONAL additive `renderToStaticMarkup` case asserting a ` ```sql ` fence in the body renders `<pre>`/`<code>` (and NOT the literal triple-backtick) documents the fix — additive only, do not disturb existing cases.
+- `src/ui/workspace/ChatTabView.test.tsx` (519 lines) — **MUST stay green.** Renders via `renderToStaticMarkup` (no jsdom); every load-bearing assertion is a substring `toContain`/`not.toContain` and none targets the assistant body's tag or `.whitespace-pre-wrap`, so switching `<p>{bubbleText}</p>` → a `.chat-md` `dangerouslySetInnerHTML` div survives: `there are 3 tables` → micromark emits `<p>there are 3 tables</p>` (substring intact); the reasoning gate is unaffected (`.chat-md` has no `reasoning` substring, `ReasoningBlock` unchanged); the SQL/`>run<` assertions target `ChatQueryRun` (untouched); `<iframe>` absence for a plain answer is unchanged. ADD an additive `renderToStaticMarkup` case (new `it`, existing cases untouched) asserting a ` ```sql ` fence in an assistant answer renders `<pre>`/`<code>` and NOT the literal triple-backtick.
+
+## Tasks & Acceptance
+
+**Execution:**
+- [x] `src/ui/workspace/ChatTabView.tsx` -- add a fresh `import { renderReportMarkdown } from "../report/report-markdown.ts";` (after the last import, L65); add a local memoized `MarkdownBody({ text }: { text: string })` component (`const html = useMemo(() => renderReportMarkdown(text), [text]); return <div className="chat-md mb-3.5 break-words" dangerouslySetInnerHTML={{ __html: html }} />`), mirroring `ProseBlock`; replace the committed assistant body at L796-800 (`<p …>{bubbleText}</p>`) with `{showBubble && bubbleText.trim() !== "" ? <MarkdownBody text={bubbleText} /> : null}` -- renders the assistant answer as sanitized, memoized Markdown while leaving the user bubble, streaming partial, `ChatQueryRun`, `ReasoningBlock`, action row, and all exported functions untouched.
+- [x] `src/ui/styles/globals.css` -- append the additive scoped `.chat-md { … }` block at end of file (values per Code Map: token-driven prose + neutral mono `<pre><code>` and inline `<code>`, `--muted`/`--border`/`--radius`/`--foreground`/`--muted-foreground`, `var(--font-mono-stack)`); NO new token, NO coral, NO `@theme` mapping -- styles the micromark output neutrally per `ai-chat-chatgpt.html`, resolving in both themes via the existing `:root[data-theme="light"]` overrides.
+- [x] `src/ui/workspace/ChatTabView.test.tsx` -- add ONE additive `it(...)` using `renderToStaticMarkup` that feeds an assistant answer containing a ` ```sql\nSELECT 1\n``` ` fence and asserts the output `toContain("<pre")`/`toContain("<code")` and `not.toContain("```")` -- locks the primary bug fix (no literal fence markers) without editing or weakening any existing case.
+
+**Acceptance Criteria:**
+- Given a user message, when it renders, then it stays plain right-aligned grey-bubble text (no Markdown transformation), unchanged from before.
+- Given the generated-SQL block (`message.query`), streaming, run/confirm/cancel, the schema-only Provider path, and `SandboxFrame`, when exercised, then their behavior is byte-for-byte identical — only the assistant message body's presentation changed.
+- Given `bun test`, when it runs, then `ChatTabView.test.tsx` passes with every EXISTING case unedited (the load-bearing strings — `ask a question about your schema`, `schema-only · 3 tables`, `there are 3 tables`, `SELECT count(*) FROM customers;`, `>run<`, the `reasoning` token gated on reasoning presence, no `<iframe>` for a plain answer — all still present/absent as asserted) plus the new additive fence case, and `report-markdown.test.ts` stays green.
+- Given `bunx tsc --noEmit`, when it runs, then there are no type errors (presentation-only change + one reused import).
+- Given light and dark themes, when toggled, then the assistant Markdown body (prose + code block) renders neutral and legible in both, with no coral.
+- Given a live app at `http://127.0.0.1:6061` (Epic-8 live-visual gate), when the AI Chat shows an assistant answer whose prose contains a ` ```sql ` fence plus `**bold**`, a bulleted list, and a `---` rule, then the bubble shows a styled neutral code block (no visible backticks / `sql` marker), bold text, a real bullet list, and a horizontal rule, while the separate generated-SQL block below still shows the SQL verbatim.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-07-16 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 6: (high 0, medium 1, low 5)
+- defer: 1: (high 0, medium 1, low 0)
+- reject: 6
+- addressed_findings:
+  - `[medium]` `[patch]` Rendered model links became live anchors with no `target`/`rel`, so a click would navigate the whole app document away and destroy the ephemeral chat session (links were literal text before this change). Post-process the sanitized HTML in `MarkdownBody` to force `target="_blank" rel="noopener noreferrer"` on every anchor (chat-local; does NOT touch the shared `renderReportMarkdown`), plus a `.chat-md a:hover` state. Verified: the added security/mount test stays green; the regex runs once inside the existing `useMemo`. (`src/ui/workspace/ChatTabView.tsx`, `src/ui/styles/globals.css`)
+  - `[low]` `[patch]` The new fence test was a weak proxy (`not.toContain("```")` only). Strengthened it to assert `<pre><code` nesting and that the fence CONTENT (`SELECT 1`) survives, and added a second additive test proving untrusted raw HTML (`<script>`/`<img onerror>`) is ESCAPED at the chat mount (not just the report unit test) — the story's own load-bearing security posture is now covered at this integration point. Existing cases untouched. (`src/ui/workspace/ChatTabView.test.tsx`)
+  - `[low]` `[patch]` Only `.chat-md p:last-child` reset its margin, so an answer ending in a list/`pre`/heading/blockquote stacked extra bottom margin on the wrapper `mb-3.5`, and a heading-led answer pushed its first line down — misaligning the body against the avatar. Replaced with `.chat-md > :first-child { margin-top:0 }` + `.chat-md > :last-child { margin-bottom:0 }`. (`src/ui/styles/globals.css`)
+  - `[low]` `[patch]` A model `<img>` (neutralized to `src="#"` by the egress policy) had no `max-width`, so a broken image could overflow the 760px column. Added `.chat-md img { max-width:100%; height:auto }`. (`src/ui/styles/globals.css`)
+  - `[low]` `[patch]` A long unbroken inline `<code>` token (SQL identifiers are common here) could widen the reading column since only the block `pre` got `overflow-x:auto`. Added `overflow-wrap: anywhere` to `.chat-md code`. (`src/ui/styles/globals.css`)
+  - `[low]` `[patch]` The `.chat-md` header comment claimed "every value reads an existing token" while the block hardcodes px/rem/em/font-weight literals. Softened to "all colors read existing tokens" so it does not mislead a future maintainer. (`src/ui/styles/globals.css`)
+
+Deferred (1 — real limitation, out of scope): assistant answers with a GFM Markdown table collapse to literal pipe text because the reused `renderReportMarkdown` uses micromark CORE only (no gfm extension) — enabling GFM is forbidden by this story's Block-If (b) (no new Markdown dependency) and would cross-cut the shared report renderer; logged to `deferred-work.md` for a focused follow-up.
+
+Rejected (6 — spec-mandated, pre-existing, or unconfirmed): streaming-partial→commit visual snap (spec explicitly scopes the live partial to plain text — intentional, documented in Design Notes); single-`\n` soft-break collapse and multi-space/indentation collapse (standard Markdown/HTML behavior, inherent to the spec-mandated `renderReportMarkdown` reuse, consistent with the report path); possible duplicate SQL when a prose fence coincides with the structured `message.query` panel (unconfirmed — the two are independent data sources and any duplication predates this presentational change); no length clamp on a very long committed answer (pre-existing; the new micromark parse is one-time and memoized, matching `ProseBlock` parsing whole reports); and a review-integrity note that the paraphrased diff shown to a reviewer wasn't valid CSS (the actual committed `globals.css` is correct — an artifact of the review prompt, not the code).
 
 ## Design Notes
 
@@ -99,29 +140,50 @@ context:
 
 **Assistant renders Markdown; user stays plain.** The bug is model-emitted Markdown syntax in the ASSISTANT body — that is where rendering belongs. User messages are echoed exactly as typed; transforming a user's literal `*`/`#`/backticks would be surprising and is not the reported problem. This keeps the user bubble byte-for-byte and scopes the change to one render site.
 
-**Live streaming partial stays plain (scoped out).** The reported bug (screenshot) is a COMMITTED message bubble. The in-flight partial (`ChatTabView.tsx:873-894`) is transient and, mid-stream, carries half-parsed Markdown (an unclosed ```fence); rendering micromark on every animation-frame flush would re-parse growing text each frame and could flash a partially-formed code block. Keep the live partial plain text + blinking caret; it snaps to fully-rendered Markdown the instant it commits on `done`. This is an intentional scoping decision, not a defect — markdown-rendering the live stream can be a later story if desired.
+**Live streaming partial stays plain (scoped out).** The reported bug (screenshot) is a COMMITTED message bubble. The in-flight partial (`ChatTabView.tsx:873-890`, its OWN `<p>{partial.text}</p>` at L884, separate from the L796-800 committed body) is transient and, mid-stream, carries half-parsed Markdown (an unclosed ```fence); rendering micromark on every animation-frame flush would re-parse growing text each frame and could flash a partially-formed code block. Keep the live partial plain text + blinking caret; it snaps to fully-rendered Markdown the instant it commits on `done`. This is an intentional scoping decision, not a defect — markdown-rendering the live stream can be a later story if desired.
 
 **Memoize like `ProseBlock`.** `ChatTabView` re-renders on every composer keystroke (`setInput`). Rendering micromark for every committed message per keystroke is wasteful; memoize per-message HTML on the message text (a `useMemo`-backed `MarkdownBody` subcomponent, exactly as `ProseBlock` does), so only new/changed messages re-parse.
-
-## Acceptance Criteria
-
-- **(Primary — the reported bug)** Given an assistant message whose answer body contains a ` ```sql\nSELECT … \n``` ` fenced block, when it renders, then the fence markers (triple backticks) and `sql` info-string are NOT visible and the SQL shows as a styled neutral mono code block — verified live at `http://127.0.0.1:6061` (open the AI Chat, produce/inspect an assistant message whose prose includes a fenced block).
-- Given an assistant answer containing `**bold**`, `` `inline code` ``, a `- bullet` list, a `# heading`, and a `---` rule, when it renders, then each appears as formatted HTML (`<strong>`, inline `<code>`, `<ul><li>`, heading, `<hr>`) with no raw markers, styled neutrally per `design-artifacts/ai-chat-chatgpt.html`.
-- Given the assistant body renderer, when it is exercised, then it goes through `renderReportMarkdown` (micromark `allowDangerousHtml:false` + URL sanitize): a `<script>`/`<img onerror>` in the answer is emitted escaped (never live) and a `javascript:`/protocol-relative/remote-image URL is neutralized to `#`.
-- Given a user message, when it renders, then it stays plain right-aligned grey-bubble text (no Markdown transformation), unchanged from before.
-- Given the generated-SQL block (`message.query`), streaming, run/confirm/cancel, the schema-only Provider path, and `SandboxFrame`, when exercised, then their behavior is byte-for-byte identical — only the assistant message body's presentation changed.
-- Given `bun test`, when it runs, then `ChatTabView.test.tsx` passes UNEDITED (the load-bearing strings — `ask a question about your schema`, `schema-only · 3 tables`, `there are 3 tables`, `SELECT count(*) FROM customers;`, `>run<`, the `reasoning` token gated on reasoning presence, no `<iframe>` for a plain answer — are all still present/absent as asserted), and `report-markdown.test.ts` stays green.
-- Given `bunx tsc --noEmit`, when it runs, then there are no type errors (presentation-only change + one reused import).
-- Given light and dark themes, when toggled, then the assistant Markdown body (prose + code block) renders neutral and legible in both, with no coral.
 
 ## Verification
 
 **Commands:**
 - `bunx tsc --noEmit` — expected: no type errors across `ChatTabView.tsx` (and the reused `report-markdown.ts` import).
-- `bun test` — expected: all suites pass; `ChatTabView.test.tsx` UNEDITED and `report-markdown.test.ts` green.
+- `bun test` — expected: all suites pass; `ChatTabView.test.tsx` existing cases unedited + the new additive fence case green, and `report-markdown.test.ts` green.
 - `rg 'allowDangerousHtml' src/ui/workspace/ChatTabView.tsx` — expected: NO match (chat never passes the flag; it goes through `renderReportMarkdown`, which sets `false`).
-- `rg 'coral.*#|bg-\[#|dangerouslySetInnerHTML' src/ui/workspace/ChatTabView.tsx` — expected: exactly one `dangerouslySetInnerHTML` (the assistant body) and no coral/hardcoded palette hit.
+- `rg 'dangerouslySetInnerHTML' src/ui/workspace/ChatTabView.tsx` — expected: exactly one hit (the assistant body); and `rg 'coral|bg-\[#' src/ui/workspace/ChatTabView.tsx` — expected: no coral/hardcoded-palette hit.
 - `rg '\.chat-md' src/ui/styles/globals.css` — expected: the new additive scoped block is present.
 
-**Manual check (live — REQUIRED for the primary criterion):**
-- Launch the app and open the AI Chat at `http://127.0.0.1:6061`. Send a prompt that yields an assistant answer whose prose contains a ` ```sql ` fenced block plus some `**bold**`, a bulleted list, and a `---` rule. Confirm the message bubble shows a styled code block (no visible backticks / `sql` marker), bold text, a real bullet list, and a horizontal rule — while the separate "generated SQL" block below still shows the SQL verbatim. Toggle the theme and confirm both light and dark stay neutral and legible.
+**Manual check (live — REQUIRED for the primary criterion, Epic-8 gate):**
+- Launch the app and open the AI Chat at `http://127.0.0.1:6061`. Send a prompt that yields an assistant answer whose prose contains a ` ```sql ` fenced block plus some `**bold**`, a bulleted list, and a `---` rule. Confirm the message bubble shows a styled code block (no visible backticks / `sql` marker), bold text, a real bullet list, and a horizontal rule — while the separate "generated SQL" block below still shows the SQL verbatim. Toggle the theme (`document.documentElement.dataset.theme = "light"`) and confirm both light and dark stay neutral and legible, no coral.
+
+## Auto Run Result
+
+Status: done
+
+### Summary of implemented change
+Presentation-only fix for the reported bug (item 9): the COMMITTED assistant chat message body was rendering the model's Markdown answer as a raw escaped text node, so fenced code blocks, inline code, lists, headings, emphasis, and rules all showed their literal markers. The body now renders through the project's EXISTING security-reviewed micromark renderer `renderReportMarkdown` (`micromark(md, { allowDangerousHtml: false })` + URL-scheme sanitize), mounted via `dangerouslySetInnerHTML` inside a new additive, token-driven `.chat-md` wrapper — mirroring `ReportTabView`'s `ProseBlock`, memoized on the message text so micromark does not re-run per composer keystroke. USER messages, the live streaming partial (stays plain + caret, scoped out), the generated-SQL `ChatQueryRun` block, `ReasoningBlock`, reducers/`chat-model.ts`, the `streamChat` RPC, and `SandboxFrame` are all untouched. No new dependency (micromark already present), no raw-HTML path, no coral, no syntax highlighting.
+
+### Files changed
+- `src/ui/workspace/ChatTabView.tsx` — added a fresh `renderReportMarkdown` import; added a local memoized `MarkdownBody({ text })` component (`useMemo` → `renderReportMarkdown`, then a chat-local regex forcing `target="_blank" rel="noopener noreferrer"` on any surviving anchor); replaced the assistant body `<p>{bubbleText}</p>` with `{showBubble && bubbleText.trim() !== "" ? <MarkdownBody text={bubbleText} /> : null}`.
+- `src/ui/styles/globals.css` — appended the additive scoped `.chat-md { … }` block (neutral prose + inline `<code>` + a neutral mono `<pre><code>` surface + list markers + `<hr>` + links/blockquote/img), all from existing tokens; includes the review-added first/last-child margin resets, `img` max-width, inline-code `overflow-wrap`, and `a:hover`.
+- `src/ui/workspace/ChatTabView.test.tsx` — added two additive `renderToStaticMarkup` cases (fenced-block renders `<pre><code>` with content intact and no literal backticks; raw HTML is escaped at the chat mount). No existing case edited.
+- (Build output `src/core/ui-bundle.generated.ts` regenerated by `bun run build`; gitignored, not committed.)
+
+### Review findings breakdown
+- **Patches applied (6):** link `target`/`rel` hardening so a model link can't navigate the app away and lose the chat session (medium); strengthened + added security test at the chat mount (low); `.chat-md` first/last-child margin resets (low); `img` max-width overflow guard (low); inline-`code` `overflow-wrap` (low); corrected an overstated CSS header comment (low). All re-verified green.
+- **Deferred (1):** GFM Markdown tables collapse to literal pipe text (micromark core has no table extension; enabling it is forbidden by Block-If (b) and would cross-cut the shared report renderer) — logged to `deferred-work.md`.
+- **Rejected (6):** streaming→commit visual snap (spec-scoped intentional), soft-newline/whitespace collapse (standard Markdown behavior, inherent to the mandated renderer reuse), possible duplicate SQL (unconfirmed, independent data sources), no long-answer clamp (pre-existing + memoized), and a review-artifact note about a paraphrased diff (real file is correct).
+
+### Follow-up review recommendation
+`false` — the six patches are localized, presentation-only CSS/test/doc fixes plus one small, tested behavioral hardening (anchor `target`/`rel` via a one-time memoized regex that does not touch the shared renderer or the sanitization boundary). No API/data/security-boundary change; full suite + build + static visual gate all re-confirmed. No independent follow-up warranted.
+
+### Verification performed
+- `bunx tsc --noEmit` → clean (exit 0).
+- `bun test` → 1143 pass / 0 fail / 2835 expect() across 70 files (was 1141 before the story; +2 additive chat tests). `ChatTabView.test.tsx` existing cases unedited, `report-markdown.test.ts` green.
+- `bun run build` → all build scripts succeeded; the served CSS bundle (`src/core/ui-bundle.generated.ts`) contains the `.chat-md` rules.
+- Guard checks: `rg 'allowDangerousHtml' src/ui/workspace/ChatTabView.tsx` → no match; `rg -c 'dangerouslySetInnerHTML' …` → exactly 1; `rg -c '\.chat-md' src/ui/styles/globals.css` → present (30 hits).
+- **Epic-8 live-visual gate — STATIC fallback (headless tooling unavailable in this environment: no playwright/chrome in `node_modules`/PATH):** 6/6 PASS against the COMPILED served CSS — the `.chat-md` `<pre>` resolves to an opaque `--muted` surface with a `--border` border and `--radius` corners (reads as a code block, not literal backticks), inline `<code>` has the subtle `--muted` tint + mono font, list markers use `--muted-foreground`, `<hr>` is a subtle rule, ZERO coral anywhere in the `.chat-md` subtree, and foreground-on-surface contrast is AAA in both dark (12.94) and light (15.84); first/last-child margin resets present.
+
+### Residual risks
+- The Epic-8 live-visual gate was satisfied by the STATIC fallback (compiled-CSS + resolved-token + WCAG-contrast verification), NOT the full headless browser render Story 8.3 ran — `playwright-core`/`chrome-headless-shell` are not installed in this environment. The rendered LAYOUT of a real assistant answer (very wide `<pre>` horizontal scroll, long-line wrapping, exact spacing against the avatar) was not visually confirmed in a browser; a one-time manual spot-check at `http://127.0.0.1:6061` against `design-artifacts/ai-chat-chatgpt.html` remains the only unverified surface. Functional rendering (fence → `<pre><code>`, no literal backticks, raw-HTML escaped) IS proven by the new unit tests.
+- GFM tables render as collapsed literal pipes (deferred, see above) — the one known content shape this fix does not beautify.

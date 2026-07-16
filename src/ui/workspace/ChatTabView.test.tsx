@@ -516,4 +516,40 @@ describe("static structure", () => {
     expect(html).toContain("SELECT count(*) FROM customers;");
     expect(html).toContain(">run<");
   });
+
+  test("an assistant answer with a fenced code block renders <pre>/<code>, not literal backticks (Story 8.4)", () => {
+    let state = setProvider(emptyChatState(), "anthropic");
+    state = appendUserMessage(state, "show me some sql");
+    state = appendAnswer(
+      state,
+      "here you go:\n\n```sql\nSELECT 1\n```",
+      { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
+      null,
+    );
+    const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
+    // The fence is rendered as a styled code block, not shown as literal markdown.
+    expect(html).toContain("<pre><code");
+    expect(html).toContain("SELECT 1");
+    expect(html).not.toContain("```");
+  });
+
+  test("an assistant answer with raw HTML is escaped at the chat mount, never mounted live (Story 8.4)", () => {
+    let state = setProvider(emptyChatState(), "anthropic");
+    state = appendUserMessage(state, "hi");
+    state = appendAnswer(
+      state,
+      "<script>alert(1)</script> and <img src=x onerror=alert(2)>",
+      { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
+      null,
+    );
+    const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
+    // micromark (allowDangerousHtml:false) escapes untrusted model HTML rather than emitting it:
+    // it survives only as inert escaped text (`&lt;…&gt;`), never as a live <script>/<img> tag.
+    expect(html).not.toContain("<script");
+    expect(html).not.toContain("<img src=x");
+    expect(html).toContain("&lt;script&gt;");
+    expect(html).toContain("&lt;img");
+  });
 });
