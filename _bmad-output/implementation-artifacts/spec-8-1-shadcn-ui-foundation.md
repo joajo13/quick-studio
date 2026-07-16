@@ -2,7 +2,11 @@
 title: 'shadcn/ui + Radix foundation — introduce the component primitives (cn, base ui/) styled with the existing neutral tokens, no surface restyled'
 type: 'feature'
 created: '2026-07-16'
-status: 'backlog'
+status: 'done'
+baseline_revision: '01c645971c32ab90b0015ab46199167df0e06182'
+final_revision: '38b15badc6f3bb07b2afae446d43d8487bd3369e'
+review_loop_iteration: 0
+followup_review_recommended: false
 context:
   - '{project-root}/package.json'
   - '{project-root}/tsconfig.json'
@@ -102,3 +106,55 @@ The default shadcn component source assumes token names this project does not ha
 **Manual checks (if a browser is available):**
 - Verify the resolved dependency versions accept React 19 (inspect the lockfile / `bun pm ls`); confirm no peer-dependency warning names `react@19` as unsatisfied.
 - Temporarily import one of each primitive (`Button`, `Select`, `Popover` hosting a `Command`, and a `Dialog`) into a throwaway mount reachable from `main.tsx`, run `bun run dev`, open `http://127.0.0.1:6061`, and confirm: each renders on near-black surfaces with the ink accent and `border-border` outlines, the Select/Command lists highlight with `bg-accent`, the Dialog scrim + inline-SVG close button work, Radix keyboard/focus behavior is intact, and there is no coral. Toggle `document.documentElement.dataset.theme = "light"` and confirm the primitives flip to the light neutral values. Then REVERT the demo so the committed tree imports no `components/ui/*` from any shipping surface.
+
+## Review Triage Log
+
+### 2026-07-16 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2: (high 0, medium 0, low 2)
+- defer: 2: (high 0, medium 0, low 2)
+- reject: 14: (high 0, medium 0, low 14)
+- addressed_findings:
+  - `[low]` `[patch]` Destructive `Button` hover was *weaker* than its resting fill (`bg-err-soft` α0.14 → `hover:bg-err/10` α0.10 — an inverted hover affordance). Changed the hover to `hover:bg-err/20` so it intensifies on hover, still using only the existing `--err` token. (`src/ui/components/ui/button.tsx`)
+  - `[low]` `[patch]` `SelectTrigger` used `outline-none focus:ring-2 focus:ring-coral` while `Button` and the `Dialog` close use `focus-visible:` — inconsistent focus presentation (ring shown on mouse focus too). Normalized to `focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-coral` to match the rest of the foundation. (`src/ui/components/ui/select.tsx`)
+
+Rejected findings (matched canonical shadcn structure, inherent Radix behavior, consumer-story responsibility, or already verified out-of-band): `Button` has no default `type` (submits in a form); `asChild` + `disabled`/multi-child Slot limitations; `CommandDialog` renders its sr-only `DialogHeader` outside `DialogContent` (this IS current canonical shadcn — Radix wires `aria-labelledby` via `Dialog.Root` context cross-DOM); `DialogContent` without a `DialogTitle` warns (consumer responsibility); Select popper viewport height pin (canonical); shared `z-50` across portalled layers (canonical, relies on portal order); plain function components (`DialogHeader`/`Footer`/`CommandDialog`/`DropdownMenuShortcut`) don't `forwardRef` (canonical); Dialog close always rendered (consumer/`showClose` is out of scope); `Button` base `lowercase` (matches the project's established mono/lowercase Epic-7 voice — overridable via `normal-case`); `lg` size keeps `text-xs` and `sm` re-declares it (cosmetic noise); `command.tsx` → `dialog.tsx` coupling for the `CommandDialog` export (spec-directed; tree-shaken when unused); peer-compat Block-If "unverifiable from the diff" (verified out-of-band via `bun pm ls` / lockfile — resolved React 19-compatible versions, no peer warning); Dialog emits a Radix warning without a `DialogDescription` (matches upstream).
+
+## Auto Run Result
+
+Status: done
+
+### Summary of implemented change
+Stood up the shadcn/ui + Radix component foundation for Epic 8 — the primitives the consumer stories (8.5 chat provider combobox, 8.6 settings) will build on. Added the class toolchain (`class-variance-authority`, `clsx` promoted to direct, `tailwind-merge`), the `cn()` helper, and six base components (`button`, `select`, `popover`, `command`, `dialog`, `dropdown-menu`) wrapping `@radix-ui/react-*` + `cmdk`. Every component is authored in the canonical shadcn structure but **re-pointed onto the existing Epic-7 neutral tokens** — no new token, no coral/orange hex, no blue `--primary`, no `animate-*`/`tailwindcss-animate`, no icon library (inline SVG glyphs only). Foundation-only: no existing surface, native `<select>`, `globals.css`, `build-ui.ts`, or `main.tsx` was touched; the components ship unimported and are tree-shaken from the served bundle.
+
+### Files changed
+- `package.json` — added 9 direct runtime `dependencies`: `@radix-ui/react-{slot,select,popover,dialog,dropdown-menu}`, `cmdk`, `class-variance-authority`, `clsx` (promoted from transitive), `tailwind-merge`.
+- `bun.lock` — regenerated; resolved versions all accept `react`/`react-dom` `^19` (react@19.2.7), no peer rejection.
+- `src/ui/lib/utils.ts` (NEW) — `cn(...) = twMerge(clsx(inputs))`, the single class-composition helper every primitive imports (relative `.ts` path, no `@/` alias).
+- `src/ui/components/ui/button.tsx` (NEW) — `Button` + `buttonVariants` (cva); default = ink `bg-coral text-coral-ink`, plus outline/ghost/destructive/secondary; `asChild` via react-slot.
+- `src/ui/components/ui/select.tsx` (NEW) — Radix Select wrappers; `bg-card` panel, `bg-accent` item highlight, inline chevron/check SVG.
+- `src/ui/components/ui/popover.tsx` (NEW) — Radix Popover wrappers; `bg-card`/`border-border` panel.
+- `src/ui/components/ui/command.tsx` (NEW) — cmdk Command wrappers + `CommandDialog` (composes dialog); `aria-selected:bg-accent` items, inline search SVG.
+- `src/ui/components/ui/dialog.tsx` (NEW) — Radix Dialog wrappers; neutral `bg-black/60` scrim, inline-SVG close with `sr-only` label.
+- `src/ui/components/ui/dropdown-menu.tsx` (NEW) — Radix DropdownMenu wrappers (for Story 8.6).
+- `src/core/{ui,sandbox,snapshot,live-report}-bundle.generated.ts` — regenerated by `bun run build`. UI **JS payload byte-identical** (2325362 bytes — new components fully tree-shaken since unimported); UI CSS grew ~0.5% (81836→82048 bytes) because Tailwind v4's content scanner emits utility classes referenced in the new source files even though unimported into the JS. No JS regression; the only asserted CSS invariant (served `/app.css` === generated `uiBundle.css`) holds.
+
+### Review findings breakdown
+- **Patches applied (2, low):** destructive-button inverted hover fixed (`hover:bg-err/20`); `SelectTrigger` focus normalized to `focus-visible:`.
+- **Deferred (2, low):** Select ships without scroll buttons (add when consumed in 8.6); forced-colors/high-contrast focus indicator relies on a box-shadow ring (foundation-wide a11y polish). Both recorded in `deferred-work.md`.
+- **Rejected (14):** see the Review Triage Log above — all matched canonical shadcn/Radix behavior, were consumer-story responsibility, or were already verified out-of-band.
+
+### Follow-up review recommendation
+`false` — the only review-driven changes were two localized, low-severity cosmetic className fixes with no behavioral, API, security, or data impact; an independent follow-up review is not warranted.
+
+### Verification performed
+- `bunx tsc --noEmit` → clean (post-patch); the new `lib/utils.ts` + all `components/ui/*.tsx` typecheck under `strict` + `verbatimModuleSyntax` + `noUncheckedIndexedAccess`.
+- `bun test` → 1141 pass / 0 fail / 2828 expect() across 70 files; unchanged test count, no test added/edited/weakened (the two patches touch only unimported, untested component className strings).
+- `bun run build` → all four build scripts succeeded post-patch; UI JS byte-identical, generated bundles regenerated.
+- Peer-compat / Block-If cleared: `bun pm ls` clean, resolved Radix/cmdk versions accept React 19, no peer warning. No `foundation needs a new token` condition hit — the existing token set covered every element.
+- Independent orchestrator spot-checks: `git status` shows only the expected files; grep confirmed no `animate-*`, `lucide`, `@radix-ui/react-icons`, `@/` alias, coral/orange hex, or invented shadcn-default token; positive checks confirmed default button = `bg-coral text-coral-ink`, surfaces = `bg-card`/`border-border`, dialog close carries an `sr-only` accessible name.
+
+### Residual risks
+- Two low-severity deferrals recorded (Select scroll buttons; forced-colors focus indicator) — neither affects any shipping surface in this story; both are best resolved when the primitives are first consumed (Stories 8.5/8.6).
+- The CSS bundle grew ~0.5% from Tailwind scanning the new (unimported) source files. This is inherent to Tailwind v4 content scanning, alters no existing selector, and changes no rendered surface; no test asserts a CSS byte count.

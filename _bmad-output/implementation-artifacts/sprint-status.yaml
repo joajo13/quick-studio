@@ -120,8 +120,8 @@ development_status:
   epic-7-retrospective: optional
 
   # Epic 8: UI Refinements — Artifact Fidelity & Interaction Polish
-  epic-8: backlog
-  8-1-shadcn-ui-foundation: backlog          # Story 8.1: shadcn/ui + Radix foundation
+  epic-8: in-progress
+  8-1-shadcn-ui-foundation: done             # Story 8.1: shadcn/ui + Radix foundation
   8-2-chrome-tabs-fidelity: backlog          # Story 8.2: Chrome-tab fidelity + content-panel fusion
   8-3-custom-scrollbars-no-divider: backlog  # Story 8.3: Custom scrollbars + remove left-panel divider
   8-4-chat-markdown-rendering: backlog       # Story 8.4: Render Markdown/MDX in chat message bubbles
