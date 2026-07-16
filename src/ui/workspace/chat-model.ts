@@ -80,6 +80,31 @@ export function setProvider(state: ChatState, provider: ProviderKind | null): Ch
   return { ...state, provider };
 }
 
+/**
+ * Resolve the DEFAULT provider for a fresh chat Tab (Story 8.5) so the picker never
+ * forces a manual pick when the app already has enough signal. Pure, total, DOM-free —
+ * it only COMPUTES an initial value; `ChatState.provider` stays session-only.
+ *
+ * Resolution order (exactly):
+ *   1. the persisted `lastUsed` provider — but ONLY when it is still in `connected`
+ *      (a stale last-used never selects an absent provider);
+ *   2. the sole connected provider when exactly one is connected;
+ *   3. the FIRST connected provider in stable `PROVIDER_KINDS` order (`connected` is
+ *      already sorted by the caller);
+ *   4. `null` when no provider is connected.
+ *
+ * Steps 2 and 3 both resolve to `connected[0]`, so once the last-used case is ruled
+ * out the first (stable) entry is the answer.
+ */
+export function resolveDefaultProvider(
+  connected: ReadonlyArray<ProviderKind>,
+  lastUsed: ProviderKind | null,
+): ProviderKind | null {
+  if (connected.length === 0) return null;
+  if (lastUsed !== null && connected.includes(lastUsed)) return lastUsed;
+  return connected[0] ?? null;
+}
+
 /** Append a user message to the log. */
 export function appendUserMessage(state: ChatState, text: string): ChatState {
   return { ...state, messages: [...state.messages, { role: "user", text }] };

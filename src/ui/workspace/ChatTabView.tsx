@@ -55,12 +55,14 @@ import {
   appendUserMessage,
   deriveResultKpis,
   EMPTY_PARTIAL,
+  resolveDefaultProvider,
   setProvider,
   validateSend,
   type ChatMessage,
   type ChatState,
   type StreamPartial,
 } from "./chat-model.ts";
+import { Select, SelectContent, SelectItem, SelectTrigger } from "../components/ui/select.tsx";
 import { ConfirmRun } from "./ConfirmRun.tsx";
 import { runRawQuery, type RunOutcome } from "./run-raw-query.ts";
 import { renderReportMarkdown } from "../report/report-markdown.ts";
@@ -528,10 +530,17 @@ function MarkdownBody({ text }: { text: string }): React.JSX.Element {
 export function ChatTabView({
   state,
   onStateChange,
+  lastProvider = null,
 }: {
   /** The session-only chat state for this Tab (never persisted to disk/snapshot). */
   state: ChatState;
   onStateChange: (next: ChatState) => void;
+  /**
+   * The last-used chat provider default hint (Story 8.5), App-held and persisted. Used
+   * ONLY to compute the fire-once auto-select default when no provider is yet picked.
+   * Optional (defaults to `null`) so existing call sites/tests need not thread it.
+   */
+  lastProvider?: ProviderKind | null;
 }): React.JSX.Element {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -605,6 +614,24 @@ export function ChatTabView({
       alive = false;
     };
   }, []);
+
+  // Fire-once auto-select (Story 8.5): once `providers.list` resolves, if NO provider is
+  // yet picked, default-select via `resolveDefaultProvider(configured, lastProvider)` —
+  // last-used-if-connected → sole-connected → first-connected → none. Guarded by a ref so it
+  // fires EXACTLY ONCE per mount on the ready transition, and only when `state.provider` is
+  // still null — so it never overrides a provider already set (in this session, or auto-
+  // selected on a prior mount and preserved in the App-held chat state). The picker offers no
+  // clear-to-null affordance (every item is a real provider), so a set provider stays set
+  // until switched. A failed/empty list yields no auto-select (resolver returns null).
+  // Defaulting only sets `state.provider` — it sends no request and touches no key.
+  const didAutoSelectRef = useRef(false);
+  useEffect(() => {
+    if (didAutoSelectRef.current || !providersReady) return;
+    didAutoSelectRef.current = true;
+    if (state.provider !== null) return; // only default when nothing is selected yet
+    const resolved = resolveDefaultProvider(configured, lastProvider);
+    if (resolved !== null) onStateChange(setProvider(state, resolved));
+  }, [providersReady, configured, lastProvider, state, onStateChange]);
 
   const send = async (): Promise<void> => {
     if (firing.current || busy) return;
@@ -724,30 +751,33 @@ export function ChatTabView({
     <div className="flex h-full flex-col">
       {/* Header: model button (provider · schema-only ▾) + privacy chip. */}
       <div className="flex h-[52px] shrink-0 items-center gap-2.5 border-b border-[var(--border)] bg-[var(--card)] px-4">
-        {/* The provider <select> IS the model button — styled ink, borderless, with a
-            trailing `· schema-only` mode + native chevron. aria-label / value / onChange
-            and the disabled-when-no-providers state are preserved verbatim. */}
-        <label className="sr-only" htmlFor="chat-provider">
-          provider
-        </label>
-        <div className="inline-flex items-center gap-1 rounded-[9px] px-1 py-1 transition-colors hover:bg-[var(--accent)]">
-          <select
-            id="chat-provider"
-            aria-label="provider"
+        {/* The provider picker IS the model button (`.model-btn`): a story-8.1 shadcn/Radix
+            Select styled ink/borderless, its trigger reading `{provider} ▾`, followed by a
+            plain `· schema-only` mode sibling. The Radix open list replaces the OS-native
+            dropdown. The `· schema-only` span is a PLAIN SIBLING of the Select (NOT inside the
+            Radix trigger) so its load-bearing test string never depends on Radix rendering.
+            The trigger's coral focus ring (8.1 base className) is overridden to a neutral
+            monochrome `focus-visible:ring-foreground`. */}
+        <div className="inline-flex items-center gap-1">
+          <Select
             value={state.provider ?? ""}
             disabled={!hasProviders}
-            onChange={(e) =>
-              onStateChange(setProvider(state, e.target.value === "" ? null : (e.target.value as ProviderKind)))
-            }
-            className="cursor-pointer rounded-md border-none bg-transparent px-1 py-0.5 text-[15px] font-semibold text-[var(--foreground)] outline-none disabled:cursor-not-allowed disabled:opacity-60"
+            onValueChange={(v) => onStateChange(setProvider(state, v as ProviderKind))}
           >
-            <option value="">{hasProviders ? "select…" : "none configured"}</option>
-            {configured.map((k) => (
-              <option key={k} value={k}>
-                {k}
-              </option>
-            ))}
-          </select>
+            <SelectTrigger
+              aria-label="provider"
+              className="h-auto w-auto justify-start gap-1.5 rounded-[9px] border-0 bg-transparent px-2 py-1.5 font-sans text-[15px] font-semibold text-[var(--foreground)] transition-colors hover:bg-[var(--accent)] focus-visible:ring-foreground disabled:opacity-60 [&>svg]:opacity-70"
+            >
+              <span>{state.provider ?? (hasProviders ? "select…" : "none configured")}</span>
+            </SelectTrigger>
+            <SelectContent>
+              {configured.map((k) => (
+                <SelectItem key={k} value={k}>
+                  {k}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <span className="font-mono text-[12.5px] text-[var(--muted-foreground)]">· schema-only</span>
         </div>
         <span

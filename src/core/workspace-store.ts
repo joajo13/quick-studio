@@ -168,6 +168,11 @@ function isWorkspaceSnapshot(value: unknown): value is WorkspaceSnapshot {
   // `erdLayouts` is ADDITIVE + optional (Story 4.2): an old v1 file with no such field
   // still validates (falls back to dagre); a PRESENT value is shape-checked here.
   if (v.erdLayouts !== undefined && !isErdLayouts(v.erdLayouts)) return false;
+  // `lastProvider` is ADDITIVE + optional (Story 8.5): a FIELD-DROP field, deliberately NOT
+  // gated here. It is a single lightweight enum default hint — an unrecognized value (a future
+  // provider kind on downgrade, or a hand-edit) must never discard the whole workspace, so the
+  // sanitizing lives UI-side in `restoreLastProvider` (unknown → null). Rejecting the snapshot
+  // over one bad hint would nuke every tab/panel/ERD layout, which is exactly what we avoid.
   return true;
 }
 

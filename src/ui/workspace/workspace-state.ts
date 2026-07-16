@@ -20,9 +20,11 @@
  */
 
 import {
+  PROVIDER_KINDS,
   WORKSPACE_SNAPSHOT_VERSION,
   WORKSPACE_TAB_KINDS,
   type ErdTabLayout,
+  type ProviderKind,
   type WorkspaceSnapshot,
   type WorkspaceTabKind,
 } from "../../shared/contract.ts";
@@ -243,16 +245,32 @@ export function restoreErdLayouts(
 }
 
 /**
+ * Seed the App-held `lastProvider` default hint from a loaded {@link WorkspaceSnapshot}
+ * (Story 8.5) — the restore-side twin of {@link restoreErdLayouts}. Returns the stored
+ * `lastProvider` ONLY when it is a recognized {@link ProviderKind}, else `null` — defensive
+ * against a hand-edited/unknown value, so a single bad field never blocks the default (the
+ * picker simply falls back to single/first-connected). A pre-8.5 file (no `lastProvider`)
+ * yields `null`. Pure and total.
+ */
+export function restoreLastProvider(snapshot: WorkspaceSnapshot): ProviderKind | null {
+  const value = snapshot.lastProvider;
+  return value !== undefined && (PROVIDER_KINDS as readonly string[]).includes(value) ? value : null;
+}
+
+/**
  * Derive the wire {@link WorkspaceSnapshot} to persist via `workspace.save`.
- * Pure — `panelSizes` and `erdLayouts` are supplied separately since they are
- * React-held layout state, not part of {@link WorkspaceState}. `erdLayouts` (Story 4.2)
- * is pruned to the current tab set and only carried when non-empty, so a workspace with
- * no ERD geometry serializes byte-identically to a pre-4.2 snapshot.
+ * Pure — `panelSizes`, `erdLayouts`, and `lastProvider` are supplied separately since they
+ * are React-held state, not part of {@link WorkspaceState}. `erdLayouts` (Story 4.2) is
+ * pruned to the current tab set and only carried when non-empty; `lastProvider` (Story 8.5)
+ * is only carried when it is a non-null {@link ProviderKind}. So a workspace with no ERD
+ * geometry and no picked provider serializes byte-identically to a pre-4.2/pre-8.5 snapshot
+ * (preserving the untouched-workspace no-resave invariant).
  */
 export function toWorkspaceSnapshot(
   state: WorkspaceState,
   panelSizes: ReadonlyArray<number>,
   erdLayouts?: Readonly<Record<string, ErdTabLayout>>,
+  lastProvider?: ProviderKind | null,
 ): WorkspaceSnapshot {
   const base: WorkspaceSnapshot = {
     version: WORKSPACE_SNAPSHOT_VERSION,
@@ -262,5 +280,8 @@ export function toWorkspaceSnapshot(
     nextId: state.nextId,
   };
   const pruned = erdLayouts ? pruneErdLayouts(erdLayouts, state.tabs) : {};
-  return Object.keys(pruned).length > 0 ? { ...base, erdLayouts: pruned } : base;
+  const withErd = Object.keys(pruned).length > 0 ? { ...base, erdLayouts: pruned } : base;
+  // Only attach `lastProvider` when a provider is actually set, so an untouched workspace
+  // stays byte-identical to today's snapshot (the no-resave invariant).
+  return lastProvider != null ? { ...withErd, lastProvider } : withErd;
 }

@@ -13,6 +13,7 @@ import {
   emptyWorkspace,
   openTab,
   restoreErdLayouts,
+  restoreLastProvider,
   restoreWorkspace,
   toWorkspaceSnapshot,
   type WorkspaceState,
@@ -345,6 +346,48 @@ describe("erdLayouts bridge (Story 4.2)", () => {
       nextId: 2,
     };
     expect(restoreErdLayouts(snapshot, restoreWorkspace(snapshot).tabs)).toEqual({});
+  });
+});
+
+describe("lastProvider bridge (Story 8.5)", () => {
+  const BASE_SNAPSHOT: WorkspaceSnapshot = {
+    version: 1,
+    panelSizes: [20, 80],
+    tabs: [{ id: 1, kind: "chat", title: "Chat 1" }],
+    activeTabId: 1,
+    nextId: 2,
+  };
+
+  test("toWorkspaceSnapshot carries lastProvider only when a provider is set", () => {
+    const state = openMany("chat"); // tab id 1
+    const snapshot = toWorkspaceSnapshot(state, [20, 80], undefined, "openai");
+    expect(snapshot.lastProvider).toBe("openai");
+  });
+
+  test("toWorkspaceSnapshot omits lastProvider when null/undefined (no-resave invariant)", () => {
+    const state = openMany("chat");
+    expect("lastProvider" in toWorkspaceSnapshot(state, [20, 80], undefined, null)).toBe(false);
+    expect("lastProvider" in toWorkspaceSnapshot(state, [20, 80])).toBe(false);
+    // Byte-identical to a snapshot with no provider AND no erd layouts.
+    expect(toWorkspaceSnapshot(state, [20, 80], undefined, null)).toEqual(
+      toWorkspaceSnapshot(state, [20, 80]),
+    );
+  });
+
+  test("lastProvider coexists with erdLayouts when both are supplied", () => {
+    const state = openMany("erd"); // tab id 1
+    const layout = { positions: { "public orders": { x: 1, y: 2 } } };
+    const snapshot = toWorkspaceSnapshot(state, [20, 80], { "1": layout }, "google");
+    expect(snapshot.erdLayouts).toEqual({ "1": layout });
+    expect(snapshot.lastProvider).toBe("google");
+  });
+
+  test("restoreLastProvider returns a known kind and drops an unknown/absent one", () => {
+    expect(restoreLastProvider({ ...BASE_SNAPSHOT, lastProvider: "anthropic" })).toBe("anthropic");
+    // Unknown / hand-edited garbage -> null (field-drop posture).
+    expect(restoreLastProvider({ ...BASE_SNAPSHOT, lastProvider: "bogus" as never })).toBeNull();
+    // Absent (pre-8.5 file) -> null.
+    expect(restoreLastProvider(BASE_SNAPSHOT)).toBeNull();
   });
 });
 

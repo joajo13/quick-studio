@@ -713,6 +713,12 @@ export type ErdTabLayout = {
  * a pre-4.2 v1 snapshot (no ERD-layout data) still loads cleanly and falls back to the
  * dagre layout — hence {@link WORKSPACE_SNAPSHOT_VERSION} stays `1` (no version bump,
  * which would discard existing persisted workspaces).
+ *
+ * `lastProvider` (Story 8.5) is an ADDITIVE optional field — the last-used chat provider
+ * kind, a lightweight UX default hint for the chat provider picker. It follows the same
+ * additive-optional posture as `erdLayouts` (a pre-8.5 v1 snapshot has none and loads
+ * cleanly, no version bump). It carries NO key and NO row/chat content — chat messages
+ * and per-Tab chat state still never touch disk.
  */
 export type WorkspaceSnapshot = {
   readonly version: 1;
@@ -721,6 +727,7 @@ export type WorkspaceSnapshot = {
   readonly activeTabId: number | null;
   readonly nextId: number;
   readonly erdLayouts?: Record<string, ErdTabLayout>;
+  readonly lastProvider?: ProviderKind;
 };
 
 /** Params for `workspace.save` — the snapshot to persist (or no-op in Ephemeral). */

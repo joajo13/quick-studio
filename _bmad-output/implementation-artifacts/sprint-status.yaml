@@ -125,7 +125,7 @@ development_status:
   8-2-chrome-tabs-fidelity: done          # Story 8.2: Chrome-tab fidelity + content-panel fusion
   8-3-custom-scrollbars-no-divider: done     # Story 8.3: Custom scrollbars + remove left-panel divider
   8-4-chat-markdown-rendering: done       # Story 8.4: Render Markdown/MDX in chat message bubbles
-  8-5-chat-provider-autoselect: backlog      # Story 8.5: Chat provider auto-select + shadcn dropdown
+  8-5-chat-provider-autoselect: done         # Story 8.5: Chat provider auto-select + shadcn dropdown
   8-6-settings-singleton-tab: backlog        # Story 8.6: Settings as a singleton tab
   8-7-surface-active-connection: backlog     # Story 8.7: Surface the active connection in Settings/Connections
   8-8-sql-editor-autocomplete: backlog       # Story 8.8: SQL editor — CodeMirror 6 highlighting + autocomplete

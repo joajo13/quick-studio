@@ -22,6 +22,7 @@ import type {
   ExposureInfo,
   HealthResult,
   LoadWorkspaceResult,
+  ProviderKind,
   RpcErrorEnvelope,
   RpcReply,
   SaveWorkspaceResult,
@@ -42,6 +43,7 @@ import {
   emptyWorkspace,
   openTab,
   restoreErdLayouts,
+  restoreLastProvider,
   restoreWorkspace,
   toWorkspaceSnapshot,
   type TableRef,
@@ -309,11 +311,23 @@ export function App(): React.JSX.Element {
 
   // Session-only chat state per chat Tab id (Story 5.2), keyed by Tab id so each chat
   // Tab keeps its own message log + picked provider across Tab switches. Like the query
-  // drafts, this is deliberately NEVER folded into `toWorkspaceSnapshot`/`workspace.save`
-  // — chat content (and provider choice) never touches disk; a relaunch starts blank.
+  // drafts, chat CONTENT (messages, reasoning, run outcomes, per-Tab `ChatState`) is
+  // deliberately NEVER folded into `toWorkspaceSnapshot`/`workspace.save` — it never
+  // touches disk; a relaunch starts every chat blank. The ONE exception (Story 8.5) is
+  // the lightweight `lastProvider` default HINT below — not chat content, no key, no rows.
   const [chatStates, setChatStates] = useState<ReadonlyMap<number, ChatState>>(new Map());
-  const onChatStateChange = (tabId: number, next: ChatState): void =>
+  // The last-used chat provider (Story 8.5): an App-held UX default hint that DOES ride
+  // into the snapshot (like `erdLayouts`), so a fresh chat Tab can auto-select it instead
+  // of forcing a manual pick. Captured whenever a chat Tab reports a non-null provider,
+  // seeded on restore, and persisted through the existing debounced save pipeline.
+  const [lastProvider, setLastProvider] = useState<ProviderKind | null>(null);
+  const onChatStateChange = (tabId: number, next: ChatState): void => {
     setChatStates((cur) => new Map(cur).set(tabId, next));
+    // Remember the last-used provider as a durable default hint: only advance it when a Tab
+    // reports a real provider, never reset it to null (a Tab that starts unselected must not
+    // wipe a previously-remembered choice). The picker exposes no clear-to-null affordance.
+    if (next.provider !== null) setLastProvider(next.provider);
+  };
 
   // Session-only report state per report Tab id (Story 6.1), keyed by Tab id so each
   // report Tab keeps its own ordered blocks + query results across Tab switches. Like the
@@ -424,6 +438,9 @@ export function App(): React.JSX.Element {
       // Seed ERD geometry from the snapshot, pruned to the restored tab set (a pre-4.2
       // file has no `erdLayouts` → {} → dagre fallback).
       const layouts = snapshot ? restoreErdLayouts(snapshot, restored.tabs) : {};
+      // Seed the last-used provider default hint (Story 8.5): an unknown/absent value → null,
+      // so a chat Tab falls back to single/first-connected.
+      const provider = snapshot ? restoreLastProvider(snapshot) : null;
       if (snapshot) {
         // These updates plus `setSavingEnabled`/`setWorkspaceReady` below are
         // batched into one re-render, so by the time `workspaceReady` flips true
@@ -432,8 +449,9 @@ export function App(): React.JSX.Element {
         dispatch({ type: "restore", snapshot });
         setPanelSizes(sizes);
         setErdLayouts(layouts);
+        setLastProvider(provider);
       }
-      lastPersistedRef.current = JSON.stringify(toWorkspaceSnapshot(restored, sizes, layouts));
+      lastPersistedRef.current = JSON.stringify(toWorkspaceSnapshot(restored, sizes, layouts, provider));
       setSavingEnabled(true);
       setWorkspaceReady(true);
     });
@@ -453,7 +471,7 @@ export function App(): React.JSX.Element {
       // Once Stop is pressed, the quit path owns the final write — never schedule a
       // fresh debounced save that could race or resurrect content after shutdown.
       if (stoppingRef.current) return;
-      const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
+      const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts, lastProvider);
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastPersistedRef.current) return; // nothing actually changed
       // Route through the single scheduler: it advances `lastPersistedRef` itself,
@@ -463,7 +481,7 @@ export function App(): React.JSX.Element {
     }, SAVE_DEBOUNCE_MS);
     saveTimerRef.current = handle;
     return () => clearTimeout(handle);
-  }, [workspace, panelSizes, erdLayouts, savingEnabled, scheduler]);
+  }, [workspace, panelSizes, erdLayouts, lastProvider, savingEnabled, scheduler]);
 
   // Window-close last-chance flush (DW-24): on `beforeunload`, if the current
   // snapshot differs from what's persisted AND the async scheduler is idle, do a
@@ -474,7 +492,7 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (!savingEnabled) return;
     const handler = (): void => {
-      const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
+      const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts, lastProvider);
       const serialized = JSON.stringify(snapshot);
       if (serialized === lastPersistedRef.current) return; // already persisted
       if (scheduler.isBusy()) return; // async writer owns the write — never overlap
@@ -484,7 +502,7 @@ export function App(): React.JSX.Element {
     };
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
-  }, [workspace, panelSizes, erdLayouts, savingEnabled, scheduler]);
+  }, [workspace, panelSizes, erdLayouts, lastProvider, savingEnabled, scheduler]);
 
   const onStop = (): void => {
     // Guard the destructive control: ignore repeat clicks so a double-click
@@ -504,7 +522,7 @@ export function App(): React.JSX.Element {
       // `drain()` waits for the in-flight save, its trailing save, and this quit save
       // to all settle in order — newest snapshot last, no reorder — before shutdown.
       if (savingEnabled) {
-        const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
+        const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts, lastProvider);
         const serialized = JSON.stringify(snapshot);
         if (serialized !== lastPersistedRef.current) {
           scheduler.schedule(serialized, snapshot);
@@ -516,7 +534,7 @@ export function App(): React.JSX.Element {
       // shutdown. The scheduler is now idle, so a synchronous write here cannot
       // reorder — attempt it best-effort before Core goes away.
       if (savingEnabled) {
-        const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts);
+        const snapshot = toWorkspaceSnapshot(workspace, panelSizes, erdLayouts, lastProvider);
         const serialized = JSON.stringify(snapshot);
         if (serialized !== lastPersistedRef.current && saveWorkspaceSync(snapshot)) {
           lastPersistedRef.current = serialized;
@@ -588,6 +606,7 @@ export function App(): React.JSX.Element {
         onQueryDraftChange={onQueryDraftChange}
         chatStates={chatStates}
         onChatStateChange={onChatStateChange}
+        lastProvider={lastProvider}
         reportStates={reportStates}
         onReportStateChange={onReportStateChange}
         erdLayouts={erdLayouts}

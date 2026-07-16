@@ -14,6 +14,7 @@ import type {
   ErdTabLayout,
   ExecuteResult,
   FrozenRow,
+  ProviderKind,
   SchemaIndexInfo,
   SchemaTableInfo,
   StructuredOp,
@@ -457,6 +458,7 @@ export function TabContent({
   onQueryDraftChange,
   chatState,
   onChatStateChange,
+  lastProvider,
   reportState,
   onReportStateChange,
   erdLayout,
@@ -477,6 +479,8 @@ export function TabContent({
   chatState?: ChatState;
   /** Update the active chat tab's session state. */
   onChatStateChange?: (next: ChatState) => void;
+  /** The last-used chat provider default hint (Story 8.5), or null. */
+  lastProvider?: ProviderKind | null;
   /** The active report tab's session-only state (Story 6.1; never persisted). */
   reportState?: ReportState;
   /** Update the active report tab's session state. */
@@ -528,6 +532,7 @@ export function TabContent({
         key={tab.id}
         state={chatState ?? emptyChatState()}
         onStateChange={onChatStateChange ?? (() => {})}
+        lastProvider={lastProvider ?? null}
       />
     );
   }

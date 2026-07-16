@@ -15,7 +15,7 @@
 
 import { useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import type { ErdTabLayout, ExposureInfo, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
+import type { ErdTabLayout, ExposureInfo, ProviderKind, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
 import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
@@ -200,6 +200,7 @@ export function Workspace({
   onQueryDraftChange,
   chatStates,
   onChatStateChange,
+  lastProvider,
   reportStates,
   onReportStateChange,
   erdLayouts,
@@ -237,6 +238,8 @@ export function Workspace({
   chatStates: ReadonlyMap<number, ChatState>;
   /** Update the chat state for chat Tab `id`. */
   onChatStateChange: (id: number, next: ChatState) => void;
+  /** The last-used chat provider default hint (Story 8.5), or null. */
+  lastProvider: ProviderKind | null;
   /** Session-only report state per report Tab id (Story 6.1; never persisted). */
   reportStates: ReadonlyMap<number, ReportState>;
   /** Update the report state for report Tab `id`. */
@@ -362,6 +365,7 @@ export function Workspace({
                     onChatStateChange={(next) => {
                       if (activeTab !== null) onChatStateChange(activeTab.id, next);
                     }}
+                    lastProvider={lastProvider}
                     reportState={activeTab !== null ? reportStates.get(activeTab.id) : undefined}
                     onReportStateChange={(next) => {
                       if (activeTab !== null) onReportStateChange(activeTab.id, next);

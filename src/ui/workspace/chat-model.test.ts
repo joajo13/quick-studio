@@ -19,6 +19,7 @@ import {
   deriveResultKpis,
   EMPTY_PARTIAL,
   emptyChatState,
+  resolveDefaultProvider,
   setProvider,
   validateSend,
 } from "./chat-model.ts";
@@ -94,6 +95,35 @@ describe("reducers", () => {
       reasoning: "let me think",
       context: CONTEXT,
     });
+  });
+});
+
+describe("resolveDefaultProvider (Story 8.5 — default provider resolution)", () => {
+  test("exactly one connected, no last-used -> auto-selects that provider", () => {
+    expect(resolveDefaultProvider(["anthropic"], null)).toBe("anthropic");
+  });
+
+  test("persisted last-used still connected -> takes precedence over the first/single", () => {
+    expect(resolveDefaultProvider(["anthropic", "openai", "google"], "openai")).toBe("openai");
+    // Even against a single connected provider, a connected last-used still wins.
+    expect(resolveDefaultProvider(["openai"], "openai")).toBe("openai");
+  });
+
+  test("stale last-used (not connected) -> falls through to the single/first connected", () => {
+    // openai persisted but no longer connected -> sole connected anthropic.
+    expect(resolveDefaultProvider(["anthropic"], "openai")).toBe("anthropic");
+    // openai persisted but not connected -> FIRST connected in stable order.
+    expect(resolveDefaultProvider(["anthropic", "google"], "openai")).toBe("anthropic");
+  });
+
+  test("multiple connected, no valid last-used -> FIRST connected in stable order", () => {
+    expect(resolveDefaultProvider(["anthropic", "openai"], null)).toBe("anthropic");
+    expect(resolveDefaultProvider(["openai", "google"], null)).toBe("openai");
+  });
+
+  test("no providers connected -> null (no auto-select)", () => {
+    expect(resolveDefaultProvider([], null)).toBeNull();
+    expect(resolveDefaultProvider([], "openai")).toBeNull();
   });
 });
 
