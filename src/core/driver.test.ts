@@ -21,6 +21,7 @@ import {
   type IntrospectedIndex,
 } from "./driver.ts";
 import { buildMysqlConfig, createMutex } from "./driver-mysql.ts";
+import { mapUnsafeResult } from "./driver-postgres.ts";
 
 /** A synthetic engine/OS error carrying the `code`/`errno` tags drivers surface. */
 function fakeErr(tags: { code?: string; errno?: number }): Error {
@@ -492,6 +493,93 @@ describe("postgres extended-protocol backstop (no live DB)", () => {
     try {
       const opts = { simple: false } as unknown as { prepare?: boolean };
       const q = sql.unsafe("SELECT 1; DROP TABLE users", [], opts) as unknown as { options: { simple: boolean } };
+      expect(q.options.simple).toBe(false);
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  });
+});
+
+// DW-29 / DW-38 — the postgres raw-read path maps rows POSITIONALLY (`.values()`
+// array row-mode) so duplicate/aliased output columns (`SELECT id, id`) keep their
+// distinct per-position values instead of collapsing to the last name-keyed value.
+// `mapUnsafeResult` is the pure mapping seam; the values-mode result is an Array that
+// also carries `columns`/`count`, fabricated here via `Object.assign([...rows], …)`.
+describe("postgres runUnsafe positional row mapping (DW-29 / DW-38)", () => {
+  test("duplicate output names do NOT collapse — both values survive at their positions", () => {
+    const result = Object.assign(
+      [
+        [1, 2],
+        [3, 4],
+      ],
+      { columns: [{ name: "id" }, { name: "id" }], count: 2 },
+    );
+    const mapped = mapUnsafeResult(result);
+    expect(mapped.columns).toEqual([{ name: "id" }, { name: "id" }]);
+    expect(mapped.rows).toEqual([
+      [1, 2],
+      [3, 4],
+    ]);
+    expect(mapped.rowsAffected).toBe(2);
+  });
+
+  test("unique columns (browse) map unchanged", () => {
+    const result = Object.assign([[7, "a"]], {
+      columns: [{ name: "id" }, { name: "name" }],
+      count: 1,
+    });
+    const mapped = mapUnsafeResult(result);
+    expect(mapped.columns).toEqual([{ name: "id" }, { name: "name" }]);
+    expect(mapped.rows).toEqual([[7, "a"]]);
+    expect(mapped.rowsAffected).toBe(1);
+  });
+
+  test("empty result keeps columns and reports zero rows", () => {
+    const result = Object.assign([] as unknown[][], { columns: [{ name: "id" }], count: 0 });
+    const mapped = mapUnsafeResult(result);
+    expect(mapped.columns).toEqual([{ name: "id" }]);
+    expect(mapped.rows).toEqual([]);
+    expect(mapped.rowsAffected).toBe(0);
+  });
+
+  test("missing count falls back to rows.length", () => {
+    const result = Object.assign([] as unknown[][], { columns: [] });
+    const mapped = mapUnsafeResult(result);
+    expect(mapped.columns).toEqual([]);
+    expect(mapped.rows).toEqual([]);
+    expect(mapped.rowsAffected).toBe(0);
+  });
+
+  // A mutation (INSERT/UPDATE/DELETE) reaches `runUnsafe` too: postgres.js returns an
+  // EMPTY row array whose `count` is the AFFECTED-row count and whose `columns` is the
+  // real `null` default (no RowDescription). So `rowsAffected` must come from `count`,
+  // NOT `rows.length` — pinning that provenance (an impl that used `rows.length` would
+  // report 0 affected for every UPDATE/DELETE) and exercising the real `columns ?? []`
+  // null branch that the other cases (which pass `[]`) never hit.
+  test("mutation: count drives rowsAffected even when it differs from rows.length; null columns → []", () => {
+    const result = Object.assign([] as unknown[][], { columns: null, count: 3 });
+    const mapped = mapUnsafeResult(result);
+    expect(mapped.columns).toEqual([]);
+    expect(mapped.rows).toEqual([]);
+    expect(mapped.rowsAffected).toBe(3);
+  });
+
+  // No live DB: postgres.js builds the query lazily and `.values()` flips the query's
+  // internal `isRaw` to 'values' before it ever hits the wire, so we can prove the
+  // raw-read is issued in array row-mode without a server. Crucially we inspect the
+  // FULL production call shape — `.unsafe(text, params, { simple: false }).values()` —
+  // and assert BOTH invariants on the SAME chained query: `isRaw === 'values'` (the
+  // positional fix) AND `options.simple === false` (the multi-command backstop must
+  // survive the `.values()` chaining — a refactor that drops FORCE_EXTENDED on this
+  // path would reopen the SQL-injection vector, so it is pinned here, not just in the
+  // separate extended-protocol test that omits `.values()`).
+  test("the raw-read query is issued in values row-mode AND keeps the { simple: false } backstop", async () => {
+    const sql = postgres("postgres://u:p@127.0.0.1:1/db", { max: 1 });
+    try {
+      const q = sql
+        .unsafe("SELECT id, id FROM t", [], { simple: false } as unknown as { prepare?: boolean })
+        .values() as unknown as { isRaw?: unknown; options: { simple: boolean } };
+      expect(q.isRaw).toBe("values");
       expect(q.options.simple).toBe(false);
     } finally {
       await sql.end({ timeout: 1 });

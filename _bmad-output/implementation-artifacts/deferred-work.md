@@ -226,7 +226,8 @@ resolution: resolved by sweep bundle dw-workspace-snapshot-validation-hardening
 origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
 location: `driver-postgres.ts` (`query`, `cols.map(c => row[c.name])`)
 reason: `driver-postgres.ts` `query` builds each row via `cols.map(c => row[c.name])` on postgres.js's name-keyed row object; two same-named result columns collapse to one value, and the two engines diverge (mysql2 uses `rowsAsArray:true`). The browse SELECT can never trigger it (single-table columns are unique), but `Driver.query`/`quoteIdent` is the shared seam the Story 3.6 raw-SQL path will reuse, where aliased/duplicate columns are common. Latent until raw SQL exists; the fix is an engine-adapter change (postgres.js `.values()`), not a browse-behavior bug.
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-postgres-positional-row-mapping
 
 ### DW-30: Type-color and align result-grid columns by their SQL `dataType` (numeric/decimal/bigint → number), not only by the neutral `FrozenCell` kind, so string-encoded numeric columns are not rendered as TEXT — the same SQL-type plumbing the deferred `t-json` color needs
 
@@ -289,7 +290,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
 location: `driver-postgres.ts` (`query`, pre-existing from Story 3.2)
 reason: Reviewer severity: low. The postgres adapter (`driver-postgres.ts`, pre-existing from Story 3.2's `query`) builds row values keyed by column name; a raw `SELECT` can produce duplicate output names, and the object-keyed mapping then shows the last value for every duplicate, losing the distinct columns' data. Invisible for Story 3.2 browse (real table columns are unique); Story 3.1 exposes it by routing arbitrary raw `SELECT`s through the same mapping. Fix: use postgres.js array/`values()` row mode and align to the ordered column metadata (mysql already uses `rowsAsArray`).
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-postgres-positional-row-mapping
 
 ### DW-39: Document (or make configurable) the raw-SQL splitter's assumption of default session SQL modes — it assumes postgres `standard_conforming_strings = on` and MySQL default `sql_mode` (no `NO_BACKSLASH_ESCAPES`, no `ANSI_QUOTES`); non-default modes shift string/identifier boundaries
 
