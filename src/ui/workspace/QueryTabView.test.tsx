@@ -1,5 +1,5 @@
 /**
- * quick-studio UI (Ring 2) — QueryTabView tests (Story 3.6).
+ * quick-studio UI (Ring 2) — QueryTabView tests (Story 3.6; CodeMirror 6 swap Story 8.8).
  *
  * This repo has no jsdom/testing-library (see `IndexList.test.tsx`'s note) — the
  * existing convention is pure, DOM-free `bun:test` units for state/logic modules
@@ -10,8 +10,17 @@
  * coverage, exercised there instead of here to avoid duplicating it) is covered
  * once at the seam; this file keeps `isRunnable` plus a handful of
  * `renderToStaticMarkup` checks over the static structure (Run disabled when
- * blank, the draft text bound into the textarea, the initial empty-state prompt)
- * that IS observable without a live DOM.
+ * blank, the editor mount container, the initial empty-state prompt) that IS
+ * observable without a live DOM.
+ *
+ * Story 8.8 swapped the `<textarea>` for a CodeMirror 6 `EditorView` mounted in a
+ * client-side `useEffect` — SSR (`renderToStaticMarkup`) does NOT run effects, so
+ * CM never mounts here and the draft text no longer round-trips through server
+ * markup. The old "textarea is seeded with the bound draft text" assertion is
+ * reworked below to assert the CM mount container instead (stable
+ * `data-testid="sql-editor"`); the completion/highlighting BEHAVIOR itself is
+ * covered by the pure `sql-completions.test.ts` (completion logic) and by the live
+ * manual check (the CM-rendered editor) — see the story's Verification section.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -51,9 +60,14 @@ describe("QueryTabView — static structure", () => {
     expect(html).not.toContain('disabled=""');
   });
 
-  test("the textarea is seeded with the bound draft text", () => {
+  test("the editor mount container renders with a stable test id and accessible name", () => {
+    // CM builds its editable DOM (and the `aria-label="sql query editor"` it
+    // carries) in a client-side `useEffect`, which SSR skips — so the draft text
+    // itself is NOT expected in server markup. What IS observable without a live
+    // DOM is the still-React-rendered mount container the effect will hydrate
+    // into: a stable `data-testid="sql-editor"` hook for tests/the live check.
     const html = renderToStaticMarkup(<QueryTabView draft="select * from users" onDraftChange={noop} />);
-    expect(html).toContain("select * from users");
+    expect(html).toContain('data-testid="sql-editor"');
   });
 
   test("shows the initial empty-state prompt before any query has run", () => {

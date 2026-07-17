@@ -2,7 +2,11 @@
 title: 'SQL editor with CodeMirror 6 — keyword highlighting + schema/table/column autocomplete'
 type: 'feature'
 created: '2026-07-16'
-status: 'backlog'
+status: 'done'
+baseline_revision: '65c9f437ab40d52295cbefbd7e2bbfbd33ec1942'
+final_revision: '35a360add896c5d8f922f41e5b875f48bd75b48d'
+review_loop_iteration: 0
+followup_review_recommended: false
 context:
   - '{project-root}/design-artifacts/workspace.html'
   - '{project-root}/src/ui/workspace/QueryTabView.tsx'
@@ -102,13 +106,13 @@ context:
 
 ## Tasks
 
-- [ ] `package.json` — `bun add` the CodeMirror 6 deps (`codemirror`, `@codemirror/lang-sql`, `@codemirror/autocomplete`, `@codemirror/view`, `@codemirror/state`, `@codemirror/commands`, `@codemirror/language`, `@lezer/highlight`).
-- [ ] `src/ui/styles/globals.css` — add the dark-first `--sql-kw/-fn/-str/-num/-idn/-pun` tokens (ported from `workspace.html`); no light override, no `@theme` aliases.
-- [ ] `src/ui/workspace/sql-completions.ts` (new) — pure builder mapping `SchemaTableInfo[]` → the lang-sql schema/completion config (schema/table/column names; explicit + as-you-type).
-- [ ] `src/ui/workspace/QueryTabView.tsx` — swap the `<textarea>` for a mounted CodeMirror `EditorView` (SQL lang + `--sql-*` HighlightStyle + neutral token theme + schema completion + history/completion keymaps + `Mod-Enter → runRef` + draft `updateListener`); add the `tables?` prop; reconfigure completion via a `Compartment` on `tables` change; preserve `run`/`confirmRun`/gate/`firing`/pager/banners.
-- [ ] `src/ui/workspace/TabContent.tsx` — pass `tables={tables}` into the `query` branch's `<QueryTabView>`.
-- [ ] `src/ui/workspace/sql-completions.test.ts` (new) — pure `bun:test` coverage: every schema/table/column name completes, prefix filters, empty schema is safe, qualified names resolve columns.
-- [ ] `src/ui/workspace/QueryTabView.test.tsx` — rework the draft-in-markup assertion for the CM mount container (`data-testid="sql-editor"` + accessible name); keep the `isRunnable` + Run/disable/empty-state SSR checks.
+- [x] `package.json` — `bun add` the CodeMirror 6 deps (`codemirror`, `@codemirror/lang-sql`, `@codemirror/autocomplete`, `@codemirror/view`, `@codemirror/state`, `@codemirror/commands`, `@codemirror/language`, `@lezer/highlight`).
+- [x] `src/ui/styles/globals.css` — add the dark-first `--sql-kw/-fn/-str/-num/-idn/-pun` tokens (ported from `workspace.html`); no light override, no `@theme` aliases.
+- [x] `src/ui/workspace/sql-completions.ts` (new) — pure builder mapping `SchemaTableInfo[]` → the lang-sql schema/completion config (schema/table/column names; explicit + as-you-type).
+- [x] `src/ui/workspace/QueryTabView.tsx` — swap the `<textarea>` for a mounted CodeMirror `EditorView` (SQL lang + `--sql-*` HighlightStyle + neutral token theme + schema completion + history/completion keymaps + `Mod-Enter → runRef` + draft `updateListener`); add the `tables?` prop; reconfigure completion via a `Compartment` on `tables` change; preserve `run`/`confirmRun`/gate/`firing`/pager/banners.
+- [x] `src/ui/workspace/TabContent.tsx` — pass `tables={tables}` into the `query` branch's `<QueryTabView>`.
+- [x] `src/ui/workspace/sql-completions.test.ts` (new) — pure `bun:test` coverage: every schema/table/column name completes, prefix filters, empty schema is safe, qualified names resolve columns.
+- [x] `src/ui/workspace/QueryTabView.test.tsx` — rework the draft-in-markup assertion for the CM mount container (`data-testid="sql-editor"` + accessible name); keep the `isRunnable` + Run/disable/empty-state SSR checks.
 
 ## Acceptance Criteria
 
@@ -134,3 +138,81 @@ context:
 - `bun run dev`, open a query Tab, and confirm: the CodeMirror editor renders; keywords/strings/numbers are colored; typing a table-name prefix + `Ctrl+Space` shows matching tables from the loaded schema and selecting one inserts it; typing a prefix opens the popup as-you-type; `⌘/Ctrl+Enter` still runs the query (rows render in the read-only `DataGrid`); a `DROP`/`DELETE` still raises `ConfirmRun` and executes only on confirm.
 - Type SQL, switch Tabs and back — the draft persists in the editor; relaunch the app — the query Tab is blank (nothing persisted).
 - Scan the editor surface for any coral hex or hardcoded Tailwind palette classes — there should be none; all color resolves through `globals.css` tokens.
+
+## Review Triage Log
+
+### 2026-07-17 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 3 (medium 1, low 2)
+- defer: 0
+- reject: 10
+- addressed_findings:
+  - `[medium]` `[patch]` Qualified-name completion (`orders.` / `public.orders.`) was not wired — `matchBefore(/\w*/)` stopped at the dot, so `resolveQualifiedColumns` was dead code and `orders.`+`Ctrl+Space` exploded into the entire flat identifier list. Wired a dotted-qualifier drill-down in `schemaCompletionSource` via a new pure `resolveQualifiedEntries` helper (`table.` → that table's columns across schemas; `schema.table.` → that table's columns; unknown qualifier → offer nothing instead of the flat list), covered by new `sql-completions.test.ts` cases.
+  - `[low]` `[patch]` External-`draft` reconcile (`QueryTabView.tsx`) did a full-doc replace with no `selection`, collapsing the caret to the doc end on a programmatic draft write. Now clamps the prior anchor into the new doc so the caret is preserved.
+  - `[low]` `[patch]` That same reconcile dispatch re-fired the `updateListener` → redundant `onDraftChange(draft)` echo (a latent feedback loop had a parent ever normalized the draft). Guarded with an `applyingExternal` ref so the listener ignores its own programmatic write.
+
+Rejected as noise / not-this-story / by-design (10): Run-button `disabled` reads `draft` while `run()` reads the live doc (not exploitable — `onQueryDraftChange` is always wired, so `draft` tracks the doc each keystroke); duplicate popup labels when a name is both a table and a column (distinguished by CM's type tag); redundant completion reconfigure on initial mount (harmless one-time O(tables×cols)); `new Compartment()` allocated per render then discarded by `useRef`; refs assigned during render (re-set every committed render, `run` re-reads live state); CRLF→LF normalization before send (matches the old `<textarea>`, not a regression; SQL is newline-indifferent); unreachable `word === null` guard (legit TS narrowing of `matchBefore`'s `| null`); `::selection` theme rule scope (cosmetic, editor-scoped); loss of the user-resizable textarea handle (matches `workspace.html`, the visual source of truth — a fixed mono pane); pure tests don't mount CM (accepted no-jsdom constraint stated in the spec).
+
+### 2026-07-17 — Review pass (follow-up)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 3 (high 0, medium 2, low 1)
+- defer: 0
+- reject: 13
+- addressed_findings:
+  - `[medium]` `[patch]` The autocomplete popup — the headline feature — could be clipped by the mount container's `overflow-hidden` (there to clip the editor's rounded corners), because CM's default tooltip position is `absolute` and lives inside the clipped ancestor; with the editor only ~112px tall a popup opening near the bottom is cut off. Added `tooltips({ position: "fixed" })` so the popup renders in a viewport-fixed layer that escapes the clip.
+  - `[medium]` `[patch]` The CM editor had `minHeight` but no `maxHeight`/internal scroll, so a long/pasted query grew the `shrink-0` editor bar unbounded and squeezed the `min-h-0 flex-1` result grid to nothing — a regression from the old `<textarea rows={6}>` (fixed + `resize-y`). Capped the editor at `maxHeight: 40vh` and set `.cm-scroller { overflow: auto }` to restore bounded, internally-scrollable behavior while keeping the fixed mono pane look.
+  - `[low]` `[patch]` `sql-completions.ts`'s `schemaCompletionSource` doc-comment claimed the source plugs into `autocompletion({ override: [...] })`, but the actual wiring registers it as a `StandardSQL.language.data` `autocomplete` source inside a `Compartment` (alongside lang-sql's own keyword completion). Corrected the comment to match.
+
+Rejected as noise / not-this-story / by-design (13): Ctrl+Enter no longer runs on macOS (spec explicitly chose `Mod-Enter` — Cmd on mac, Ctrl elsewhere — with a platform-aware `⌘↵`/`Ctrl ↵` chip; by design); syntax highlighting flat in light theme (spec explicitly scopes `--sql-*` dark-only, matching the 7.3 `--err*`/`--warn*` precedent — a light SQL palette is out of scope); quoted / non-`\w` identifiers don't autocomplete (best-effort authoring aid over a brand-new feature, no regression — the user types such names exactly as before); `3.14` / stray-dot tokens suppress the popup (benign — the flat branch would offer nothing there anyway); external-draft reconcile collapses range selection / pollutes undo (fires only on same-instance parent draft normalization, which never occurs — `<QueryTabView key={tab.id}>` remounts on tab switch, and the sole draft writer is this editor's own `onDraftChange`); two completion sources merged without dedup (intentional — the spec relies on CM-provided keyword completion alongside the schema source; kinds are type-tagged); no automated test exercises the mounted editor's bound editing (accepted no-jsdom constraint stated in the spec — CM mount is covered by the live check); `run` falls back to `draft` when the view isn't mounted (a keymap can't fire without a mounted view, and the fallback equals the seeded doc — no real divergence); `new Compartment()` allocated per render then discarded by `useRef` (already-rejected prior pass; harmless); single-segment `orders.` unions table-columns and schema-tables (intentional and type-tagged — a bare `name.` is inherently ambiguous); a 3+-segment path (`schema.table.col.`) offers nothing (correct — nothing completes after a resolved column); rapid typing could drop a keystroke via the reconcile (prevented by React's effect-flush ordering — the live doc and `draft` prop stay in lockstep within a keystroke's cycle).
+
+## Auto Run Result
+
+Status: done
+
+### Summary
+Replaced the plain `<textarea>` ad-hoc SQL editor (`QueryTabView`) with a mounted **CodeMirror 6** `EditorView`: SQL keyword/string/number/function syntax highlighting via a `HighlightStyle` mapped to net-new dark-first `--sql-*` tokens, and schema-driven autocomplete (schema/table/column names) built from the already-loaded `tables` prop — no new RPC. The `⌘/Ctrl+Enter → Run` binding, the guarded verbatim `execute` RAW round-trip, the enable gate, the `firing` re-entrancy guard, the destructive `ConfirmRun` flow, and the session-draft-only persistence contract are all preserved. The completion-config builder is an extracted pure, DOM-free module. During review, qualified-name drill-down was wired (it had shipped as dead code) and the external-draft reconcile was made caret-preserving and echo-safe.
+
+### Files changed
+- `package.json` / `bun.lock` — added the CodeMirror 6 dependencies (`codemirror`, `@codemirror/lang-sql`, `@codemirror/autocomplete`, `@codemirror/view`, `@codemirror/state`, `@codemirror/commands`, `@codemirror/language`, `@lezer/highlight`).
+- `src/ui/styles/globals.css` — added dark-first `--sql-kw/-fn/-str/-num/-idn/-pun` tokens (ported from `workspace.html`); no light override, no `@theme` alias.
+- `src/ui/workspace/sql-completions.ts` (new) — pure, DOM-free completion builder: entry collection, prefix filtering, qualified-column/entry resolution, and the `schemaCompletionSource` `CompletionSource` (flat list + dotted-qualifier drill-down).
+- `src/ui/workspace/sql-completions.test.ts` (new) — `bun:test` units for entry derivation, prefix filtering, qualified resolution, and the completion source (flat + qualified drill-down).
+- `src/ui/workspace/QueryTabView.tsx` — swapped the `<textarea>` for a `useRef`-mounted CodeMirror editor (SQL lang + `--sql-*` HighlightStyle + `globals.css`-token theme + schema completion via a `Compartment` + history/completion/default keymaps + `Mod-Enter → runRef` + draft `updateListener`); added the optional `tables?` prop; `run()` reads the live CM doc; selection-preserving, echo-guarded external-draft reconcile.
+- `src/ui/workspace/TabContent.tsx` — threads `tables={tables}` into the `query` branch's `<QueryTabView>`.
+- `src/ui/workspace/QueryTabView.test.tsx` — reworked the draft-in-markup assertion to the CM mount container (`data-testid="sql-editor"` + accessible name); kept the `isRunnable`/disabled/empty-state SSR checks.
+
+### Review findings breakdown
+- Patches applied: 3 (1 medium — qualified completion wiring; 2 low — caret-preserving reconcile + redundant-echo guard).
+- Deferred: 0.
+- Rejected: 10 (see Review Triage Log).
+
+### Verification performed
+- `bunx tsc --noEmit` — clean (exit 0).
+- `bun test` — 1188 pass / 0 fail (2937 expect calls, 71 files); `run-raw-query.test.ts` unchanged and green.
+- `bun run build` — `build-ui: wrote ...ui-bundle.generated.ts` (js ~3.28 MB — CodeMirror bundled), no bundler error.
+- `bun run build:binary` — self-contained `dist/quick-studio` binary compiled (288 modules).
+- `rg -n 'coral.*#|amber-|red-[0-9]' src/ui/workspace/QueryTabView.tsx src/ui/workspace/sql-completions.ts` — no matches.
+- Scope check: no changes to `src/core/**`, `src/shared/contract.ts`, `run-raw-query.ts`, or `ConfirmRun.tsx`; no new RPC.
+
+### Residual risks
+- The CM editor itself is not exercised by the automated suite (the repo has no jsdom, per the spec's stated constraint); the mounted editor's rendering, highlighting, popup behavior, `Mod-Enter` run, and the draft-persistence-across-tab-switch flow remain covered only by the spec's live manual check.
+- UI bundle grew ~0.68 MB (2.60 → 3.28 MB) from CodeMirror; the `--compile` binary stays self-contained.
+
+## Follow-up Review Pass (2026-07-17)
+
+An independent adversarial follow-up review (Blind Hunter + Edge Case Hunter, same model capability) ran over the full baseline→HEAD diff. Findings were deduplicated across both reviewers and triaged: **3 patch, 0 intent_gap, 0 bad_spec, 0 defer, 13 reject** (see the second Review Triage Log entry above).
+
+### Patches applied this pass
+- `src/ui/workspace/QueryTabView.tsx` — `[medium]` added `tooltips({ position: "fixed" })` so the autocomplete popup escapes the mount container's `overflow-hidden` clip; `[medium]` capped the editor at `maxHeight: 40vh` with `.cm-scroller { overflow: auto }` so a long query no longer grows the `shrink-0` editor bar and squeezes the result grid off-screen.
+- `src/ui/workspace/sql-completions.ts` — `[low]` corrected the `schemaCompletionSource` doc-comment to describe the real language-data wiring (not `autocompletion({ override })`).
+
+### Verification (follow-up)
+- `bunx tsc --noEmit` — clean (exit 0).
+- `bun test` — 1188 pass / 0 fail (2937 expect calls, 71 files).
+- `bun run build` — `build-ui: wrote …ui-bundle.generated.ts` (js ~3.28 MB, unchanged — `tooltips` already in the `@codemirror/view` graph), no bundler error.
+- Scope check: no changes to `src/core/**`, `src/shared/contract.ts`, `run-raw-query.ts`, or `ConfirmRun.tsx`; no new RPC.
+
+### Follow-up recommendation
+`followup_review_recommended: false` — this pass added no new logic, only localized theme/config fixes (a tooltip-layer extension, a height cap, a comment), all verified green. The one standing residual risk is unchanged: the popup-clip and height-cap fixes, like the rest of the CM surface, are only fully confirmable via the spec's live browser check (no jsdom in the repo), not by the automated suite.

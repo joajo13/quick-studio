@@ -526,6 +526,7 @@ export function TabContent({
         key={tab.id}
         draft={queryDraft ?? ""}
         onDraftChange={onQueryDraftChange ?? (() => {})}
+        tables={tables}
       />
     );
   }

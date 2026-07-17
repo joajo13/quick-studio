@@ -97,6 +97,20 @@
   --rpt-accent-soft: rgba(255, 255, 255, 0.1);
   --rpt-accent-line: rgba(255, 255, 255, 0.28);
   --rpt-err: #f05a63;
+
+  /* ---- Story 8.8 SQL syntax highlighting: functional tokens for the CodeMirror
+     `HighlightStyle`, ported verbatim from design-artifacts/workspace.html
+     (`--sql-*`, lines 46–51). Consumed as raw `var(--sql-*)` color strings inside
+     the CM highlight style (JS, not Tailwind utilities) — no `@theme inline`
+     alias needed. Dark-only, matching the Story 7.3 `--err*`/`--warn*` precedent:
+     NOT overridden under :root[data-theme="light"] — a light SQL palette is out
+     of scope. */
+  --sql-kw: #f0868a; /* keywords — soft rose */
+  --sql-fn: #c9a2f0; /* functions — soft violet */
+  --sql-str: #8dd6a0; /* strings — soft green */
+  --sql-num: #82aaff; /* numbers — soft blue */
+  --sql-idn: #ececec; /* identifiers — ink */
+  --sql-pun: #8f8f8f; /* punctuation — faint grey */
 }
 
 /* Light theme: overrides for the same tokens, activated ONLY via an explicit
