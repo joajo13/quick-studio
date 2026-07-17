@@ -296,12 +296,19 @@ export type DatabaseSchema = {
  *  - `auth` — the credentials were rejected by the engine.
  *  - `network` — reachable-but-refused / timeout / reset (the default bucket).
  *  - `unsupported_scheme` — the URL scheme is not a relational engine we speak.
+ *  - `database-does-not-exist` — host+auth were fine but the named catalog is
+ *    missing (PG SQLSTATE `3D000`, MySQL `ER_BAD_DB_ERROR`/errno `1049`, DW-18).
+ *  - `malformed-url` — a supported-scheme URL that `new URL()` cannot parse (a
+ *    bad/out-of-range port or unparseable authority) — structurally rejected by
+ *    {@link createDriver} before any socket opens; distinct from an unsupported scheme.
  */
 export type ConnectionFailureKind =
   | "host"
   | "auth"
   | "network"
-  | "unsupported_scheme";
+  | "unsupported_scheme"
+  | "database-does-not-exist"
+  | "malformed-url";
 
 /**
  * The outcome of a `connect` RPC. This is a DOMAIN result carried inside a

@@ -63,6 +63,68 @@ describe("createDriver scheme selection", () => {
       expect((thrown as DriverConnectionError).message).not.toContain("passwd");
     });
   }
+
+  // DW-21 — a supported scheme whose URL is malformed (bad/out-of-range port or an
+  // unparseable authority that makes `new URL()` throw) is a distinct `malformed-url`
+  // verdict, NOT `unsupported_scheme`: the scheme IS one we speak, the URL is broken.
+  // Decided structurally before any socket opens; credentials are never echoed. Covers
+  // both supported schemes AND the `postgresql` alias, an out-of-range port, a truly
+  // unparseable non-port authority, and a leading-whitespace URL (which `new URL()`
+  // trims before throwing, so scheme recovery must normalize to match).
+  for (const url of [
+    "postgres://user:secret@host:99999/db", // out-of-range port, supported scheme
+    "postgres://user:secret@host:5432x/db", // unparseable port authority
+    "postgresql://user:secret@host:99999/db", // out-of-range port, `postgresql` alias
+    "postgres://user:secret@ho st:5432/db", // space in authority → unparseable (non-port)
+    "mysql://user:secret@host:99999/db", // out-of-range port, supported scheme (mysql)
+    "  postgres://user:secret@host:99999/db", // leading whitespace + bad port
+  ]) {
+    test(`refuses a malformed supported-scheme URL as malformed-url: ${url.trim().split("://")[0]}`, () => {
+      let thrown: unknown;
+      try {
+        createDriver(url);
+      } catch (e) {
+        thrown = e;
+      }
+      expect(thrown).toBeInstanceOf(DriverConnectionError);
+      expect((thrown as DriverConnectionError).kind).toBe("malformed-url");
+      // Credential-freedom is an ALLOWLIST invariant, not a denylist: the message must
+      // be EXACTLY the neutral literal (naming only the non-secret scheme) — so a
+      // regression that spliced any part of the raw URL back in would fail here, even
+      // if it didn't happen to contain the words "secret"/"user".
+      const scheme = url.trim().split(":")[0];
+      expect((thrown as DriverConnectionError).message).toBe(
+        `malformed "${scheme}" database URL (could not be parsed)`,
+      );
+    });
+  }
+
+  // A string with NO extractable scheme AND that `new URL()` rejects stays
+  // `unsupported_scheme` (no recovered scheme → not a supported-but-malformed URL).
+  test("refuses a string with no extractable scheme as unsupported_scheme", () => {
+    let thrown: unknown;
+    try {
+      createDriver("://nonsense");
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DriverConnectionError);
+    expect((thrown as DriverConnectionError).kind).toBe("unsupported_scheme");
+  });
+
+  // The load-bearing distinction: a malformed URL whose scheme is UNSUPPORTED must
+  // still be `unsupported_scheme`, NOT `malformed-url` — recovery only escalates a
+  // malformed URL when its recovered scheme is one we actually speak.
+  test("refuses a malformed UNsupported-scheme URL as unsupported_scheme", () => {
+    let thrown: unknown;
+    try {
+      createDriver("redis://host:99999/db"); // supported-looking, but redis is not spoken
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(DriverConnectionError);
+    expect((thrown as DriverConnectionError).kind).toBe("unsupported_scheme");
+  });
 });
 
 describe("classifyConnectionError", () => {
@@ -85,6 +147,10 @@ describe("classifyConnectionError", () => {
     ["ECONNRESET → network", fakeErr({ code: "ECONNRESET" }), "network"],
     ["unknown code → network", fakeErr({ code: "EWHATEVER" }), "network"],
     ["no tags → network", new Error("bare"), "network"],
+    // DW-18 — missing catalog (host+auth were fine, the named database does not exist).
+    ["PG 3D000 → database-does-not-exist", fakeErr({ code: "3D000" }), "database-does-not-exist"],
+    ["MySQL ER_BAD_DB_ERROR → database-does-not-exist", fakeErr({ code: "ER_BAD_DB_ERROR" }), "database-does-not-exist"],
+    ["MySQL errno 1049 → database-does-not-exist", fakeErr({ code: "SOMETHING", errno: 1049 }), "database-does-not-exist"],
   ];
 
   for (const [label, err, expected] of cases) {
@@ -95,6 +161,13 @@ describe("classifyConnectionError", () => {
 
   test("never returns unsupported_scheme (that is createDriver's verdict alone)", () => {
     expect(classifyConnectionError(fakeErr({ code: "file" }))).toBe("network");
+  });
+
+  test("never returns malformed-url (that is createDriver's structural verdict alone)", () => {
+    // No engine/OS error carries a URL-parse verdict — an unrecognized code defaults
+    // to `network`, never `malformed-url`.
+    expect(classifyConnectionError(fakeErr({ code: "malformed-url" }))).toBe("network");
+    expect(classifyConnectionError(fakeErr({ errno: 99999 }))).toBe("network");
   });
 });
 

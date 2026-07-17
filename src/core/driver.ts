@@ -297,6 +297,13 @@ const NEUTRAL_MESSAGE: Readonly<Record<ConnectionFailureKind, string>> = {
   network:
     "could not reach the database (connection refused, reset, or timed out)",
   unsupported_scheme: "unsupported database URL scheme",
+  // Host+auth succeeded but the URL names a catalog that does not exist on the
+  // server (PG `3D000`, MySQL `ER_BAD_DB_ERROR`/`1049`, DW-18). Neutral: the
+  // database name itself is never echoed back.
+  "database-does-not-exist": "the named database does not exist on the server",
+  // A supported-scheme URL that `new URL()` cannot parse (bad/out-of-range port,
+  // unparseable authority). Structural — the raw URL is never echoed.
+  "malformed-url": "the database URL is malformed",
 };
 
 /**
@@ -350,6 +357,18 @@ const NETWORK_CODES: ReadonlySet<string> = new Set([
   "ECONNRESET",
   "CONNECT_TIMEOUT", // postgres.js connect-timeout code (mysql2 surfaces ETIMEDOUT)
 ]);
+/**
+ * Database-does-not-exist: host+auth were fine but the URL names a missing catalog
+ * (DW-18). PG SQLSTATE `3D000` is `invalid_catalog_name`; MySQL `ER_BAD_DB_ERROR`
+ * (errno `1049`) is "Unknown database". Disjoint from the auth/host/network sets, so
+ * classification order is immaterial.
+ */
+const DB_NOT_FOUND_CODES: ReadonlySet<string> = new Set([
+  "3D000", // PG: invalid_catalog_name
+  "ER_BAD_DB_ERROR", // MySQL: 1049 (Unknown database)
+]);
+/** MySQL "Unknown database" errno, paired with `ER_BAD_DB_ERROR` above (DW-18). */
+const DB_NOT_FOUND_ERRNO: ReadonlySet<number> = new Set([1049]);
 
 /** Extract the string `code` and numeric `errno` an engine/OS error may carry. */
 function readErrorTags(err: unknown): {
@@ -369,9 +388,11 @@ function readErrorTags(err: unknown): {
 /**
  * Classify a raw engine/OS connection error into a neutral {@link ConnectionFailureKind}.
  * Pure and total: reads the error's `code`/`errno` tags, maps PG SQLSTATE +
- * MySQL codes to `auth`, DNS codes to `host`, refused/reset/timeout to `network`,
- * and defaults anything unrecognized to `network` (never leaks the raw error).
- * Never returns `unsupported_scheme` — that verdict is {@link createDriver}'s alone.
+ * MySQL codes to `auth`, DNS codes to `host`, missing-catalog codes/errno to
+ * `database-does-not-exist` (DW-18), refused/reset/timeout to `network`, and
+ * defaults anything unrecognized to `network` (never leaks the raw error).
+ * Never returns `unsupported_scheme` OR `malformed-url` — both are structural URL
+ * verdicts that are {@link createDriver}'s alone.
  */
 export function classifyConnectionError(err: unknown): ConnectionFailureKind {
   const { code, errno } = readErrorTags(err);
@@ -379,8 +400,11 @@ export function classifyConnectionError(err: unknown): ConnectionFailureKind {
     if (AUTH_CODES.has(code)) return "auth";
     if (HOST_CODES.has(code)) return "host";
     if (NETWORK_CODES.has(code)) return "network";
+    // Missing catalog (DW-18): disjoint from the sets above, so order does not matter.
+    if (DB_NOT_FOUND_CODES.has(code)) return "database-does-not-exist";
   }
   if (errno !== undefined && AUTH_ERRNO.has(errno)) return "auth";
+  if (errno !== undefined && DB_NOT_FOUND_ERRNO.has(errno)) return "database-does-not-exist";
   // Unmapped → network (the safe default per the intent contract).
   return "network";
 }
@@ -432,14 +456,29 @@ export async function withTimeout<T>(op: Promise<T>, ms: number): Promise<T> {
 }
 
 /**
- * Read a URL's scheme (lower-cased, no trailing `:`), or `null` when the string
- * is not a parseable URL at all (e.g. a bare Windows path that even `URL` rejects).
+ * Read a URL's scheme (lower-cased, no trailing `:`) AND whether the URL is
+ * well-formed. On a successful `new URL()` parse: `{ scheme, wellFormed: true }`.
+ * When `new URL()` throws (a bad/out-of-range port or an unparseable authority),
+ * the scheme is RECOVERED structurally via a leading RFC-3986 scheme match so a
+ * malformed-but-supported URL stays distinguishable from a genuinely unsupported
+ * one (DW-21) — `{ scheme, wellFormed: false }`, or `{ scheme: null }` when no
+ * scheme is extractable at all (e.g. a bare Windows path or `://nonsense`).
  */
-function schemeOf(url: string): string | null {
+function schemeOf(url: string): { scheme: string | null; wellFormed: boolean } {
   try {
-    return new URL(url).protocol.replace(/:$/, "").toLowerCase();
+    return { scheme: new URL(url).protocol.replace(/:$/, "").toLowerCase(), wellFormed: true };
   } catch {
-    return null;
+    // new URL() threw (bad/out-of-range port, unparseable authority): recover the
+    // leading RFC-3986 scheme so a malformed-but-supported URL is not misread as
+    // an unsupported scheme. Normalize first to MATCH what the WHATWG parser would
+    // have seen — it strips ASCII tab/newline anywhere and trims leading/trailing
+    // C0-control-or-space — so ` postgres://…:99999/db` still recovers `postgres`
+    // (else the position-0 anchor would miss the scheme past a stray space and
+    // misreport a supported-but-malformed URL as `unsupported_scheme`). `null` when
+    // no scheme is extractable at all.
+    const normalized = url.replace(/[\t\n\r]/g, "").trim();
+    const m = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(normalized);
+    return { scheme: m?.[1] !== undefined ? m[1].toLowerCase() : null, wellFormed: false };
   }
 }
 
@@ -451,13 +490,27 @@ function schemeOf(url: string): string | null {
  * BEFORE any connection is attempted — the sanctioned rejection point for the
  * shallow URL carried from Story 1.2. The scheme name is non-secret, so it is
  * safe to name in the message; the rest of the URL is never echoed.
+ *
+ * A supported scheme whose URL is NOT well-formed (a bad/out-of-range port or an
+ * unparseable authority that makes `new URL()` throw) is a distinct, truthful
+ * verdict — `malformed-url` — NOT `unsupported_scheme`: the scheme IS one we speak,
+ * the URL is merely broken (DW-21). This is caught structurally here, before any
+ * socket opens; the raw URL is never echoed, only the (non-secret) scheme name.
  */
 export function createDriver(url: string): Driver {
-  const scheme = schemeOf(url);
+  // A supported scheme whose URL is malformed (`new URL()` threw) → `malformed-url`,
+  // credential-free and naming only the (non-secret) scheme. Hoisted so the postgres
+  // and mysql branches cannot drift a future wording edit apart.
+  const malformedUrlError = (scheme: string): DriverConnectionError =>
+    new DriverConnectionError("malformed-url", `malformed "${scheme}" database URL (could not be parsed)`);
+
+  const { scheme, wellFormed } = schemeOf(url);
   if (scheme === "postgres" || scheme === "postgresql") {
+    if (!wellFormed) throw malformedUrlError(scheme);
     return createPostgresDriver(url);
   }
   if (scheme === "mysql") {
+    if (!wellFormed) throw malformedUrlError(scheme);
     return createMysqlDriver(url);
   }
   const named = scheme === null ? "" : ` "${scheme}"`;

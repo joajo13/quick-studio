@@ -138,7 +138,8 @@ resolution: already resolved: src/core/driver.ts:401-414 createDriver + schemeOf
 origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
 location: `classifyConnectionError` (`src/core/driver.ts`); `ConnectionFailureKind` (`src/shared/contract.ts`)
 reason: `classifyConnectionError` maps only auth/host/network codes and defaults everything else to `network`. `ConnectionFailureKind` has no bucket for invalid-catalog, so a user who authenticates fine but names a missing database sees the misleading "connection refused, reset, or timed out" message. Real but out of Story 1.3's stated host-vs-auth-vs-network 3-way scope: fixing it correctly means adding a new neutral failure kind to the shared contract (a design decision), not a one-line map widen.
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-connection-failure-taxonomy
 
 ### DW-19: Classify introspection (`listSchema`) failures that occur AFTER a successful handshake into the neutral `ConnectResult` taxonomy instead of letting a raw engine error escape as `internal_error` (HTTP 500)
 
@@ -161,7 +162,8 @@ resolution: resolved by sweep bundle dw-connection-introspection-robustness
 origin: migrated from legacy ledger (code review of spec-1-3-connect-postgres-mysql.md), 2026-07-12
 location: `schemeOf` / `createDriver` (`src/core/driver.ts`)
 reason: `schemeOf` reads the scheme via `new URL(url)`; when the URL is unparseable it returns `null`, and `createDriver` then rejects with `unsupported_scheme`. Confirmed at runtime: `new URL("postgres://host:5432x/db")` and `new URL("postgres://host:99999/db")` both throw `TypeError`, so a supported-scheme URL with a typo'd/out-of-range port yields the message "unsupported database URL scheme (expected postgres or mysql)" — a misleading verdict (the scheme IS supported; the URL is malformed). Real UX papercut, but the 4-kind failure enum has no "malformed URL" bucket, so a correct fix needs a taxonomy/message decision beyond the story's sanctioned wrong-scheme rejection (`file:`/`javascript:`/`data:`/Windows paths).
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-connection-failure-taxonomy
 
 ### DW-22: Surface a persistent `workspace.save` write-failure (disk full / EACCES / app dir removed mid-session) to the user instead of silently `void`-ing the reply, so a developer isn't led to believe their layout is being persisted when every save is failing
 
