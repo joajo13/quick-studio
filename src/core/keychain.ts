@@ -14,6 +14,14 @@
  *  - An unreachable backend (e.g. headless Linux with no Secret Service / D-Bus)
  *    is a first-class `unavailable` result, never a throw and NEVER a silent
  *    plaintext fallback — the caller decides what to do (Story 2.3).
+ *  - A caller programming error — an empty (`""`) or blank (whitespace-only)
+ *    `service` or `account` — is a first-class `invalid-argument` result,
+ *    DISTINCT from `unavailable`. It is a surfaced bug, NOT a missing-backend
+ *    condition, so it must never masquerade as `unavailable` and silently trigger
+ *    the passphrase fallback. Its `detail` names WHICH identifier is bad and, like
+ *    every detail, is secret-free. The guard runs BEFORE any identifier reaches
+ *    the native store, so an unknown native throw still fails safe to `unavailable`
+ *    and the `not-found` path is unchanged.
  *  - Secret VALUES are never logged or embedded in a result's `detail`.
  *
  * This is only enough surface to prove the path. The durable store API (service
@@ -22,27 +30,31 @@
 
 import { Entry } from "@napi-rs/keyring";
 
-/** Outcome of {@link setSecret}: the value was stored, or the backend was unreachable. */
+/** Outcome of {@link setSecret}: the value was stored, an identifier was invalid, or the backend was unreachable. */
 export type KeychainSetResult =
   | { readonly outcome: "stored" }
+  | { readonly outcome: "invalid-argument"; readonly detail: string }
   | { readonly outcome: "unavailable"; readonly detail: string };
 
 /**
- * Outcome of {@link getSecret}: the value was found, there is no such entry, or
- * the backend was unreachable. `not-found` is the null-ish "no error" case.
+ * Outcome of {@link getSecret}: the value was found, there is no such entry, an
+ * identifier was invalid, or the backend was unreachable. `not-found` is the
+ * null-ish "no error" case.
  */
 export type KeychainGetResult =
   | { readonly outcome: "found"; readonly value: string }
   | { readonly outcome: "not-found" }
+  | { readonly outcome: "invalid-argument"; readonly detail: string }
   | { readonly outcome: "unavailable"; readonly detail: string };
 
 /**
  * Outcome of {@link deleteSecret}: an entry was removed, there was nothing to
- * remove, or the backend was unreachable.
+ * remove, an identifier was invalid, or the backend was unreachable.
  */
 export type KeychainDeleteResult =
   | { readonly outcome: "deleted" }
   | { readonly outcome: "not-found" }
+  | { readonly outcome: "invalid-argument"; readonly detail: string }
   | { readonly outcome: "unavailable"; readonly detail: string };
 
 /** Any of the three wrapper results carries this discriminant. */
@@ -118,6 +130,30 @@ export function isNotFoundError(err: unknown): boolean {
 }
 
 /**
+ * Validate the caller-supplied identifiers. Pure and deterministic (no locale
+ * heuristics, unlike {@link isNotFoundError}): returns a secret-free reason
+ * string naming the offending identifier when `service` or `account` is not a
+ * string (e.g. `null`/`undefined` from an untyped/IPC/JSON caller) or is empty
+ * (`""`) or blank (whitespace-only, i.e. `.trim().length === 0`), else `null`.
+ * The non-string check runs FIRST so the subsequent `.trim()` can never throw —
+ * upholding the module's never-throws contract at this defensive boundary (the
+ * `string` type signature does not guard a runtime edge whose whole job is
+ * catching caller bugs). The reason names only the role (`service`/`account`),
+ * never the identifier's contents and never any secret value. Called at the top
+ * of each wrapper so a caller programming error surfaces as `invalid-argument`
+ * instead of throwing or being routed to `unavailable` by a `new Entry(...)` throw.
+ */
+export function validateIdentifiers(service: string, account: string): string | null {
+  if (typeof service !== "string" || service.trim().length === 0) {
+    return "service must be a non-empty, non-blank string";
+  }
+  if (typeof account !== "string" || account.trim().length === 0) {
+    return "account must be a non-empty, non-blank string";
+  }
+  return null;
+}
+
+/**
  * Build the native entry handle. Isolated so the sole `new Entry(...)` call site
  * lives in one place; a throw here (rare — construction is usually lazy) is
  * surfaced by the callers as `unavailable`.
@@ -128,14 +164,18 @@ function openEntry(service: string, account: string): Entry {
 
 /**
  * Store `value` under `(service, account)` in the OS keychain. Returns `stored`
- * on success, or `unavailable` (with a secret-free detail) if the backend could
- * not be reached. Never throws; never writes plaintext anywhere on failure.
+ * on success, `invalid-argument` (with a secret-free detail) if `service`/`account`
+ * is missing/empty/blank, or `unavailable` (with a secret-free detail) if the
+ * backend could not be reached. Never throws; never writes plaintext anywhere on
+ * failure.
  */
 export function setSecret(
   service: string,
   account: string,
   value: string,
 ): KeychainSetResult {
+  const bad = validateIdentifiers(service, account);
+  if (bad) return { outcome: "invalid-argument", detail: bad };
   try {
     openEntry(service, account).setPassword(value);
     return { outcome: "stored" };
@@ -148,9 +188,12 @@ export function setSecret(
 /**
  * Retrieve the value stored under `(service, account)`. Returns `found` with the
  * value, `not-found` if there is no such entry (a null-ish, non-error outcome),
- * or `unavailable` if the backend could not be reached. Never throws.
+ * `invalid-argument` if `service`/`account` is missing/empty/blank, or
+ * `unavailable` if the backend could not be reached. Never throws.
  */
 export function getSecret(service: string, account: string): KeychainGetResult {
+  const bad = validateIdentifiers(service, account);
+  if (bad) return { outcome: "invalid-argument", detail: bad };
   let value: string | null;
   try {
     value = openEntry(service, account).getPassword();
@@ -170,7 +213,8 @@ export function getSecret(service: string, account: string): KeychainGetResult {
 
 /**
  * Delete the entry stored under `(service, account)`. Returns `deleted` if an
- * entry was removed, `not-found` if there was nothing to remove, or
+ * entry was removed, `not-found` if there was nothing to remove,
+ * `invalid-argument` if `service`/`account` is missing/empty/blank, or
  * `unavailable` if the backend could not be reached. Never throws — safe to call
  * unconditionally as a cleanup step.
  */
@@ -178,6 +222,8 @@ export function deleteSecret(
   service: string,
   account: string,
 ): KeychainDeleteResult {
+  const bad = validateIdentifiers(service, account);
+  if (bad) return { outcome: "invalid-argument", detail: bad };
   try {
     const removed = openEntry(service, account).deletePassword();
     return removed ? { outcome: "deleted" } : { outcome: "not-found" };

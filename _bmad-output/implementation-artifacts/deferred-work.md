@@ -98,7 +98,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 2026-07-12
 location: `setSecret` / `getSecret` / `deleteSecret` (keyring spike wrapper)
 reason: `setSecret`/`getSecret`/`deleteSecret` route any thrown error that isn't recognized as not-found straight to `unavailable`, so a programming error (bad service/account) would masquerade as a missing keychain backend and silently trigger Story 2.3's passphrase fallback instead of surfacing the bug. Harmless in Story 2.1 (service/account are hardcoded non-empty constants), but once 2.2 accepts caller-supplied identifiers an argument bug would be indistinguishable from a real keychain outage.
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-keychain-error-classification
 
 ### DW-14: Establish a single-writer guarantee for the credential store — either a cross-process file lock or an OS-level single-instance guard — before two concurrent Core instances (or a re-launch overlapping a slow shutdown) can silently clobber each other's writes or race the master-key generation
 

@@ -8,6 +8,11 @@
  *
  * Isolation: a run-unique service/account keeps concurrent runs from colliding,
  * and an unconditional `afterAll` delete guarantees no residual keychain entry.
+ *
+ * It also covers the identifier guard added for DW-13: `validateIdentifiers` and
+ * the `invalid-argument` outcome that distinguishes a caller programming error
+ * (missing/empty/blank `service`/`account`) from a backend-`unavailable` condition,
+ * including the never-throws boundary for `null`/`undefined`/non-string inputs.
  */
 
 import { afterAll, describe, expect, test } from "bun:test";
@@ -17,6 +22,7 @@ import {
   getSecret,
   isNotFoundError,
   setSecret,
+  validateIdentifiers,
   type KeychainGetResult,
 } from "./keychain.ts";
 
@@ -136,6 +142,109 @@ describe("error classification — the not-found vs unavailable linchpin", () =>
       expect(isNotFoundError(new Error(msg))).toBe(false);
     });
   }
+});
+
+describe("validateIdentifiers — pure, deterministic identifier guard", () => {
+  const invalidCases: ReadonlyArray<{
+    readonly label: string;
+    readonly service: string;
+    readonly account: string;
+    readonly names: string;
+  }> = [
+    { label: "empty service", service: "", account: "acct", names: "service" },
+    { label: "blank service", service: "   ", account: "acct", names: "service" },
+    { label: "empty account", service: "svc", account: "", names: "account" },
+    { label: "blank account", service: "svc", account: "   ", names: "account" },
+  ];
+
+  for (const c of invalidCases) {
+    test(`returns a non-empty reason naming "${c.names}" for ${c.label}`, () => {
+      const reason = validateIdentifiers(c.service, c.account);
+      expect(typeof reason).toBe("string");
+      expect(reason!.length).toBeGreaterThan(0);
+      expect(reason).toContain(c.names);
+    });
+  }
+
+  test("returns null for a valid non-blank (service, account) pair", () => {
+    expect(validateIdentifiers(SERVICE, ACCOUNT)).toBeNull();
+  });
+
+  test("checks service before account when both are invalid", () => {
+    expect(validateIdentifiers("", "")).toContain("service");
+  });
+
+  // The defensive boundary must survive an untyped caller (any/JS/IPC/JSON) that
+  // slips a null/undefined/non-string past the `string` signature: the guard must
+  // classify it (never let `.trim()` throw), upholding the never-throws contract.
+  test("classifies null/undefined/non-string identifiers without ever throwing", () => {
+    expect(() => validateIdentifiers(null as unknown as string, ACCOUNT)).not.toThrow();
+    expect(validateIdentifiers(null as unknown as string, ACCOUNT)).toContain("service");
+    expect(validateIdentifiers(undefined as unknown as string, ACCOUNT)).toContain("service");
+    expect(validateIdentifiers(SERVICE, null as unknown as string)).toContain("account");
+    expect(validateIdentifiers(SERVICE, undefined as unknown as string)).toContain("account");
+    expect(validateIdentifiers(42 as unknown as string, ACCOUNT)).toContain("service");
+    expect(validateIdentifiers(null as unknown as string, null as unknown as string)).toContain(
+      "service",
+    );
+  });
+});
+
+describe("invalid-argument — surfaced programming error, distinct from unavailable", () => {
+  // Each wrapper must reject an empty/blank service or account with a typed
+  // `invalid-argument` result BEFORE touching the native store — never routing a
+  // caller bug through the `unavailable` fail-safe.
+  const wrappers: ReadonlyArray<{
+    readonly name: string;
+    readonly run: (service: string, account: string) => { readonly outcome: string; readonly detail?: string };
+  }> = [
+    { name: "setSecret", run: (s, a) => setSecret(s, a, SECRET) },
+    { name: "getSecret", run: (s, a) => getSecret(s, a) },
+    { name: "deleteSecret", run: (s, a) => deleteSecret(s, a) },
+  ];
+
+  const badIdentifierCases: ReadonlyArray<{
+    readonly label: string;
+    readonly service: string;
+    readonly account: string;
+  }> = [
+    { label: "empty service", service: "", account: ACCOUNT },
+    { label: "blank service", service: "   ", account: ACCOUNT },
+    { label: "empty account", service: SERVICE, account: "" },
+    { label: "blank account", service: SERVICE, account: "   " },
+  ];
+
+  for (const w of wrappers) {
+    for (const c of badIdentifierCases) {
+      test(`${w.name} yields invalid-argument for ${c.label}`, () => {
+        const result = w.run(c.service, c.account);
+        expect(result.outcome).toBe("invalid-argument");
+        expect(typeof result.detail).toBe("string");
+        expect(result.detail!.length).toBeGreaterThan(0);
+      });
+    }
+
+    test(`${w.name} yields invalid-argument (never throws) for a null identifier`, () => {
+      let result: { readonly outcome: string; readonly detail?: string } | undefined;
+      expect(() => {
+        result = w.run(null as unknown as string, ACCOUNT);
+      }).not.toThrow();
+      expect(result!.outcome).toBe("invalid-argument");
+    });
+
+    test(`${w.name} does NOT yield invalid-argument for a valid pair`, () => {
+      const result = w.run(SERVICE, ACCOUNT);
+      expect(result.outcome).not.toBe("invalid-argument");
+    });
+  }
+
+  test("setSecret invalid-argument detail never contains the secret value", () => {
+    const secret = `super-secret-${crypto.randomUUID()}`;
+    const result = setSecret("", "acct", secret);
+    expect(result.outcome).toBe("invalid-argument");
+    if (result.outcome !== "invalid-argument") throw new Error("expected invalid-argument");
+    expect(result.detail).not.toContain(secret);
+  });
 });
 
 describe("formatErrorDetail — single-line, bounded, secret-free", () => {
