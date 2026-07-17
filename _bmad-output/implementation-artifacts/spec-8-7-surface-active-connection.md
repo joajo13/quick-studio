@@ -2,7 +2,11 @@
 title: 'Surface the active connection in Settings/Connections — read-only "current connection" entry for the in-memory Ephemeral target'
 type: 'bug'
 created: '2026-07-16'
-status: 'backlog'
+status: 'done'
+baseline_revision: 'aaaf3d160ca4e861f554cae18ca2872bf787b9b4'
+final_revision: '51877591c7a26c550f05331fa29769da2b17ac9c'
+review_loop_iteration: 0
+followup_review_recommended: false
 context:
   - '{project-root}/bin/quick-studio.ts'
   - '{project-root}/src/core/cli-args.ts'
@@ -15,6 +19,7 @@ context:
   - '{project-root}/src/ui/settings/connections-model.ts'
   - '{project-root}/src/ui/rpc/client.ts'
   - '{project-root}/design-artifacts/connect.html'
+warnings: ['oversized']
 ---
 
 <intent-contract>
@@ -74,49 +79,128 @@ So the active Ephemeral target never lands in the store, the store is what Conne
 
 ## Code Map
 
-- `src/shared/contract.ts` — ADD the credential-free result type for the new method. A ring-neutral mode literal plus the descriptor:
+<!-- Current line numbers reconciled to the post-8-6 tree. -->
+
+- `src/shared/contract.ts` — ADD the credential-free result types. Insert right after `ConnectionSummary` (**lines 364-369**, in the manage-connections section) and before `AddConnectionParams` (**371**):
   ```ts
   export type ConnectionMode = "ephemeral" | "persistent";
   export type ActiveConnectionInfo = {
     readonly mode: ConnectionMode;
     /** Non-sensitive derived identity of the in-memory active target, or null when none is configured. */
     readonly connection: {
-      readonly engine: string;   // URL.protocol without the trailing colon (e.g. "postgres")
-      readonly host: string;     // URL.host (host[:port]) — never userinfo
+      readonly engine: string;    // URL.protocol without the trailing colon (e.g. "postgres")
+      readonly host: string;      // URL.host (host[:port]) — never userinfo
       readonly database?: string; // optional, non-sensitive (URL.pathname sans leading slash); NEVER user/password
     } | null;
   };
   ```
-  Keep `contract.ts` dependency-free — define the mode literal inline here; do NOT import the Core `RunMode`. (The Core `RunMode` in `run-mode.ts` is structurally `"persistent" | "ephemeral"`, assignable to `ConnectionMode`.)
-- `src/core/connection.ts` — ADD a pure, synchronous `describe(): { engine: string; host: string; database?: string } | null` to `ConnectionManager`. It reads the closure-held `databaseUrl`; when null it returns `null`; otherwise `new URL(databaseUrl)` and returns `{ engine: protocol.replace(/:$/,""), host: URL.host, database: pathname.slice(1) || undefined }` — mirroring the registry's `toSummary` derivation (`connection-registry.ts:152-160`). Guard the parse (`try/catch` → `null`) so it is total. The raw url, `username`, and `password` never leave the closure. Do NOT touch `connect`/`getSchema`/`query`/caching/`close` — `describe()` opens no driver.
-- `src/core/rpc.ts` — EXTEND `RpcContext` with `readonly activeConnection: () => ActiveConnectionInfo;` and ADD a `HANDLERS["connection.active"]` entry returning `ctx.activeConnection()` (a plain domain payload → `dispatch` wraps it in `okReply`; no `preformed` needed, no params to validate). NOTE the deliberate SINGULAR `connection.active` namespace (the one live/active connection) vs the PLURAL `connections.*` (the saved-connection registry) — two distinct namespaces.
-- `src/core/server.ts` — in `startCore`, wire the capability onto `rpcContext` (alongside `connect`/`connections`): `activeConnection: () => ({ mode, connection: connectionManager.describe() })`. `mode` is the already-resolved run mode (`server.ts:248`); `connectionManager` already exists (`server.ts:254-257`). No new store, no boot connect, no teardown change.
-- `src/ui/settings/SettingsPanel.tsx` — on mount within the Connections section, ALSO issue `rpc<ActiveConnectionInfo>("connection.active")` (independent of the existing `connections.list` load; its failure must not break the saved list). When the reply's `connection !== null`, render a READ-ONLY "active connection" block at the TOP of the Connections section, styled per `connect.html`'s `.conv.rich` row: an engine glyph, a name/host mono line (`host` + `engine` verbatim via the existing `HostEngine` mono idiom), and a mono mode tag (`ephemeral` / `persistent`) mirroring `.model-btn .mode`. NO edit/remove/confirm controls. Keep the add-form, saved-list rendering, `ConnectionRow`/`EditRow`, error-envelope surfacing, gates, and `data-testid="settings-panel"` unchanged. Use neutral ink tokens (`text-muted-foreground`, `border-border`, `bg-card`, `font-mono`) — no coral, no hardcoded hex.
-- `src/ui/rpc/client.ts` — NO CHANGE. The typed `rpc<T>(method, params?)` already dispatches any method string and returns `RpcReply<T>`; `rpc<ActiveConnectionInfo>("connection.active")` works as-is.
-- `src/ui/settings/connections-model.ts` — NO CHANGE. Pure saved-connections view-model (validation + `applyAdded/Edited/Removed` reducers over `ConnectionSummary`). The active-connection entry is read-only display derived from a separate reply — it is NOT part of the saved-list state, so no reducer/validation change is warranted.
-- `bin/quick-studio.ts` / `src/core/cli-args.ts` / `src/core/connection-registry.ts` — NO CHANGE. Referenced as the confirmed root-cause evidence: the ephemeral positional-arg path (in-memory, never persisted) and the separate credential-store-backed registry the saved list reads from.
-- `design-artifacts/connect.html` — reference only (visual source of truth). The `.conv.rich` saved-row (engine `#ico-postgres`/`#ico-mysql` glyph + `.conv-name` + `.conv-host` mono) is the template for the read-only active-connection entry; `.model-btn .mode` (mono, `--text-faint`) is the template for the `ephemeral`/`persistent` mode tag. The `--coral` token is neutral ink here — consume the app's ink tokens, never a coral hex.
+  The file is dependency-free of Core/ring types (its only import is the sibling *shared* `chart-spec.ts`) — define the mode literal inline; do NOT import the Core `RunMode`. Every field stays `readonly`, matching `ConnectionSummary`.
+- `src/core/connection.ts` — ADD a pure, synchronous `describe(): { engine: string; host: string; database?: string } | null` to `ConnectionManager`. Declare it in the `ConnectionManager` type block (**lines 26-59**) and implement it in the returned object literal (**lines 182-228**), modeled on the existing sync `quoteIdent()` (**204-209**). It reads the closure-held `databaseUrl` (**line 78**); when null it returns `null`; otherwise, in a `try/catch` (→ `null` on parse failure, mirroring `connection-registry.ts`'s `safeSummary` at **172-178**): `const u = new URL(databaseUrl)` and return `{ engine: u.protocol.replace(/:$/, ""), host: u.host, database: u.pathname.slice(1) || undefined }` — reusing the exact `toSummary` derivation (`connection-registry.ts:152-160`). `describe()` needs only `databaseUrl` (not `driver`), so it is safe before any `connect()` and opens NO driver. Do NOT touch `connect`/`getSchema`/`query`/`queryReadOnly`/`quoteIdent`/`close` or any caching.
+- `src/core/rpc.ts` — (1) import `type ActiveConnectionInfo` in the contract import block (**lines 9-20**). (2) EXTEND `RpcContext` (**36-74**) with `readonly activeConnection: () => ActiveConnectionInfo;`. (3) ADD a plain-payload `HANDLERS` entry (**after `connect` at line 141**), matching the `connect` handler style (dispatch wraps the return in `okReply`; no `preformed`, no param validation): `"connection.active": (_params, ctx): ActiveConnectionInfo => ctx.activeConnection(),`. NOTE the deliberate SINGULAR `connection.active` namespace (the one live/active connection) vs the PLURAL `connections.*` (the saved-connection registry) — two distinct namespaces. `methodNames()` (**302-304**) derives from `Object.keys(HANDLERS)`, so the new method surfaces automatically (the `rpc.test.ts` snapshot must add it — see Tasks).
+- `src/core/server.ts` — in `startCore`, wire the capability onto the per-request `rpcContext` object literal (**lines 429-448**, after `connect` at **435**): `activeConnection: () => ({ mode, connection: connectionManager.describe() })`. `mode` is the already-resolved run mode (**line 248**) and `connectionManager` already exists (**254-257**); both are captured from the enclosing closure. No new store, no boot connect, no teardown change.
+- `src/ui/settings/SettingsPanel.tsx` — ADD a SECOND, independent mount effect (right after the existing `connections.list` effect at **222-238**) issuing `rpc<ActiveConnectionInfo>("connection.active")` into its own local state (do NOT touch `loading`/`listLoaded`/`busy` — those gate saved-list mutations; the active entry is read-only and its load failure must not break the saved list). When the reply's `connection !== null`, render a READ-ONLY "active connection" block at the TOP of the Connections body — insert between the error banner (closes **line 349**) and the `{/* Add form */}` (**351**). Build it with the existing neutral idioms: a labelled block ("active connection") wrapping the row shell from `ConnectionRow` (**line 155**: `flex items-center justify-between gap-3 rounded-[var(--radius)] border border-border bg-card px-3 py-2`), a mono host/engine line reusing the `HostEngine` idiom (**42-49**: `font-mono text-xs text-muted-foreground` → `{host} · {engine}`), and a mono mode tag (`font-mono text-[11px] text-muted-foreground` → `ephemeral`/`persistent`, mirroring `.model-btn .mode`). NO edit/remove/confirm controls (distinct from `ConnectionRow`). Keep the add-form (**351-383**), saved-list rendering (**386-412**), `ConnectionRow`/`EditRow`, `ErrorLine`/`envelopeText` surfacing (**204-206, 345-349**), all gates, and `data-testid="settings-panel"` (**299**) unchanged. Import `ActiveConnectionInfo` from `contract.ts`. Use neutral ink tokens only (`text-muted-foreground`, `text-foreground`, `border-border`, `bg-card`, `font-mono`) — no coral, no hardcoded hex.
+- `src/ui/rpc/client.ts` — NO CHANGE. `rpc<T>(method: string, params?: unknown): Promise<RpcReply<T>>` (**line 39**) already dispatches any method string and returns a typed envelope; `rpc<ActiveConnectionInfo>("connection.active")` works as-is (no params).
+- `src/ui/settings/connections-model.ts` — NO CHANGE. Pure saved-connections view-model (`validateDraft` + `loadConnections`/`applyAdded`/`applyEdited`/`applyRemoved` over `ConnectionSummary`). The active-connection entry is read-only display derived from a SEPARATE reply — not part of the saved-list state, so no reducer/validation change.
+- `src/core/connection-registry.ts` — NO CHANGE. Reference only: `toSummary` (**152-160**, engine/host derivation to mirror) and `safeSummary` (**172-178**, the guarded try/catch → degrade pattern). Confirms the ephemeral store-empty behavior is by design.
+- `bin/quick-studio.ts` / `src/core/cli-args.ts` — NO CHANGE. Confirmed root-cause evidence (the ephemeral positional-arg in-memory path, never persisted).
+- `design-artifacts/connect.html` — reference only (visual source of truth). The `.conv.rich` saved-row (**markup 647-664**, **CSS 218-227**: `.eng-icon` glyph + `.conv-name` + mono `.conv-host`) is the template for the read-only active entry; `.model-btn .mode` (**CSS line 366**: mono, `--text-faint`) is the template for the `ephemeral`/`persistent` tag. Coral tokens in this file are already neutralized to ink (`--coral: #ececec; /* ink — neutral, was coral */`) — consume the app's ink tokens, never a coral hex.
 - Regenerate the UI bundle via `bun run build` so `src/core/ui-bundle.generated.ts` reflects the new Settings block.
 
-## Acceptance Criteria
+## Tasks & Acceptance
+
+**Execution:** (ordered by dependency — the contract type lands first so Core and UI both compile against it)
+
+- [x] `src/shared/contract.ts` — add `ConnectionMode` and `ActiveConnectionInfo` after `ConnectionSummary` (364-369). Inline mode literal; no `RunMode` import; all fields `readonly`.
+- [x] `src/core/connection.ts` — add a pure sync `describe()` to the `ConnectionManager` type (26-59) and returned literal (182-228): reads closure `databaseUrl` (78); `null` when absent; else `new URL()` in a try/catch (→ null) deriving `{ engine: protocol sans trailing colon, host: URL.host, database: pathname.slice(1) || undefined }`. Opens NO driver; touches no cache/other method.
+- [x] `src/core/rpc.ts` — import `type ActiveConnectionInfo`; add `activeConnection: () => ActiveConnectionInfo` to `RpcContext` (36-74); add plain-payload handler `"connection.active"` after `connect` (141), returning `ctx.activeConnection()`. No param validation.
+- [x] `src/core/server.ts` — add `activeConnection: () => ({ mode, connection: connectionManager.describe() })` to the `rpcContext` literal (429-448, after 435). Uses existing `mode` (248) + `connectionManager` (254). No store/boot/teardown change.
+- [x] `src/ui/settings/SettingsPanel.tsx` — add a second independent `connection.active` mount effect + local state (after 238); render the read-only active-connection block (host · engine mono via the `HostEngine` idiom + mono mode tag + "active connection" label, `ConnectionRow` shell classes, no action buttons) at the top of the Connections body (between 349 and 351) only when `connection !== null`. Neutral ink tokens only. Everything else (gates, add form, saved list, error surfacing, testids) untouched.
+- [x] `src/core/connection.test.ts` — EXTEND with `describe()` coverage using the `fakeDriver` spy (29-64): returns `{ engine, host, database }` for a configured url and `JSON.stringify` contains no password/userinfo substring (mirror 97/253); returns `null` when `databaseUrl` absent; returns `null` (never throws) on an unparseable url; asserts `counts.factory === 0` after `describe()` (no driver opened — mirror 123-143). (Covers the I/O-matrix Core rows.)
+- [x] `src/core/rpc.test.ts` — EXTEND: add `activeConnection` to `stubCtx` (92-138); add `"connection.active"` to the `methodNames()` snapshot (165-183, right after `"connect"`); add a dispatch test (modeled on the `connect` tests 192-219) asserting `reply.ok` + `{ mode, connection }` shape and that the serialized reply contains no password/user/full-url substring.
+- [x] `src/core/server.test.ts` — EXTEND: boot `startCore` with a `databaseUrl` (mirror 347-350) and POST `connection.active` via the token helper (322-328); assert `reply.result.connection` equals the derived `{ engine, host, database }`, `reply.result.mode === "ephemeral"`, and the raw response body does not contain the password substring (mirror 392/514-515/555); a persistent boot with no `databaseUrl` returns `connection: null`.
+- [x] `bun run build` — regenerate `src/core/ui-bundle.generated.ts` with the new Settings block.
+
+**Acceptance Criteria:**
 
 - Given the app running in **Ephemeral mode** against a live DB (connection string passed as a positional CLI arg), when the user opens Settings → Connections, then a **read-only "active connection" entry** appears showing the **engine**, **host** (host:port), and **mode = `ephemeral`**, visually distinct from saved connections and carrying no edit/remove actions. **Verify live at http://127.0.0.1:6061.**
 - Given any `connection.active` reply, when its raw bytes are inspected, then they contain **no password, no user/userinfo, and no full url** — only `engine`, `host`, `mode` (and, if included, a non-sensitive `database` name).
 - Given a **Persistent** boot with no ephemeral url, when Settings → Connections opens, then **no active-connection entry** is rendered (or a muted "no active connection" note), and the saved-connections list renders exactly as before.
 - Given the active-connection entry, then it is **read-only** (no edit, no remove) and rendering it does **not** force a driver `connect` or a database round-trip.
 - Given the saved-connection flows (add / edit / remove) and the `connections.*` RPC + credential store, when exercised, then behavior is **byte-identical** to before this story and the **existing test suite passes** with no test changes required to pass.
-- Given the active-connection entry, then it matches the neutral, ink-accented look of `design-artifacts/connect.html`'s `.conv.rich` row (engine glyph + name/host mono + mode tag), uses only the neutral ink tokens, and stays legible in both light and dark themes — no coral, no hardcoded accent hex.
+- Given the active-connection entry, then it matches the neutral, ink-accented look of `design-artifacts/connect.html`'s `.conv.rich` row (name/host mono + mode tag), uses only the neutral ink tokens, and stays legible in both light and dark themes — no coral, no hardcoded accent hex.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-07-17 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2: (high 0, medium 0, low 2)
+- defer: 1
+- reject: 5
+- addressed_findings:
+  - `[low]` `[patch]` `describe()` derived a credential-free descriptor for a parseable-but-hostless url (e.g. `postgres:///shop`), returning `host: ""` that flowed unguarded to the UI as a stray `" · engine"` separator with no host — while the saved-connection path's `checkUrl` (`connection-registry.ts:141`) deliberately rejects hostless urls so its derivation is "always meaningful". Added the mirroring guard `if (u.host.length === 0) return null;` so an empty-host target collapses into the clean "no active entry" path; added an additive `connection.test.ts` case. (`src/core/connection.ts`, `src/core/connection.test.ts`)
+  - `[low]` `[patch]` The `ActiveConnectionInfo` doc comment read "the DB the session is browsing", which overpromised: `activeConnection` reflects the in-memory *boot* target only, so a Persistent boot (per-target browsing chosen per-request, Story 6.2) legitimately yields `connection: null`. Tightened the comment to say "the ephemeral boot target held in Core memory … `null` … e.g. a Persistent boot, where per-target browsing is chosen per-request and not surfaced here" — precise, no behavior change (the persistent→null behavior is by the spec's I/O matrix). (`src/shared/contract.ts`)
+
+Rejected (5 — noise / by-design / verified-safe): the once-on-mount load never refreshing (BY DESIGN — the ephemeral boot target is immutable for the session lifetime, so a single load is correct; refresh only matters for the deferred persistent per-target surfacing); the `new URL()` derivation appearing in three sites (`toSummary`, `describe`, the test fake) (deliberate mirroring per the spec's "reuse the `toSummary` derivation" instruction; extracting a shared helper would touch the "never modify" registry file for marginal benefit and is scope creep); no `SettingsPanel` component test for the render branch (the repo has NO component-test harness — SettingsPanel is covered only by pure model tests, matching Story 8-6's accepted posture; the security-critical credential-free boundary is proven at the Core layer by `rpc.test.ts`/`server.test.ts` byte assertions, which is where any leak would originate); a Core error rendering identically to "no active connection" (BY DESIGN — the I/O matrix "RPC transport failure → active entry simply absent"; `rpc()` never rejects); and a percent-encoded/multi-segment `database` showing encoded (the UI does NOT render `database` at all — it shows host · engine + mode only — so there is no visible consumer, and the field is non-sensitive by construction).
+
+Deferred (1): surfacing the active connection in **Persistent** mode's per-target browsing (Story 6.2 `createConnectionTargets` resolves separate managers per saved-connection `connectionId`; the boot manager never sees them, so `connection.active` shows nothing while a saved DB is actively browsed). Out of this story's scope — the intent is explicitly the ephemeral in-memory boot target, and the I/O matrix defines persistent→null as correct. Logged to `deferred-work.md`.
+
+## Design Notes
+
+**Two Core-side holders, one new read-only bridge.** The active target lives in the connection-*manager* closure (in-memory, never persisted); the saved list lives in the connection-*registry* over the credential store (empty in Ephemeral mode). They are correctly disjoint — this story does NOT merge them. It adds a single, additive, read-only bridge (`connection.active`) that derives a credential-free descriptor from the in-memory url and hands it to the UI as a distinct entry. Singular `connection.active` (the one live target) is deliberately a different namespace from plural `connections.*` (the saved registry).
+
+**Credential-free by construction, mirroring `ConnectionSummary`.** `describe()` returns only `engine`/`host`/`database` derived via `URL.protocol`/`URL.host`/`URL.pathname` — none of which can contain userinfo. The raw url, `username`, and `password` never leave the manager closure. This reuses `connection-registry.ts`'s `toSummary` derivation (152-160) and its `safeSummary` guarded-total posture (172-178: try/catch → degrade), so an unparseable url yields `null`, never a throw. The tests assert both the negative (no secret substring in the serialized reply) and positive (exact key set) invariants, matching the Story 2.4 trust-boundary tests.
+
+**No engine glyph is introduced — the shipped UI has none.** `connect.html`'s `.conv.rich` row shows an `.eng-icon` SVG, but the *shipped* Settings UI renders engine identity as neutral mono TEXT via `HostEngine` (`{host} · {engine}`), with no engine sprite anywhere in `src/ui`. To stay convention-matching and avoid porting an unshipped sprite (scope creep), the active entry reuses that same mono text idiom. The intent's "visually distinct" requirement is satisfied by the **"active connection" label + the mono mode tag + read-only (no action buttons)**, not by a glyph the saved rows themselves lack. Porting the sprite would be a purely-cosmetic follow-up, not required here.
+
+**The active-entry load is independent of the saved-list load.** A second mount effect issues `connection.active` into its own state; it deliberately does not touch `loading`/`listLoaded`/`busy`. So a `connection.active` transport failure leaves the active entry simply absent while the saved-connections list (and its mutation gates) behave exactly as before — the two concerns never entangle.
+
+**Example — `describe()` (pure, sync, ~8 lines):**
+```ts
+describe(): { engine: string; host: string; database?: string } | null {
+  if (databaseUrl === null) return null;
+  try {
+    const u = new URL(databaseUrl);
+    return { engine: u.protocol.replace(/:$/, ""), host: u.host, database: u.pathname.slice(1) || undefined };
+  } catch {
+    return null;
+  }
+}
+```
 
 ## Verification
 
 **Commands:**
-- `bunx tsc --noEmit` — expected: no type errors (new `ActiveConnectionInfo`/`ConnectionMode` type; new `RpcContext.activeConnection`; new `ConnectionManager.describe()`).
+- `bunx tsc --noEmit` — expected: no type errors (new `ActiveConnectionInfo`/`ConnectionMode`; new `RpcContext.activeConnection`; new `ConnectionManager.describe()`; the `stubCtx` and `rpcContext` literals gain the member).
 - `bun test` — expected: all existing suites stay green, plus new coverage:
-  - `src/core/connection.test.ts` — `describe()` returns `{ engine, host }` for a configured url (assert engine/host derived, and that no `username`/`password` string appears in the returned object); returns `null` when `databaseUrl` is absent; returns `null` (never throws) on an unparseable url; `describe()` opens no driver (fake-driver `connect` spy not called).
-  - `src/core/rpc.test.ts` — `connection.active` dispatches to `okReply` with `{ mode, connection }`; the serialized reply contains no password/user/full-url substring (credential-free byte assertion, mirroring the Story 2.4 trust-boundary tests); unknown-method path unaffected.
-  - Server-wiring check (in `server.ts`'s test surface if present) — `connection.active` returns `mode:"ephemeral"` + a derived `connection` when booted with a `databaseUrl`, and `connection:null` when booted without one.
+  - `src/core/connection.test.ts` — `describe()` derives `{ engine, host, database }` (no `username`/`password` substring in the returned object); `null` when `databaseUrl` absent; `null` (never throws) on an unparseable url; `counts.factory === 0` after `describe()` (no driver opened).
+  - `src/core/rpc.test.ts` — `connection.active` dispatches to `okReply` with `{ mode, connection }`; serialized reply contains no password/user/full-url substring; `methodNames()` snapshot updated with `"connection.active"`; unknown-method path unaffected.
+  - `src/core/server.test.ts` — end-to-end: `connection.active` returns `mode:"ephemeral"` + derived `connection` when booted with a `databaseUrl` (raw body carries no password), and `connection:null` when booted without one.
 - `bun run build` — expected: OK; `src/core/ui-bundle.generated.ts` regenerates with the new Settings block.
 
-**Manual checks:**
-- Launch the app in **Ephemeral mode** against a real DB with the connection string as a positional arg (browser opens at http://127.0.0.1:6061). Open Settings → Connections and confirm: the **active connection** appears as a read-only entry (engine · host · `ephemeral`), distinct from any saved connections, with **no password or url shown** and **no edit/remove** controls. Toggle the theme and confirm the entry stays legible (no white-on-white / dark-on-dark).
+**Manual checks (live at http://127.0.0.1:6061):**
+- Launch in **Ephemeral mode** against a real DB with the connection string as a positional arg. Open Settings → Connections and confirm: the **active connection** appears as a read-only entry (engine · host · `ephemeral`), distinct from any saved connections, with **no password or url shown** and **no edit/remove** controls. Toggle the theme and confirm the entry stays legible (no white-on-white / dark-on-dark).
 - Launch in **Persistent mode** with no ephemeral url: confirm no active-connection entry (or a muted note) and that the saved list still adds/edits/removes exactly as before.
+
+## Auto Run Result
+
+Status: done
+
+**Implemented change:** Closed the UX gap behind user complaint #13 by surfacing the currently-active (Ephemeral, in-memory) connection as a READ-ONLY "active connection" entry at the top of Settings → Connections — without persisting it or weakening any trust boundary. Added a small additive Core RPC `connection.active`: the connection manager gained a pure, synchronous `describe()` that derives a credential-free `{ engine, host, database? }` from the closure-held url via `new URL()` (opening no driver, mutating nothing), and a new handler returns that alongside the run `mode`. The UI loads it via a second, independent mount effect and renders a labelled, action-free neutral-ink row (host · engine mono + mono mode tag), leaving the saved-connections surface byte-identical. The ephemeral-vs-persisted split (the store staying empty in Ephemeral mode) is preserved as the intended no-write guarantee.
+
+**Files changed:**
+- `src/shared/contract.ts` — new credential-free types `ConnectionMode` (inline literal, no Core `RunMode` import) + `ActiveConnectionInfo`; doc comment tightened to say the descriptor is the ephemeral boot target (persistent → null).
+- `src/core/connection.ts` — pure sync `describe()` on `ConnectionManager`: derives `{ engine, host, database? }` from the in-memory url; returns `null` when no url / unparseable / hostless (host guard mirrors the registry's `checkUrl`); opens no driver.
+- `src/core/rpc.ts` — `RpcContext.activeConnection` + plain-payload `HANDLERS["connection.active"]` (singular namespace, distinct from plural `connections.*`).
+- `src/core/server.ts` — wired `activeConnection: () => ({ mode, connection: connectionManager.describe() })` onto the rpc context.
+- `src/ui/settings/SettingsPanel.tsx` — second independent `connection.active` mount effect + local state; read-only active-connection block at the top of Connections (neutral ink, no edit/remove); saved list, gates, error surfacing, and `data-testid="settings-panel"` untouched.
+- `src/core/connection.test.ts`, `src/core/rpc.test.ts`, `src/core/server.test.ts`, `src/core/connection-targets.test.ts` — additive coverage (derivation + credential-free byte assertions + no-driver-opened + null/hostless/persistent cases; `methodNames()` snapshot + `stubCtx` updated; test-double `describe()`).
+- `src/core/*-bundle.generated.ts` — regenerated via `bun run build`.
+
+**Review findings breakdown:** 2 patches applied (both low: added the hostless-url guard to `describe()` so an empty host collapses into the clean "no active entry" path, mirroring the registry's `checkUrl`; tightened the `ActiveConnectionInfo` doc comment so it no longer overpromises "the DB the session is browsing"). 1 deferred (surfacing the active connection for Persistent per-target browsing — out of this story's ephemeral scope; logged to `deferred-work.md`). 5 rejected (once-on-mount load = by-design for the immutable ephemeral target; URL-derivation triplication = deliberate mirroring per spec; no component test = no harness exists and the credential boundary is Core-tested; error-≡-empty = by the I/O matrix; encoded `database` = not rendered, non-sensitive). No intent_gap, no bad_spec, no loopback (`review_loop_iteration` stayed 0).
+
+**Verification:** `bunx tsc --noEmit` clean; `bun test` 1167 pass / 0 fail across 70 files (2901 expect() calls); `bun run build` OK (regenerated the UI/sandbox/snapshot/live-report bundles). The credential-free guarantee is asserted at the Core boundary (`rpc.test.ts` + `server.test.ts` byte checks: no password / user / full-url on the wire) and `describe()` is proven to open no driver (`counts.factory === 0`). Live visual/interaction check at http://127.0.0.1:6061 (the epic's fidelity gate — theme legibility, distinctness from saved rows) NOT performed in this unattended run (no DB/launcher on this box) — deferred to manual verification.
+
+**Residual risks:** Low. The change is additive and the security-critical boundary is Core-tested. The unattended run cannot self-confirm (a) the live visual fidelity against `design-artifacts/connect.html` in light + dark themes, and (b) the deferred Persistent-mode per-target surfacing (by design out of scope). The read-only entry reuses the shipped `HostEngine` mono text idiom rather than porting `connect.html`'s engine glyph (no engine sprite exists in the shipped UI) — distinctness comes from the "active connection" label + mode tag + absence of action controls.

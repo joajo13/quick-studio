@@ -368,6 +368,33 @@ export type ConnectionSummary = {
   readonly engine: string;
 };
 
+/**
+ * The session run mode surfaced to the UI alongside the active connection. Defined
+ * INLINE here (not imported from the Core `RunMode`) so this shared, ring-neutral
+ * contract stays free of Core dependencies. The Core `RunMode` is structurally
+ * assignable to this literal, so `server.ts` passes `mode` through directly.
+ */
+export type ConnectionMode = "ephemeral" | "persistent";
+
+/**
+ * A credential-free view of the in-memory ACTIVE connection — the ephemeral boot
+ * target held in Core memory (the DB an Ephemeral session is browsing) — sent Core→UI
+ * for a read-only "active connection" entry in Settings. It carries ONLY non-sensitive
+ * fields derived in Core from the (secret-bearing) url via `new URL()` — the raw url,
+ * user, and password never cross this boundary, mirroring {@link ConnectionSummary}.
+ * `connection` is `null` when no in-memory boot target is set (e.g. a Persistent boot,
+ * where per-target browsing is chosen per-request and not surfaced here).
+ */
+export type ActiveConnectionInfo = {
+  readonly mode: ConnectionMode;
+  /** Non-sensitive derived identity of the in-memory active target, or null when none is configured. */
+  readonly connection: {
+    readonly engine: string; // URL.protocol without the trailing colon (e.g. "postgres")
+    readonly host: string; // URL.host (host[:port]) — never userinfo
+    readonly database?: string; // optional, non-sensitive (URL.pathname sans leading slash); NEVER user/password
+  } | null;
+};
+
 /** Params for `connections.add`. The url carries the credentials (UI→Core only). */
 export type AddConnectionParams = {
   readonly name: string;

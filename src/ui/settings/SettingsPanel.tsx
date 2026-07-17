@@ -12,7 +12,7 @@
  */
 
 import { useEffect, useState } from "react";
-import type { ConnectionSummary, RpcErrorEnvelope } from "../../shared/contract.ts";
+import type { ActiveConnectionInfo, ConnectionSummary, RpcErrorEnvelope } from "../../shared/contract.ts";
 import { rpc } from "../rpc/client.ts";
 import { ProvidersPanel } from "./ProvidersPanel.tsx";
 import {
@@ -217,6 +217,11 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
   const [addDraft, setAddDraft] = useState<Draft>(emptyDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [section, setSection] = useState<SettingsSection>("connections");
+  // The in-memory active connection (Story 8.7). Loaded by a SECOND, independent mount
+  // effect below — deliberately NOT tied to `loading`/`listLoaded`/`busy` (those gate the
+  // saved-list mutations). A `connection.active` failure leaves this null (entry absent)
+  // without disturbing the saved list. Read-only display; never part of the saved state.
+  const [active, setActive] = useState<ActiveConnectionInfo | null>(null);
 
   // Load the list once on mount via the proven token-gated channel.
   useEffect(() => {
@@ -231,6 +236,20 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
         setError(envelopeText(reply.error));
       }
       setLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Load the read-only active connection INDEPENDENTLY of the saved list (Story 8.7).
+  // Its own state, its own effect — a failure here must not touch `loading`/`listLoaded`/
+  // `busy` nor break the saved list; the active entry simply stays absent.
+  useEffect(() => {
+    let alive = true;
+    void rpc<ActiveConnectionInfo>("connection.active").then((reply) => {
+      if (!alive) return;
+      if (reply.ok) setActive(reply.result);
     });
     return () => {
       alive = false;
@@ -345,6 +364,22 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
         {error !== null ? (
           <div className="rounded-[var(--radius)] border border-err-line bg-err-soft px-3 py-2">
             <ErrorLine text={error} />
+          </div>
+        ) : null}
+
+        {/* Active connection (read-only) — the in-memory target the session is browsing
+            (Story 8.7). Distinct from the saved list: labelled, no edit/remove controls. */}
+        {active !== null && active.connection !== null ? (
+          <div className="flex flex-col gap-2">
+            <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-muted-foreground">
+              active connection
+            </span>
+            <div className="flex items-center justify-between gap-3 rounded-[var(--radius)] border border-border bg-card px-3 py-2">
+              <span className="truncate font-mono text-xs text-muted-foreground">
+                {active.connection.host} · {active.connection.engine}
+              </span>
+              <span className="shrink-0 font-mono text-[11px] text-muted-foreground">{active.mode}</span>
+            </div>
           </div>
         ) : null}
 

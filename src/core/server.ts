@@ -433,6 +433,9 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         requestShutdown: () => setTimeout(onShutdownRequested, 0),
         // Idempotent open+introspect; a live connection is reused across calls.
         connect: () => connectionManager.connect(),
+        // Read-only descriptor of the in-memory active target + run mode (Story 8.7).
+        // Pure: derives from the held url, opens no driver, mutates nothing.
+        activeConnection: () => ({ mode, connection: connectionManager.describe() }),
         // Manage-connections registry (lazily opens the store on first call).
         connections: connectionRegistry,
         // Workspace-state registry (lazily opens the store on first call).

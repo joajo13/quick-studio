@@ -432,6 +432,64 @@ describe("connect RPC through the gate (Story 1.3)", () => {
     await c.stop();
     expect(closes).toBe(1);
   });
+
+  test("connection.active on an ephemeral boot returns the derived, credential-free descriptor + mode", async () => {
+    const factory: DriverFactory = () => ({
+      async connect() {},
+      async listSchema() {
+        return FAKE_SCHEMA;
+      },
+      async query() {
+        return { columns: [], rows: [] };
+      },
+      async queryReadOnly() {
+        return { columns: [], rows: [] };
+      },
+      quoteIdent(ident: string) {
+        return `"${ident}"`;
+      },
+      async close() {},
+    });
+    const c = await startCore(0, {
+      databaseUrl: "postgres://alice:s3cret@db.example.com:5432/shop",
+      createDriver: factory,
+      mode: "ephemeral",
+    });
+    try {
+      const res = await rpc(c, { method: "connection.active" });
+      const raw = await res.text();
+      expect(res.status).toBe(200);
+      // The active read must NOT force a driver open (pure derivation from the held url).
+      const reply = JSON.parse(raw);
+      expect(reply.ok).toBe(true);
+      expect(reply.result.mode).toBe("ephemeral");
+      expect(reply.result.connection).toEqual({
+        engine: "postgres",
+        host: "db.example.com:5432",
+        database: "shop",
+      });
+      // Credential-free bytes: no password, no user, no full url on the wire.
+      expect(raw).not.toContain("s3cret");
+      expect(raw).not.toContain("alice");
+      expect(raw).not.toContain("postgres://");
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test("connection.active on a persistent boot with no url returns connection:null", async () => {
+    const c = await startCore(0, { mode: "persistent" });
+    try {
+      const res = await rpc(c, { method: "connection.active" });
+      const reply = await res.json();
+      expect(res.status).toBe(200);
+      expect(reply.ok).toBe(true);
+      expect(reply.result.mode).toBe("persistent");
+      expect(reply.result.connection).toBeNull();
+    } finally {
+      await c.stop();
+    }
+  });
 });
 
 describe("renderIndexHtml exposure injection", () => {

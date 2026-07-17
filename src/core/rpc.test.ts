@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type {
+  ActiveConnectionInfo,
   ConnectResult,
   ConnectionSummary,
   ExecuteResult,
@@ -124,6 +125,12 @@ function stubCtx(
       ctx.connectCalls++;
       return connectResult;
     },
+    activeConnection(): ActiveConnectionInfo {
+      return {
+        mode: "ephemeral",
+        connection: { engine: "postgres", host: "db.example.com:5432", database: "shop" },
+      };
+    },
     async tableRows(): Promise<RpcReply<TableRowsResult>> {
       ctx.tableRowsCalls++;
       return tableRowsReply;
@@ -167,6 +174,7 @@ describe("rpc dispatch", () => {
       "health",
       "shutdown",
       "connect",
+      "connection.active",
       "connections.list",
       "connections.add",
       "connections.edit",
@@ -215,6 +223,23 @@ describe("rpc dispatch", () => {
         failure: "auth",
         message: "the database rejected the provided credentials",
       });
+    }
+  });
+
+  test("connection.active dispatches to ctx.activeConnection and returns a credential-free {mode, connection}", async () => {
+    const reply = await dispatch({ method: "connection.active" }, stubCtx());
+
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      expect(reply.result).toEqual({
+        mode: "ephemeral",
+        connection: { engine: "postgres", host: "db.example.com:5432", database: "shop" },
+      });
+      // Credential-free boundary: the serialized reply carries no user/password/full-url.
+      const serialized = JSON.stringify(reply);
+      expect(serialized).not.toContain("password");
+      expect(serialized).not.toContain("postgres://");
+      expect(serialized).not.toContain("@");
     }
   });
 });

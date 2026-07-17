@@ -30,6 +30,14 @@ function fakeManager(url: string) {
     },
     queryReadOnly: async (): Promise<DriverQueryResult> => ({ columns: [], rows: [], rowsAffected: 0 }),
     quoteIdent: (i: string) => `"${i}"`,
+    describe: () => {
+      try {
+        const u = new URL(url);
+        return { engine: u.protocol.replace(/:$/, ""), host: u.host, database: u.pathname.slice(1) || undefined };
+      } catch {
+        return null;
+      }
+    },
     close: async () => {
       closed = true;
     },

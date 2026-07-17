@@ -54,6 +54,15 @@ export type ConnectionManager = {
    * open driver (call after {@link ConnectionManager.getSchema}); throws otherwise.
    */
   quoteIdent(ident: string): string;
+  /**
+   * Derive a credential-free descriptor of the in-memory active target from the
+   * closure-held url (Story 8.7). Pure + synchronous: opens NO driver, forces no
+   * `connect`, mutates no cached state. Returns `null` when no url is configured, the
+   * url is unparseable, or the url is hostless (guarded, degrade-not-throw). Exposes ONLY `engine`/`host`
+   * (+ optional non-sensitive `database`) — the raw url, user, and password never
+   * leave this closure, mirroring the {@link ConnectionSummary} boundary.
+   */
+  describe(): { engine: string; host: string; database?: string } | null;
   /** Close any open driver. Idempotent; swallows teardown errors. */
   close(): Promise<void>;
 };
@@ -206,6 +215,20 @@ export function createConnectionManager(
         throw new Error("quoteIdent requires an open connection");
       }
       return driver.quoteIdent(ident);
+    },
+
+    describe(): { engine: string; host: string; database?: string } | null {
+      if (databaseUrl === null) return null;
+      try {
+        const u = new URL(databaseUrl);
+        // Reject a hostless url (e.g. `foo:///bar`) so the derived `host` is always
+        // meaningful — mirrors the registry's `checkUrl` host guard (connection-registry.ts).
+        // Collapses the empty-host case into the clean "no active entry" path.
+        if (u.host.length === 0) return null;
+        return { engine: u.protocol.replace(/:$/, ""), host: u.host, database: u.pathname.slice(1) || undefined };
+      } catch {
+        return null;
+      }
     },
 
     async close(): Promise<void> {

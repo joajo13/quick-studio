@@ -10,6 +10,7 @@ import {
   FROZEN_SCHEMA_VERSION,
   errorReply,
   okReply,
+  type ActiveConnectionInfo,
   type ConnectResult,
   type ExecuteResult,
   type HealthResult,
@@ -37,6 +38,13 @@ export type RpcContext = {
   readonly requestShutdown: () => void;
   /** Open + introspect the Core's connection, resolving a neutral outcome payload. */
   readonly connect: () => Promise<ConnectResult>;
+  /**
+   * Read the credential-free descriptor of the in-memory ACTIVE connection + run mode
+   * (Story 8.7). A PURE read: derives from the already-held url, opens no driver, forces
+   * no `connect`, mutates nothing. Only `engine`/`host`/`mode` (+ optional non-sensitive
+   * `database`) cross this boundary — the raw url, user, and password never leave Ring 1.
+   */
+  readonly activeConnection: () => ActiveConnectionInfo;
   /** Manage-connections registry: list/add/edit/remove over the credential store. */
   readonly connections: ConnectionRegistry;
   /** Workspace-state registry: load/save the Panel-sizes + open-Tabs snapshot. */
@@ -139,6 +147,13 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
    * failures — is a normal OK payload; only a genuine bug rejects → internal_error.
    */
   connect: (_params, ctx): Promise<ConnectResult> => ctx.connect(),
+  /**
+   * Read the credential-free descriptor of the in-memory ACTIVE connection + run mode
+   * (Story 8.7). SINGULAR `connection.active` (the one live target) is a DISTINCT namespace
+   * from the PLURAL `connections.*` (the saved-connection registry). Plain-payload handler:
+   * dispatch wraps the return in `okReply`; no `preformed`, no param validation — a pure read.
+   */
+  "connection.active": (_params, ctx): ActiveConnectionInfo => ctx.activeConnection(),
   /**
    * Manage-connections CRUD. Each entry shape-checks its `params` (the boundary
    * passes `params: unknown`) → `bad_request` on a missing/ill-typed field, then

@@ -310,4 +310,46 @@ describe("connection manager", () => {
     // A rejecting driver.close() must not propagate — else server.stop() never releases the port.
     await expect(mgr.close()).resolves.toBeUndefined();
   });
+
+  test("describe() derives {engine, host, database} from the in-memory url — no driver opened, no secret", () => {
+    const { factory, counts } = fakeDriver({ schema: SAMPLE_SCHEMA });
+    const mgr = createConnectionManager({
+      databaseUrl: "postgres://alice:s3cret@db.example.com:5432/shop",
+      createDriver: factory,
+    });
+
+    const descriptor = mgr.describe();
+    expect(descriptor).toEqual({ engine: "postgres", host: "db.example.com:5432", database: "shop" });
+    // Credential-free by construction: no userinfo, no password anywhere in the reply.
+    const serialized = JSON.stringify(descriptor);
+    expect(serialized).not.toContain("alice");
+    expect(serialized).not.toContain("s3cret");
+    // Pure read: derives from the held url only — the driver is NEVER opened.
+    expect(counts.factory).toBe(0);
+  });
+
+  test("describe() returns null when no databaseUrl is configured", () => {
+    const { factory, counts } = fakeDriver({ schema: SAMPLE_SCHEMA });
+    const mgr = createConnectionManager({ databaseUrl: null, createDriver: factory });
+
+    expect(mgr.describe()).toBeNull();
+    expect(counts.factory).toBe(0);
+  });
+
+  test("describe() returns null (never throws) on an unparseable url", () => {
+    const { factory, counts } = fakeDriver({ schema: SAMPLE_SCHEMA });
+    const mgr = createConnectionManager({ databaseUrl: "not a url", createDriver: factory });
+
+    expect(() => mgr.describe()).not.toThrow();
+    expect(mgr.describe()).toBeNull();
+    expect(counts.factory).toBe(0);
+  });
+
+  test("describe() returns null on a parseable-but-hostless url (mirrors the registry host guard)", () => {
+    const { factory, counts } = fakeDriver({ schema: SAMPLE_SCHEMA });
+    const mgr = createConnectionManager({ databaseUrl: "postgres:///shop", createDriver: factory });
+
+    expect(mgr.describe()).toBeNull();
+    expect(counts.factory).toBe(0);
+  });
 });
