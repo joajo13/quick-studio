@@ -69,11 +69,17 @@ describe("workspace-registry — save happy path", () => {
     expect(fake.saveCalls()).toBe(1);
   });
 
-  test("activeTabId: null is always valid, even with tabs present", () => {
+  test("activeTabId: null is rejected when tabs are present (DW-25)", () => {
     const fake = fakeStore("persistent");
     const reg = registryOver(fake.store);
     const result = reg.save({ ...SAMPLE, activeTabId: null });
-    expect(result.ok).toBe(true);
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("bad_request");
+      expect(result.detail).toContain("activeTabId");
+    }
+    // Nothing is written on a bad_request.
+    expect(fake.saveCalls()).toBe(0);
   });
 
   test("an empty workspace (no tabs, activeTabId null, nextId 1) is valid", () => {
@@ -81,6 +87,18 @@ describe("workspace-registry — save happy path", () => {
     const reg = registryOver(fake.store);
     const result = reg.save({ version: 1, panelSizes: [20, 80], tabs: [], activeTabId: null, nextId: 1 });
     expect(result).toEqual({ ok: true, value: { saved: true } });
+  });
+
+  test("empty tabs with a non-null activeTabId is rejected (nothing written)", () => {
+    const fake = fakeStore("persistent");
+    const reg = registryOver(fake.store);
+    const result = reg.save({ version: 1, panelSizes: [20, 80], tabs: [], activeTabId: 1, nextId: 1 });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("bad_request");
+      expect(result.detail).toContain("activeTabId");
+    }
+    expect(fake.saveCalls()).toBe(0);
   });
 });
 

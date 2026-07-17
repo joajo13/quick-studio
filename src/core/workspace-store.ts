@@ -58,7 +58,11 @@ export type WorkspaceStore = {
   /**
    * Read the persisted snapshot. Total: absent file / I/O error / corrupt JSON /
    * version mismatch / malformed shape all degrade to `null`. Ephemeral mode
-   * never reads disk and always returns `null`.
+   * never reads disk and always returns `null`. As a best-effort forward-compat
+   * safeguard, loading a file whose `version` is newer than
+   * `WORKSPACE_SNAPSHOT_VERSION` copies its original bytes to a sibling
+   * `<path>.v<version>.bak` before degrading to `null`; this is the only case
+   * where load touches the filesystem, and any failure is swallowed.
    */
   readonly load: () => WorkspaceSnapshot | null;
   /**
@@ -203,6 +207,22 @@ function buildStore(mode: RunMode, filePath: string | null): WorkspaceStore {
         parsed = JSON.parse(raw);
       } catch {
         return null; // corrupt JSON
+      }
+
+      // Newer-version preservation (DW-28): a strictly-newer-version file (written by a
+      // future build) still degrades to `null` below, which would let this older build
+      // re-enable saving and overwrite the future state. Best-effort back up the ORIGINAL
+      // bytes to a sibling `.bak` FIRST so those bytes survive. This must never break the
+      // total, never-throwing load, so any backup failure is swallowed.
+      if (typeof parsed === "object" && parsed !== null) {
+        const version = (parsed as Record<string, unknown>).version;
+        if (typeof version === "number" && Number.isFinite(version) && version > WORKSPACE_SNAPSHOT_VERSION) {
+          try {
+            writeFileSync(`${filePath}.v${version}.bak`, raw, { mode: 0o600 });
+          } catch {
+            /* ignore backup failure — load must stay total */
+          }
+        }
       }
 
       if (!isWorkspaceSnapshot(parsed)) return null; // malformed shape or version mismatch

@@ -16,6 +16,7 @@ import {
   restoreErdLayouts,
   restoreLastProvider,
   restoreWorkspace,
+  sanitizePanelSizes,
   toWorkspaceSnapshot,
   type WorkspaceState,
 } from "./workspace-state.ts";
@@ -536,5 +537,30 @@ describe("bindTableToActiveTab (Story 3.2)", () => {
     expect(snap.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders" });
     const restored = restoreWorkspace(snap);
     expect(restored.tabs[0]?.table).toBeUndefined();
+  });
+});
+
+describe("sanitizePanelSizes (DW-23)", () => {
+  const DEFAULTS = [20, 80];
+
+  test("a valid same-length split that sums to 100 is used verbatim", () => {
+    expect(sanitizePanelSizes([25, 75], DEFAULTS)).toEqual([25, 75]);
+  });
+
+  test("a wrong-length split falls back to defaults", () => {
+    expect(sanitizePanelSizes([42], DEFAULTS)).toEqual([20, 80]);
+    expect(sanitizePanelSizes([10, 20, 30], DEFAULTS)).toEqual([20, 80]);
+  });
+
+  test("out-of-range entries clamp to [0,100] when they still sum to 100", () => {
+    expect(sanitizePanelSizes([-5, 105], DEFAULTS)).toEqual([0, 100]);
+  });
+
+  test("a same-length split whose clamped values do not sum to ~100 falls back to defaults", () => {
+    expect(sanitizePanelSizes([10, 20], DEFAULTS)).toEqual([20, 80]);
+  });
+
+  test("an empty split falls back to defaults", () => {
+    expect(sanitizePanelSizes([], DEFAULTS)).toEqual([20, 80]);
   });
 });

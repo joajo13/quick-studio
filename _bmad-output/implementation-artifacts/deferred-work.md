@@ -178,7 +178,8 @@ resolution: resolved by sweep bundle dw-workspace-persistence-hardening
 origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
 location: `isWorkspaceSnapshot` (`src/core/workspace-store.ts`); `checkPanelSizes` (`src/core/workspace-registry.ts`)
 reason: `isWorkspaceSnapshot` and `checkPanelSizes` accept ANY-length finite-number array; `App.tsx` only special-cases the empty array. So `[42]`, `[10,20,30]`, or `[-5,105]` survive load/save and flow into `react-resizable-panels` `defaultSize`, producing a split that doesn't sum to 100 or exceeds a Panel's min/max. Unreachable in normal operation (`onLayout` always emits two values summing to 100) — tamper/legacy-file hardening only. Deferred over patched-now because "exactly 2" bakes in the current two-panel design and a future multi-panel layout would want variable length — a design decision, not a mechanical tighten.
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-workspace-snapshot-validation-hardening
 
 ### DW-24: Flush the pending debounced `workspace.save` on app quit / window unmount so the last layout or tab change made within `SAVE_DEBOUNCE_MS` (400ms) before Stop is not lost
 
@@ -193,7 +194,8 @@ resolution: resolved by sweep bundle dw-workspace-persistence-hardening
 origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
 location: `validateSnapshotParams` (`src/core/workspace-registry.ts`); `restoreWorkspace` (`src/ui/workspace/workspace-state.ts`)
 reason: `workspace-registry.ts` `validateSnapshotParams` explicitly allows `activeTabId: null` even with tabs present (asserted in `workspace-registry.test.ts`), but `src/ui/workspace/workspace-state.ts` `restoreWorkspace` treats `null` as "not among the tabs" (`tabs.some(t => t.id === null)` is always false) and falls back to `tabs[0].id`. Only reachable via a hand-edited file (the live app never emits null-with-tabs), so a low-consequence validator/restore-normalization inconsistency to align deliberately.
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-workspace-snapshot-validation-hardening
 
 ### DW-26: Enforce tab-id uniqueness across `tabs` in the workspace-store/registry validation so a snapshot with duplicate ids cannot make `closeTab` remove two tabs at once
 
@@ -216,7 +218,8 @@ resolution: resolved by sweep bundle dw-workspace-persistence-hardening
 origin: migrated from legacy ledger (code review of spec-2-5-persist-workspace-state.md), 2026-07-12
 location: `isWorkspaceSnapshot` (`src/core/workspace-store.ts`)
 reason: `isWorkspaceSnapshot` degrades a version mismatch to `null` (a *successful* load), so `App.tsx` enables saving and the first user change writes a `version: 1` snapshot over the `version: 2` file. The Story 2.5 data-loss patch only guards load *errors*, not a successful degrade-to-null. Spec explicitly allows "version-mismatch → fresh workspace", and `version: 2` does not exist yet, so this is a forward-compat hardening (e.g. back up or refuse-to-overwrite a newer-version file) for whenever the snapshot schema next changes.
-status: open
+status: done 2026-07-17
+resolution: resolved by sweep bundle dw-workspace-snapshot-validation-hardening
 
 ### DW-29: Project the Postgres `Driver.query` read path from positional column descriptors instead of a name-keyed row object, so duplicate/aliased column names in a future raw-SQL result are not collapsed (MySQL's `rowsAsArray` path already returns positional arrays)
 

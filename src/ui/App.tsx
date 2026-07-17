@@ -46,6 +46,7 @@ import {
   restoreErdLayouts,
   restoreLastProvider,
   restoreWorkspace,
+  sanitizePanelSizes,
   toWorkspaceSnapshot,
   type TableRef,
   type TabKind,
@@ -435,10 +436,9 @@ export function App(): React.JSX.Element {
       // baseline with exactly what a subsequent save would serialize (so an
       // untouched Workspace does not re-save on launch).
       const restored = snapshot ? restoreWorkspace(snapshot) : emptyWorkspace();
-      const sizes =
-        snapshot && snapshot.panelSizes.length > 0
-          ? [...snapshot.panelSizes]
-          : [...DEFAULT_PANEL_SIZES];
+      const sizes = snapshot
+        ? sanitizePanelSizes(snapshot.panelSizes, DEFAULT_PANEL_SIZES)
+        : [...DEFAULT_PANEL_SIZES];
       // Seed ERD geometry from the snapshot, pruned to the restored tab set (a pre-4.2
       // file has no `erdLayouts` → {} → dagre fallback).
       const layouts = snapshot ? restoreErdLayouts(snapshot, restored.tabs) : {};

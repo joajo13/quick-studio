@@ -195,8 +195,15 @@ function validateSnapshotParams(params: unknown): RegistryResult<WorkspaceSnapsh
   if (!tabs.ok) return badRequest("tabs", tabs.reason);
 
   const ids = new Set(tabs.value.map((t) => t.id));
-  if (p.activeTabId !== null && !(typeof p.activeTabId === "number" && ids.has(p.activeTabId))) {
-    return badRequest("activeTabId", "activeTabId must be null or one of the tab ids");
+  // Align the validator with `restoreWorkspace` (DW-25): with NO tabs, `activeTabId`
+  // must be `null`; with tabs present, it must be one of the tab ids (null-with-tabs
+  // is rejected here rather than being silently rewritten to the first tab on restore).
+  if (tabs.value.length === 0) {
+    if (p.activeTabId !== null) {
+      return badRequest("activeTabId", "activeTabId must be null when there are no tabs");
+    }
+  } else if (!(typeof p.activeTabId === "number" && ids.has(p.activeTabId))) {
+    return badRequest("activeTabId", "activeTabId must be one of the tab ids when tabs are present");
   }
 
   const maxId = tabs.value.reduce((max, t) => Math.max(max, t.id), 0);

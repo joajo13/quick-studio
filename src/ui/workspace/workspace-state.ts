@@ -210,6 +210,36 @@ export function bindTableToActiveTab(state: WorkspaceState, ref: TableRef): Work
  * ------------------------------------------------------------------ */
 
 /**
+ * Sanitize a loaded `panelSizes` array into a guaranteed-valid split for the
+ * current panel count (DW-23). The store/registry keep `panelSizes` length- and
+ * range-agnostic (any finite-number array), so a hand-edited/legacy file can carry
+ * a wrong-length or out-of-range split that would break `react-resizable-panels`'
+ * initial layout. This UI-side guard collapses any such value to `defaults`:
+ *
+ *  - a length that doesn't match `defaults` (wrong panel count, or empty) → `defaults`;
+ *  - otherwise each entry is clamped to `[0,100]` (a non-finite entry → `defaults`);
+ *  - if the clamped values don't sum to ~100 (tolerance 0.5) → `defaults`, since a
+ *    non-100 split is what actually triggers the "Invalid layout" break;
+ *  - else the clamped values are used (`[-5,105]` → `[0,100]`, which sums to 100).
+ *
+ * Pure and total — never throws, always returns a fresh array.
+ */
+export function sanitizePanelSizes(
+  loaded: readonly number[],
+  defaults: readonly number[],
+): number[] {
+  if (loaded.length !== defaults.length) return [...defaults];
+  const clamped: number[] = [];
+  for (const n of loaded) {
+    if (!Number.isFinite(n)) return [...defaults];
+    clamped.push(Math.max(0, Math.min(100, n)));
+  }
+  const sum = clamped.reduce((acc, n) => acc + n, 0);
+  if (Math.abs(sum - 100) > 0.5) return [...defaults];
+  return clamped;
+}
+
+/**
  * Rebuild a {@link WorkspaceState} from a loaded {@link WorkspaceSnapshot}. Pure
  * and total, and defensive even though Core already validated the snapshot on
  * the way in: `nextId` is recomputed as `max(tab ids) + 1` whenever the stored
