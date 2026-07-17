@@ -29,7 +29,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -73,6 +73,35 @@ jobs:
             ./keyring-native-check
           '
 
+      # --- macOS: provision an unlocked default keychain for the round-trip ---
+      # A GitHub macOS runner boots with a locked/default-less login keychain, so
+      # a headless @napi-rs/keyring generic-password call would (correctly) report
+      # keychain-unavailable — the macOS analogue of the headless-Linux case. We
+      # create a dedicated keychain with an empty password, disable its auto-lock
+      # timeout so it stays open for the whole leg, unlock it, make it the default
+      # (so security-framework's default-keychain calls target it), and add it to
+      # the user search list — mirroring how the Linux leg provisions Secret
+      # Service — so the compiled-binary check exercises a REAL round-trip.
+      - name: Provision keychain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          security create-keychain -p "" spike.keychain
+          # No flags = no lock-on-sleep and no inactivity timeout, so the keychain
+          # stays unlocked for the whole leg (an explicit `-t` would RE-ENABLE a
+          # timeout, which we do not want).
+          security set-keychain-settings spike.keychain
+          security unlock-keychain -p "" spike.keychain
+          security default-keychain -s spike.keychain
+          # Point the user search list at ONLY the spike keychain. The runner's
+          # login.keychain-db boots locked, and a SecItem search that traverses it
+          # can raise an unlock prompt that hangs a headless runner; the round-trip
+          # only needs the spike keychain, so keep it out of the list.
+          security list-keychains -d user -s spike.keychain
+          # Grant non-interactive access to items in this keychain. Without it a
+          # generic-password read can raise a GUI authorization dialog that nobody
+          # can dismiss on a headless runner, hanging the leg to its timeout.
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" spike.keychain
+
       # --- Windows / others: Credential Manager is always present ---
       - name: Keychain smoke (non-Linux)
         if: runner.os != 'Linux'
@@ -80,12 +109,13 @@ jobs:
 
       - name: Compiled-binary native-load check (non-Linux)
         if: runner.os != 'Linux'
-        # Windows ships Credential Manager, so a real round-trip is expected and
-        # required — a mere `unavailable` here is a failure, not a pass.
+        # Windows (Credential Manager) and macOS (the keychain provisioned above)
+        # both have a real backend, so a round-trip is expected and required — a
+        # mere `unavailable` here is a failure, not a pass.
         # Force bash: on windows-latest the default shell is PowerShell, where
         # `bun build --compile` emits `keyring-native-check.exe` and `./name`
         # would not resolve it; Git Bash appends `.exe`, so the compiled binary
-        # runs deterministically.
+        # runs deterministically. (macOS already defaults to bash.)
         shell: bash
         env:
           KEYRING_REQUIRE_ROUNDTRIP: "1"
