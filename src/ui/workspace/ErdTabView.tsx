@@ -36,6 +36,7 @@ import "@xyflow/react/dist/style.css";
 import type { ErdTabLayout, SchemaTableInfo } from "../../shared/contract.ts";
 import {
   applyLayout,
+  connectedNodeIds,
   schemaToGraph,
   typeColorClass,
   type ErdNodeData,
@@ -249,6 +250,87 @@ function ErdLegend(): React.JSX.Element {
   );
 }
 
+/**
+ * The `top-left` hover detail panel (Story 9.5): a roomy readout of the hovered
+ * table's columns as `name : dataType` with PK / FK badges, sourced ENTIRELY from the
+ * `ErdNodeData.columns` the node already carries (no new schema derivation, no Core
+ * call). It reuses the same `KeyIcon`/`LinkIcon` glyphs and `--t-key`/`--t-int` badge
+ * colours as the node rows, on the same `--card`/`--border` surface the toolbar/legend
+ * use. Unlike the compact node row (a mutually-exclusive PK-wins chain), a PK∩FK column
+ * here shows BOTH badges — the roomier layout closes DW-65 without touching the row.
+ * Column names render at the panel's 12px mono base; the data-type label is 10.5px — at or
+ * above the node-row's own type size, so DW-67's sub-11px muted-on-tonal contrast risk is
+ * not worsened relative to the node rows (this panel does not fix DW-67, only avoids making
+ * it worse). Exported for isolated render tests.
+ */
+export function ErdHoverPanel({ data }: { data: ErdNodeData }): React.JSX.Element {
+  return (
+    <div
+      className="max-h-[70vh] w-[260px] overflow-auto rounded-[10px] border border-[var(--border)] bg-[var(--card)]"
+      style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
+    >
+      <div className="flex items-center gap-2 border-b border-[var(--border)] bg-[var(--muted)] px-3 py-2">
+        <span className="shrink-0 text-[var(--muted-foreground)]">
+          <TableIcon />
+        </span>
+        <span className="truncate text-[12.5px] font-semibold text-[var(--foreground)]">
+          {data.label}
+        </span>
+      </div>
+      <div className="flex flex-col">
+        {data.columns.map((c) => {
+          const typeClass = typeColorClass(c.dataType);
+          return (
+            <div
+              key={c.name}
+              className="flex min-w-0 items-center gap-2 border-t border-[var(--border)] px-3 py-1 first:border-t-0"
+            >
+              <span className="inline-flex w-[30px] shrink-0 items-center gap-1">
+                {c.isPrimaryKey && (
+                  <span
+                    aria-label="primary key"
+                    title="primary key"
+                    className="inline-flex shrink-0 text-[var(--t-key)]"
+                  >
+                    <KeyIcon />
+                  </span>
+                )}
+                {c.isForeignKey && (
+                  <span
+                    aria-label="foreign key"
+                    title="foreign key"
+                    className="inline-flex shrink-0 text-[var(--t-int)]"
+                  >
+                    <LinkIcon />
+                  </span>
+                )}
+                {!c.isPrimaryKey && !c.isForeignKey && (
+                  <span aria-hidden className="inline-block h-[13px] w-[13px] shrink-0" />
+                )}
+              </span>
+              <span
+                className={
+                  c.isPrimaryKey
+                    ? "min-w-0 truncate font-semibold text-[var(--foreground)]"
+                    : "min-w-0 truncate text-[var(--muted-foreground)]"
+                }
+              >
+                {c.name}
+              </span>
+              <span
+                className={`ml-auto max-w-[55%] shrink-0 truncate text-[10.5px] uppercase tracking-[0.04em] ${typeClass}`}
+                style={{ color: `var(--${typeClass})` }}
+              >
+                {c.dataType}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 /** Build the id→position map the layout report persists, from the live node array. */
 function positionsOf(nodes: ReadonlyArray<Node>): Record<string, { x: number; y: number }> {
   const positions: Record<string, { x: number; y: number }> = {};
@@ -321,6 +403,16 @@ export function ErdTabView({
     positionsRef.current = positionsOf(graph.nodes as unknown as Node[]);
   }, [graph, setNodes]);
 
+  // DW-66 reconcile: if the hovered id is no longer among the current node ids (its
+  // table was dropped mid-hover with no `mouseleave`), clear the hover so the edge
+  // recolor, node dim, and detail panel all release — and a later table reusing the
+  // same `tableId` is never spuriously highlighted. Presentation-only; touches no layout.
+  useEffect(() => {
+    if (hoveredNodeId !== null && !nodes.some((n) => n.id === hoveredNodeId)) {
+      setHoveredNodeId(null);
+    }
+  }, [nodes, hoveredNodeId]);
+
   // Presentation-only: overlay a `className`/`style` onto each already-derived edge so
   // the ones touching the hovered node render `--edge-hot` (blue) and the rest `--edge`.
   // The edge ids, `markerEnd`, `data`, source/target, and order are all preserved — this
@@ -340,6 +432,39 @@ export function ErdTabView({
         };
       }),
     [graph.edges, hoveredNodeId],
+  );
+
+  // The connected-node set for the hovered table (itself + FK neighbours), from the pure,
+  // unit-tested helper. `null` when nothing is hovered OR when the hovered id is not (yet /
+  // no longer) present among `nodes` → no dim overlay. The presence check keeps this in step
+  // with the panel's own `nodes.find` guard, so when the hovered table is dropped mid-hover
+  // the dim releases in the SAME render the panel does — no one-frame "whole canvas dimmed"
+  // flash before the DW-66 effect fires. Derived from `graph.edges`; never mutates the graph.
+  const connected = useMemo(
+    () =>
+      hoveredNodeId !== null && nodes.some((n) => n.id === hoveredNodeId)
+        ? connectedNodeIds(graph.edges, hoveredNodeId)
+        : null,
+    [graph.edges, hoveredNodeId, nodes],
+  );
+
+  // Presentation-only node overlay (mirrors the edge overlay above). At rest
+  // (`connected === null`) return the controlled `nodes` array VERBATIM — same reference,
+  // no per-node object churn on every drag frame, and React Flow's internal diff + drag are
+  // wholly undisturbed. Only while hovering do we build overlay objects: spread each node
+  // through (preserving `id`/`position`/`type`/`data`) and add ONLY `style.opacity` —
+  // full-strength for connected nodes, dimmed for the rest. Fed to `<ReactFlow nodes={…}>`
+  // while `onNodesChange` still targets the underlying controlled `nodes` (error-#015
+  // contract intact), and drag-stop persistence keeps reading `nodesRef`/`nodes`.
+  const displayNodes = useMemo(
+    () =>
+      connected === null
+        ? nodes
+        : nodes.map((n) => ({
+            ...n,
+            style: { ...n.style, opacity: connected.has(n.id) ? 1 : 0.4 },
+          })),
+    [nodes, connected],
   );
 
   // Report the full captured layout (positions + viewport) up for the debounced persist,
@@ -389,7 +514,7 @@ export function ErdTabView({
   return (
     <div className="h-full w-full bg-[var(--background)]">
       <ReactFlow
-        nodes={nodes}
+        nodes={displayNodes}
         edges={edges as unknown as never[]}
         onNodesChange={onNodesChange}
         onNodeDragStop={handleNodeDragStop}
@@ -409,6 +534,19 @@ export function ErdTabView({
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={26} color="var(--border)" />
+        {hoveredNodeId !== null &&
+          (() => {
+            // Look up the hovered node's data in the live node array. Guarded on presence
+            // so a just-reconciled (DW-66) id never renders a stale panel.
+            const hoveredData = nodes.find((n) => n.id === hoveredNodeId)?.data as
+              | ErdNodeData
+              | undefined;
+            return hoveredData ? (
+              <Panel position="top-left">
+                <ErdHoverPanel data={hoveredData} />
+              </Panel>
+            ) : null;
+          })()}
         <Panel position="bottom-right">
           <ErdToolbar />
         </Panel>

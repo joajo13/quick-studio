@@ -2,11 +2,16 @@
 title: 'Story 9.5: ERD hover — column detail, PK/FK badges, and connected-relationship highlight'
 type: 'feature'
 created: '2026-07-18'
-status: 'draft'
+status: 'done'
+baseline_revision: '059aa2c460f4c26b78170ebd66b523b6340f6854'
+final_revision: '7e82eee063ca8d4aced919b04208732015870a4b'
+review_loop_iteration: 0
+followup_review_recommended: false
 context:
   - '{project-root}/design-artifacts/erd.html'
   - '{project-root}/_bmad-output/implementation-artifacts/spec-4-1-render-erd.md'
   - '{project-root}/_bmad-output/implementation-artifacts/spec-7-4-redesign-erd-neutral.md'
+warnings: ['oversized']
 ---
 
 <intent-contract>
@@ -55,7 +60,7 @@ Hover behaviour is driven by `hoveredNodeId`; the connected-set logic (`connecte
 | Composite FK | hover a table with a multi-column FK | the SINGLE composite edge recolors (one edge, per Story 4.1); all participating local columns carry the FK badge in the panel (`isForeignKey` is true for each) | No error |
 | Empty schema | `tables: []` | empty-state renders (`ErdTabView.tsx:379-381`); no nodes to hover, no panel | No error |
 | Hover during pan/zoom or after drag | hover a node then pan/zoom, or hover a dragged node | highlight/dim/panel follow the node; pan/zoom (`onMoveEnd`) and drag persistence (`onNodeDragStop`) are unaffected — hover never writes layout | No error |
-| Connected-set derivation (pure) | `connectedNodeIds(edges, id)` for hover-in / no-FK / self-ref / composite / absent id | returns `{ id } ∪ neighbours`; absent id → `{ id }` (or empty — confirm) with no throw; deterministic, order-independent | Never throws |
+| Connected-set derivation (pure) | `connectedNodeIds(edges, id)` for hover-in / no-FK / self-ref / composite / absent id | returns `{ id } ∪ neighbours`; absent id → `{ id }` (singleton) with no throw; deterministic, order-independent | Never throws |
 
 </intent-contract>
 
@@ -66,46 +71,105 @@ Hover behaviour is driven by `hoveredNodeId`; the connected-set logic (`connecte
 - **Given** I am hovering a table, **when** that table is removed from the schema (or the node set otherwise changes so the hovered id is gone) before a `mouseleave` fires, **then** the highlight, dim, and panel clear, and no other table inherits the highlight (DW-66 closed).
 - **Given** I hover a table that has no foreign keys, **then** no edges recolor, only that node stays full-strength (the rest dim), and the panel lists its columns with no FK badges.
 - **Given** I hover a table with a self-referential foreign key, **then** its self-loop edge highlights, only that one node is treated as connected (no phantom neighbour), and the panel shows the self-referencing column with an FK badge.
-- **Given** a column that is both a primary key and a foreign key, **when** I hover its table, **then** the node row still shows at least the PK badge (DW-65 not regressed) and the panel surfaces the column with its PK (and optionally FK) badge.
+- **Given** a column that is both a primary key and a foreign key, **when** I hover its table, **then** the node row still shows at least the PK badge (DW-65 not regressed) and the panel surfaces the column with BOTH its PK and FK badges.
 - **Given** the ERD, **when** I pan, zoom, fit, drag a node, or reload the tab, **then** pan/zoom/fit, node drag, and layout persistence behave exactly as before — hover changes nothing about positions, viewport, or the persisted `ErdTabLayout`.
-- **Given** the suite, **when** run, **then** `bunx tsc --noEmit` is clean, `bun test` is green with new `connectedNodeIds` unit tests in `erd-graph.test.ts` and no existing `ErdTabView.test.tsx` / `erd-graph.test.ts` assertion broken, and `bun run build` succeeds.
+- **Given** the suite, **when** run, **then** `bunx tsc --noEmit` is clean, `bun test` is green with new `connectedNodeIds` unit tests in `erd-graph.test.ts` and an `ErdHoverPanel` render test in `ErdTabView.test.tsx`, with no existing assertion broken, and `bun run build` succeeds.
 
 ## Code Map
 
-<!-- Line anchors reconciled to the current tree (post-7.4). Confirm any uncertain seam in step-02; do NOT invent React Flow APIs. -->
+<!-- Line anchors reconciled to the current tree (post-7.4, branch redesign/neutral-ui) via step-02 investigation. -->
 
-- `src/ui/erd/erd-graph.ts` — ADD a pure, DOM-free `connectedNodeIds(edges: ReadonlyArray<ErdEdge>, hoveredId: string): ReadonlySet<string>` (near `tableId` **130-132** / the `ErdEdge` type **102-111**): start with `{ hoveredId }`, then for every edge where `source === hoveredId` add `target` and where `target === hoveredId` add `source` (a self-loop adds only `hoveredId` again — no phantom). Pure and total; never throws on an absent id (returns the singleton). No change to `schemaToGraph`, `applyLayout`, edge ids, `markerEnd`, `data`, or dagre positions. The tooltip needs NO new derivation — it reads the existing `ErdNodeData.columns` (`{ name, dataType, isPrimaryKey, isForeignKey }`, built at **244-249**).
-- `src/ui/erd/erd-graph.test.ts` — ADD `connectedNodeIds` cases mirroring the I/O matrix: hover a table with FKs → self + neighbours; table with no FKs → singleton; self-referential FK → singleton (no phantom); composite FK → single neighbour once (not per column); an id absent from the edges → singleton/empty (confirm which in step-02). Existing `schemaToGraph`/`applyLayout` tests stay green (additive only).
+- `src/ui/erd/erd-graph.ts` — ADD a pure, DOM-free `connectedNodeIds(edges: ReadonlyArray<ErdEdge>, hoveredId: string): ReadonlySet<string>` (place it near `tableId` **130-132** / the `ErdEdge` type **102-111**, matching the file's named `export function` style; no default export). Seed with `{ hoveredId }`, then for every edge where `source === hoveredId` add `target` and where `target === hoveredId` add `source` (a self-loop adds only `hoveredId` again — no phantom; an id absent from all edges yields the singleton `{ hoveredId }`). Pure and total; never throws. NO change to `schemaToGraph` (**181-255**), `applyLayout` (**275-295**), `ErdEdge`/`ErdNodeData` types, edge ids, `markerEnd`, `data`, or dagre positions. The panel needs NO new derivation — it reads the existing `ErdNodeData.columns` (`ErdColumn = { name, dataType, isPrimaryKey, isForeignKey }` **27-38**, folded from independent `pkSet`/`fkSet` at **230-249**, so PK∩FK is representable).
+- `src/ui/erd/erd-graph.test.ts` — ADD a `describe("connectedNodeIds", …)` block (runner `bun:test`, `describe`/`test`/`expect(...).toEqual`, reuse the local `col()`/`table()`/`tableId()` helpers **17-38**): hover a table with FKs → self + neighbour ids; table with no FKs → singleton `{ self }`; self-referential FK → singleton (no phantom); composite FK → the single neighbour appears once (not per column); an id absent from the edges → singleton `{ id }`. Assert via `.toEqual` on sorted arrays or `Set` size. Existing `schemaToGraph`/`applyLayout`/`typeColorClass` tests stay green (additive only).
 - `src/ui/workspace/ErdTabView.tsx` — the primary change, all presentation-only:
-  - Keep `hoveredNodeId` (**309**) and `handleNodeMouseEnter`/`handleNodeMouseLeave` (**372-377**) and the `<ReactFlow>` `onNodeMouseEnter`/`onNodeMouseLeave` wiring (**397-398**) — the hover seam is reused, not replaced.
+  - Keep `hoveredNodeId` state (**309**), `handleNodeMouseEnter`/`handleNodeMouseLeave` (**373-377**), and the `<ReactFlow>` `onNodeMouseEnter`/`onNodeMouseLeave` wiring (**397-398**) — the hover seam is reused, not replaced.
   - Keep the existing edge overlay `useMemo` (**328-343**) verbatim (edge recolor).
   - ADD a `connected` set: `const connected = useMemo(() => hoveredNodeId ? connectedNodeIds(graph.edges, hoveredNodeId) : null, [graph.edges, hoveredNodeId])`.
-  - ADD a derived `displayNodes` `useMemo` over the live controlled `nodes` (from `useNodesState`, **301**) that overlays a presentation-only `style`/`className` (e.g. dim `opacity`/muted for nodes NOT in `connected`; full-strength for those in it; no overlay when `hoveredNodeId === null`), preserving each node's `id`, `position`, `type`, and `data`. Feed `displayNodes` (not raw `nodes`) to `<ReactFlow nodes={…}>` (**392**) while `onNodesChange` still targets the underlying `nodes` so drag is unaffected (confirm this seam preserves the Story-4.1 error-#015 fix in step-02).
-  - ADD a hover DETAIL panel: a new `<Panel position="top-left">` (or `top-right` — confirm no collision with `ErdToolbar` bottom-right **412-414** / `ErdLegend` bottom-left **415-417**) rendered only when `hoveredNodeId !== null`, that looks up the hovered node's `data` (`nodes.find(n => n.id === hoveredNodeId)?.data as ErdNodeData`) and lists its `columns` as `name : dataType` with the existing `KeyIcon` (`--t-key`, PK) / `LinkIcon` (`--t-int`, FK) glyphs (**57-74, 112-130**) and `--card`/`--border` surface. Factor a small `ErdHoverPanel` component beside `ErdToolbar`/`ErdLegend` (exported for a render test, mirroring `ErdTableNode`).
-  - ADD the DW-66 reconcile: extend the graph-change effect (**319-322**) — or add a sibling effect — to `setHoveredNodeId(null)` when `hoveredNodeId` is not among the current node ids. This makes "node removed mid-hover" clear cleanly and closes DW-66.
+  - ADD a derived `displayNodes` `useMemo` over the live controlled `nodes` (from `useNodesState`, **301**), feeding it to `<ReactFlow nodes={displayNodes}>` at **392** while `onNodesChange={onNodesChange}` (**394**) still targets the underlying `nodes`. Each mapped node passes `id`/`position`/`type`/`data` through untouched (spread `...n`) and adds ONLY a presentation overlay: `style: { ...n.style, opacity: connected && !connected.has(n.id) ? 0.4 : 1 }` (no overlay when `hoveredNodeId === null` → `connected` is null → opacity 1). This mirrors the shipped edge-overlay pattern; drag persistence is unaffected because `nodesRef`/`handleNodeDragStop` (**304-305, 358**) read the underlying `nodes`, not `displayNodes`, and `onNodesChange` keeps the error-#015 contract (see Design Notes).
+  - ADD a hover DETAIL panel as `<Panel position="top-left">` (verified free — `ErdToolbar` is `bottom-right` **412-414**, `ErdLegend` is `bottom-left` **415-417**), rendered only when `hoveredNodeId !== null`. Look up the hovered node's data (`nodes.find(n => n.id === hoveredNodeId)?.data as ErdNodeData`) and list its `columns` as `name : dataType` with the existing in-file `KeyIcon` (`--t-key`, PK, `aria-label="primary key"`) / `LinkIcon` (`--t-int`, FK, `aria-label="foreign key"`) glyphs (**57-74, 112-130**) on a `--card`/`--border` surface. For a PK∩FK column render BOTH badges (the roomy panel closes DW-65 without touching the node-row's PK-wins chain). Factor a small exported `ErdHoverPanel({ data }: { data: ErdNodeData })` component beside `ErdToolbar`/`ErdLegend` so it can be render-tested in isolation.
+  - ADD the DW-66 reconcile: extend the graph-change effect (**319-322**) — or add a sibling `useEffect` — to `setHoveredNodeId(null)` when `hoveredNodeId !== null` and it is not among the current node ids. This clears highlight, dim, and panel when the hovered node disappears mid-hover and closes DW-66.
   - Do NOT touch `report`/`handleNodeDragStop`/`handleMoveEnd`/`positionsRef`/`viewportRef`/`initialLayoutRef` (**278-370**) — layout persistence and pan/zoom are unchanged.
-- `src/ui/workspace/ErdTabView.test.tsx` — EXTEND (renderToStaticMarkup, no jsdom — the project convention, **1-11**): the hover panel is gated on `hoveredNodeId !== null`, which is null at rest, so it does NOT appear in static output — keep the existing structural assertions green (panel absence at rest is correct). Add coverage for the hover PANEL by exporting `ErdHoverPanel` and rendering it directly with a sample `ErdNodeData` (assert it emits `aria-label="primary key"` / `aria-label="foreign key"` and the column/type text), mirroring how `ErdTableNode` markup is asserted today. The interactive hover transition itself is not unit-testable without a DOM (documented convention); the pure `connectedNodeIds` test carries the logic coverage.
-- `src/ui/workspace/TabContent.tsx` — NO change: the `erd` branch (**548-560**) already passes `tables`, `savedLayout`, `onLayoutChange` and keys by `tab.id`; the hover feature is internal to `ErdTabView`.
-- `src/shared/contract.ts` — NO change: `SchemaTableInfo.primaryKey` (**278**), `SchemaTableInfo.foreignKeys` (**280**), `SchemaColumnInfo` (**224-228**), and `SchemaForeignKeyInfo` (**254-259**) already carry every field the badges need; `ErdNodeData.columns` folds them (`pkSet`/`fkSet`, `erd-graph.ts:230-249`). No wire-type or RPC change.
-- `src/ui/styles/globals.css` — likely NO new token: `--edge`/`--edge-hot` (**50-51, 152-153**), `--t-key`/`--t-int`, `--card`/`--border`/`--muted-foreground`/`--foreground` all exist and are already used by `ErdTabView`. If node dimming needs a dedicated muted value beyond `opacity`, reuse an existing token rather than adding one — confirm in step-02. (Be aware of DW-67: the panel's small type labels inherit the same sub-11px muted-on-tonal contrast risk — do not make it worse; ideally the roomier panel uses a legible size.)
+- `src/ui/workspace/ErdTabView.test.tsx` — EXTEND (convention: `bun:test` + `renderToStaticMarkup`, no jsdom, assert via `toContain` on the static HTML string, **~14**). The hover panel is gated on `hoveredNodeId !== null` (null at rest), so it does NOT appear in the full-view static output — keep the existing structural assertions green (panel absence at rest is correct). ADD panel coverage by exporting `ErdHoverPanel` and rendering it directly with a sample `ErdNodeData` (assert it emits `aria-label="primary key"` / `aria-label="foreign key"`, the column `name`, and the `dataType` text; include a PK∩FK column and assert BOTH badges appear), mirroring how `ErdTableNode` markup is asserted today. The interactive hover transition itself is not unit-testable without a DOM (documented convention); the pure `connectedNodeIds` test carries the logic coverage.
+- `src/ui/workspace/TabContent.tsx` — NO change: the `erd` branch already passes `tables`, `savedLayout`, `onLayoutChange` and keys by `tab.id`; the hover feature is internal to `ErdTabView`.
+- `src/shared/contract.ts` — NO change: `SchemaTableInfo`/`SchemaColumnInfo`/`SchemaForeignKeyInfo` already carry every field the badges need; `ErdNodeData.columns` folds them. No wire-type or RPC change.
+- `src/ui/styles/globals.css` — NO new token: `--edge`/`--edge-hot` (**50-51, 152-153**, `--edge-hot == var(--t-int)` both themes), `--t-key`/`--t-int`, `--card`/`--border`/`--muted-foreground`/`--foreground` all exist and are already used by `ErdTabView`. Node dimming uses raw inline `opacity` (there is no ERD dim token today and none is warranted). DW-67 note: the panel's small type labels inherit the sub-11px muted-on-tonal contrast risk — do not make it worse; the roomier panel should use a legible size (≥ the node-row size).
 - `design-artifacts/erd.html` — reference only (visual source of truth): its hover logic (`highlightFor(name)` **482-491**, `pointerenter`/`pointerleave` **479-480**) lights up FK edges only; the connected-table emphasis and the column detail panel are the NEW parts Story 9.5 adds on top of that prototype baseline.
+
+## Tasks & Acceptance
+
+<!-- Ordered by dependency: the pure helper + its tests land first (no UI risk), then the view consumes it, then the view's render test. -->
+
+**Execution:**
+- [x] `src/ui/erd/erd-graph.ts` — add pure `connectedNodeIds(edges, hoveredId): ReadonlySet<string>` (seed `{ hoveredId }`; add `target` when `source === hoveredId`, `source` when `target === hoveredId`; self-loop adds no phantom; absent id → singleton). No change to `schemaToGraph`/`applyLayout`/types/edge derivation.
+- [x] `src/ui/erd/erd-graph.test.ts` — add `describe("connectedNodeIds")` covering the I/O matrix's pure row: with-FKs (self+neighbour), no-FK singleton, self-ref no-phantom, composite-neighbour-once, absent-id singleton. Reuse `col()`/`table()`/`tableId()`; assert with `.toEqual`.
+- [x] `src/ui/workspace/ErdTabView.tsx` — add `connected` `useMemo`; add `displayNodes` `useMemo` (spread each node, overlay only `style.opacity`) fed to `<ReactFlow nodes={displayNodes}>` with `onNodesChange` unchanged; add exported `ErdHoverPanel({ data })` rendered in a `<Panel position="top-left">` gated on `hoveredNodeId !== null`, listing columns `name : dataType` with reused `KeyIcon`/`LinkIcon` badges (BOTH badges on a PK∩FK column); extend the graph-change effect to clear `hoveredNodeId` when absent from the node ids (DW-66). Do not touch layout-persistence refs/handlers or the edge overlay.
+- [x] `src/ui/workspace/ErdTabView.test.tsx` — keep existing full-view structural assertions (panel absent at rest); add a direct `ErdHoverPanel` render test asserting `aria-label="primary key"`, `aria-label="foreign key"`, a column `name`/`dataType`, and BOTH badges on a PK∩FK column.
+
+**Acceptance Criteria:**
+- Given a hovered FK-bearing table, when the pointer is over it, then its edges recolor `--edge-hot`, its connected nodes stay opacity 1 while the rest drop to the dim opacity, and the `top-left` detail panel lists the table's columns with correct PK/FK badges.
+- Given any hover, when the pointer leaves OR the hovered node leaves the node set, then `hoveredNodeId` returns to `null` and the edge recolor, node dim, and panel all clear together with no stale reference.
+- Given the full suite, when run, then `bunx tsc --noEmit`, `bun test`, and `bun run build` all pass with the new `connectedNodeIds` and `ErdHoverPanel` coverage and no weakened existing assertion.
+
+## Spec Change Log
+
+<!-- Append-only. Populated by step-04 during review loops. Empty until the first bad_spec loopback. -->
+
+## Review Triage Log
+
+<!-- Append-only. Populated by step-04 on every review pass. Empty until the first review pass. -->
+
+### 2026-07-18 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 5: (high 0, medium 0, low 5)
+- defer: 2: (high 0, medium 2, low 0)
+- reject: 5
+- addressed_findings:
+  - `[low]` `[patch]` One-frame "whole canvas dimmed" flash: when the hovered table was dropped mid-hover, the `graph→nodes` sync committed a render where `hoveredNodeId` was still set but absent from `nodes`, so `connected` was the singleton `{ staleId }` and `displayNodes` dimmed every live node to 0.4 until the post-paint DW-66 effect cleared it — the panel was guarded (`nodes.find → undefined`) but the dim was not. Both adversarial reviewers flagged it independently. Fixed: gate `connected` on `hoveredNodeId !== null && nodes.some(n => n.id === hoveredNodeId)` so the dim releases in the SAME render as the panel (deps now include `nodes`).
+  - `[low]` `[patch]` Inconsistent null guard: `connected` used truthiness (`hoveredNodeId ?`) while the edge overlay and panel use `hoveredNodeId !== null`. Fixed in the same edit as the flash guard (now `!== null`), removing reliance on the implicit "tableId is never empty" invariant.
+  - `[low]` `[patch]` `displayNodes` rebuilt a fresh node object + `style` for every node on every render even at rest (churn on each drag frame) and broke the referential identity its own comment claimed to preserve. Fixed: short-circuit `return nodes` verbatim when `connected === null`; only build overlay objects while hovering. Comment corrected.
+  - `[low]` `[patch]` `ErdHoverPanel` docstring claimed labels are "≥ the node-row 12px so DW-67 contrast is not worsened", but the data-type label is `text-[10.5px]`. Corrected the comment to state column names are 12px and the type label is 10.5px (at/above the node-row type size, so DW-67 is not worsened — this panel does not fix DW-67, only avoids worsening it).
+  - `[low]` `[patch]` Column names started at different x on rows with 1 vs 2 badges (a PK∩FK row renders two 13px glyphs, others one or a spacer). Fixed: pinned the badge zone to `w-[30px]` so names align regardless of badge count.
+
+## Design Notes
+
+- **Reuse the seam, add two overlays.** The edge recolor already proves the pattern: map over a derived array (`graph.edges`) adding `className`/`style` from `hoveredNodeId`, never mutating the source. Node emphasis is the same overlay onto `displayNodes`, and the connected-set is the only new *logic* — pushed into the pure `erd-graph.ts` so it is unit-tested without a DOM (the project has no jsdom; interactive hover is asserted only structurally). The panel is pure rendering of data already in hand — no new derivation, no Core call.
+- **`displayNodes` is drag-safe (Block-If resolved, will not HALT).** `<ReactFlow>` today receives the raw controlled `nodes` at line 392, but React Flow's error-#015 contract (Story 4.1, comment **298-300**) is satisfied purely by supplying `onNodesChange` (from `useNodesState`) — it does NOT require `nodes` to be the referential state object. So `nodes={displayNodes}` (a `useMemo` that spreads each node through untouched and adds only `style.opacity`) keeps drag working: `onNodesChange` still mutates the real `nodes`, and drag-stop persistence reads `nodesRef`/`nodes` (**304-305, 358**), never `displayNodes`. The overlay must preserve each node's `position` and `data` object identity (spread, don't rebuild) so React Flow's internal diff/drag is undisturbed.
+- **`top-left` panel slot is free (Block-If resolved, will not HALT).** `ErdToolbar` occupies `bottom-right` (**412-414**), `ErdLegend` `bottom-left` (**415-417**); `top-left`/`top-right`/`top-center` are all unused. `top-left` reads as a contextual info panel and stays clear of the bottom chrome.
+- **PK∩FK shows both badges in the panel (DW-65 win, DW-65 not regressed).** The node-row render is a mutually-exclusive `if PK / else if FK / else spacer` chain (**112-130**), so a PK∩FK column shows only the key glyph there — that behaviour is untouched (no regression). The panel is a roomier surface with no width constraint and the model tracks both flags independently (`isPrimaryKey` and `isForeignKey` both true is representable, **244-249**), so it renders BOTH badges — strictly additive information the compact row can't fit.
+- **`connectedNodeIds` returns the singleton `{ id }` for an absent/edge-less id.** A node with no FK edges never appears as any edge's `source`/`target`, so seeding the set with the hovered id and only adding matched neighbours naturally yields `{ id }`. This keeps the dim predicate a single `connected && !connected.has(n.id)` with no separate "is this the hovered node" branch, and matches the I/O matrix's "table with no FKs → singleton {self}" row.
+- **DW-66 is in-scope, not deferred.** The story demands "no stale highlight if the node set changes mid-hover" — exactly DW-66. A one-line reconcile (clear `hoveredNodeId` when absent from the current node ids, folded into the graph-change effect at **319-322**) closes it. DW-67 (sub-11px contrast) is adjacent and must not regress — the roomier panel uses a legible label size.
 
 ## Verification
 
 **Commands:**
-- `bunx tsc --noEmit` — expected: no type errors. New `connectedNodeIds` signature and the `displayNodes`/`ErdHoverPanel` additions must type-check against `ErdEdge`/`ErdNodeData` and React Flow's `Node`/`Panel` props.
-- `bun test` — expected: full suite green. `src/ui/erd/erd-graph.test.ts` gains `connectedNodeIds` cases (hover-with-FKs, no-FK singleton, self-ref no-phantom, composite-once, absent-id); `src/ui/workspace/ErdTabView.test.tsx` gains an `ErdHoverPanel` render test and keeps its existing structural assertions. No existing assertion weakened.
-- `bun run build` — expected: OK (regenerates the UI bundle with the hover panel + node-emphasis overlay; React Flow `<Panel>`/`useStore` already bundle).
+- `bunx tsc --noEmit` — expected: no type errors. The new `connectedNodeIds` signature and the `displayNodes`/`ErdHoverPanel` additions must type-check against `ErdEdge`/`ErdNodeData` and React Flow's `Node`/`Panel` props.
+- `bun test` — expected: full suite green. `src/ui/erd/erd-graph.test.ts` gains the `connectedNodeIds` cases (with-FKs, no-FK singleton, self-ref no-phantom, composite-once, absent-id singleton); `src/ui/workspace/ErdTabView.test.tsx` gains an `ErdHoverPanel` render test and keeps its existing structural assertions. No existing assertion weakened.
+- `bun run build` — expected: OK (regenerates the UI bundle with the hover panel + node-emphasis overlay; React Flow `<Panel>` already bundles).
 
-**Live check (manual, per the epic fidelity gate at http://127.0.0.1:6061):**
+**Manual checks (live, per the epic fidelity gate at http://127.0.0.1:6061):**
 - Launch against the seeded database (`docker/seed.sql` defines `orders.customer_id → customers(id)`), open a New ERD tab.
-- Hover `orders`: confirm its FK edge to `customers` highlights, `orders` + `customers` stay full-strength while the other tables dim, and a detail panel lists `orders`' columns with a PK badge on `id` and an FK link badge on `customer_id`.
+- Hover `orders`: confirm its FK edge to `customers` highlights, `orders` + `customers` stay full-strength while the other tables dim, and a `top-left` detail panel lists `orders`' columns with a PK badge on `id` and an FK link badge on `customer_id`.
 - Move the pointer off `orders`: confirm the highlight, dim, and panel all clear together with no residue.
 - Hover a table with no FKs (only that node emphasised, no edges hot, panel with no FK badges) and, if reachable, a self-referential FK table (self-loop hot, only itself connected).
 - Confirm pan, zoom, fit, node drag, and tab reload (layout persistence) are unchanged while hovering and after.
 
-## Design Notes
+## Auto Run Result
 
-- **Reuse the seam, add two overlays.** The edge recolor already proves the pattern: map over a derived array (`graph.edges`) adding `className`/`style` from `hoveredNodeId`, never mutating the source. Node emphasis is the same overlay onto `displayNodes`, and the connected-set is the only new *logic* — pushed into the pure `erd-graph.ts` so it is unit-tested without a DOM (the project has no jsdom; interactive hover is asserted only structurally). The tooltip is pure rendering of data already in hand — no new derivation, no Core call.
-- **DW-66 is in-scope, not deferred.** The story explicitly demands "no stale highlight if the node set changes mid-hover," which is exactly DW-66. A one-line reconcile effect (clear `hoveredNodeId` when absent from the node ids) closes it. DW-65 (PK∩FK single badge) and DW-67 (sub-11px contrast) are adjacent and must not regress; the roomier hover panel is a natural place to surface both PK and FK badges (optional DW-65 win — confirm in step-02).
-- **Uncertain seams flagged for step-02:** (1) exact React Flow mechanism for per-node dim/emphasis without breaking the controlled-nodes drag contract (derived `displayNodes` vs a `data` flag consumed by `ErdTableNode`); (2) the `<Panel>` slot for the detail panel that avoids the toolbar/legend; (3) whether the detail panel shows both badges for a PK∩FK column; (4) whether `connectedNodeIds` returns a singleton or empty set for an id absent from the edges. None invent new wire types or RPCs.
+Status: done
+
+**Implemented change.** ERD table-node hover now goes beyond the pre-existing edge recolor: hovering a node emphasises its connected tables (itself + FK neighbours) at full opacity while dimming the rest, and mounts a `top-left` detail panel listing the hovered table's columns as `name : dataType` with PK/FK badges (both badges on a PK∩FK column, closing DW-65 in the roomier panel without touching the compact node row). The connected set comes from a new pure `connectedNodeIds` helper in `erd-graph.ts`; the emphasis is a presentation-only opacity overlay on a derived `displayNodes` array fed to `<ReactFlow>` while `onNodesChange` keeps writing the underlying controlled `nodes` (React Flow error-#015 drag contract intact). A reconciling effect clears a `hoveredNodeId` that leaves the node set, closing DW-66. No schema mutation, no Core RPC, no layout/viewport/persistence writes.
+
+**Files changed.**
+- `src/ui/erd/erd-graph.ts` — added pure, total `connectedNodeIds(edges, hoveredId): ReadonlySet<string>` (self + FK neighbours; self-loop no phantom; absent id → singleton). No change to `schemaToGraph`/`applyLayout`/types/edge derivation.
+- `src/ui/erd/erd-graph.test.ts` — added `connectedNodeIds` unit cases (with-FKs, no-FK singleton, self-ref no-phantom, composite-once, absent-id singleton).
+- `src/ui/workspace/ErdTabView.tsx` — added `connected`/`displayNodes` memos (opacity overlay, guarded against the stale-id frame + short-circuited at rest), exported `ErdHoverPanel` in a `<Panel position="top-left">` gated on hover, and the DW-66 reconcile effect. Edge overlay and all layout-persistence refs/handlers untouched.
+- `src/ui/workspace/ErdTabView.test.tsx` — kept existing structural assertions; added a direct `ErdHoverPanel` render test (name/dataType, PK/FK aria-labels, both badges on a PK∩FK column).
+
+**Review findings breakdown.** 12 unique findings across two adversarial reviewers (one duplicate merged). Triaged: 5 patches applied (all low — stale-id one-frame dim flash guarded symmetrically with the panel; null-guard consistency; `displayNodes` at-rest short-circuit; DW-67 docstring corrected; badge-zone width fixed for column-name alignment), 2 deferred (hover-panel column overflow unreachable-to-scroll on very wide tables; panel information is mouse-only / not keyboard-or-screen-reader accessible — both logged to `deferred-work.md`), 5 rejected (DW-66 by-id reconcile is sufficient because `tableId` is derived from schema+name so a "different table with the same id" cannot exist; latent wheel-zoom conflict only if the panel were interactive; the panel-absence test's class-count assertion is acceptable; dimming non-hot edges would violate the "keep edge-highlight verbatim" boundary; a DOM/jsdom interactive test contradicts the documented no-jsdom convention). No intent_gap, no bad_spec → no spec loopback; `review_loop_iteration` remains 0.
+
+**Verification.** `bunx tsc --noEmit` clean; `bun test` 1259 pass / 0 fail (71 files) — includes the new `connectedNodeIds` and `ErdHoverPanel` coverage; `bun run build` OK (regenerated all four `*-bundle.generated.ts`). Re-run green after the review patches.
+
+**Residual risks.** The two deferred items (wide-table panel scroll, hover-panel accessibility) are real but low-to-medium consequence — the full column list stays available in the node cards and Schema tree. No behavioral, API, security, or persistence surface changed; the hover feature is a pure presentation overlay.
+
+**Follow-up review recommended:** false — the review pass made only five low-severity, localized presentation/cleanup patches with no behavior/API/security/data impact and no spec re-derivation.

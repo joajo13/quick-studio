@@ -12,7 +12,13 @@
 import { describe, expect, test } from "bun:test";
 import { MarkerType } from "@xyflow/react";
 import type { SchemaForeignKeyInfo, SchemaTableInfo } from "../../shared/contract.ts";
-import { applyLayout, schemaToGraph, tableId, typeColorClass } from "./erd-graph.ts";
+import {
+  applyLayout,
+  connectedNodeIds,
+  schemaToGraph,
+  tableId,
+  typeColorClass,
+} from "./erd-graph.ts";
 
 function col(name: string, dataType = "integer"): SchemaTableInfo["columns"][number] {
   return { name, dataType, nullable: false };
@@ -328,6 +334,88 @@ describe("typeColorClass — functional data-type color families (Story 7.4)", (
     for (const t of ["text", "citext", "varchar", "inet", "bytea", "uuid", ""]) {
       expect(typeColorClass(t)).toBe("t-text");
     }
+  });
+});
+
+describe("connectedNodeIds — connected-set derivation (Story 9.5)", () => {
+  const ordersId = tableId("public", "orders");
+  const usersId = tableId("public", "users");
+
+  /** orders → users (single FK) reused across the with-FK / no-FK scenarios. */
+  function withFks(): ReturnType<typeof schemaToGraph> {
+    return schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        primaryKey: ["id"],
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "public", referencedTable: "users", referencedColumns: ["id"] },
+        ],
+      }),
+      table("users", [{ name: "id" }], { primaryKey: ["id"] }),
+    ]);
+  }
+
+  test("hover a table WITH FKs → the hovered id plus its neighbour", () => {
+    const { edges } = withFks();
+    expect([...connectedNodeIds(edges, ordersId)].sort()).toEqual([ordersId, usersId].sort());
+  });
+
+  test("hover the referenced table → the hovered id plus the referencing neighbour", () => {
+    const { edges } = withFks();
+    // Direction-independent: hovering `users` still surfaces `orders` (edge target match).
+    expect([...connectedNodeIds(edges, usersId)].sort()).toEqual([ordersId, usersId].sort());
+  });
+
+  test("table with NO FKs → the singleton { self }", () => {
+    const { edges } = schemaToGraph([
+      table("a", [{ name: "id" }]),
+      table("b", [{ name: "id" }]),
+    ]);
+    const aId = tableId("public", "a");
+    expect([...connectedNodeIds(edges, aId)]).toEqual([aId]);
+  });
+
+  test("self-referential FK → the singleton { self } (no phantom neighbour)", () => {
+    const { edges } = schemaToGraph([
+      table("employees", [{ name: "id" }, { name: "manager_id" }], {
+        primaryKey: ["id"],
+        foreignKeys: [
+          { columns: ["manager_id"], referencedSchema: "public", referencedTable: "employees", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    const id = tableId("public", "employees");
+    const connected = connectedNodeIds(edges, id);
+    expect(connected.size).toBe(1);
+    expect([...connected]).toEqual([id]);
+  });
+
+  test("composite FK → the single neighbour appears once (not per column)", () => {
+    const { edges } = schemaToGraph([
+      table("line_items", [{ name: "order_id" }, { name: "product_id" }], {
+        foreignKeys: [
+          {
+            columns: ["order_id", "product_id"],
+            referencedSchema: "public",
+            referencedTable: "order_products",
+            referencedColumns: ["order_id", "product_id"],
+          },
+        ],
+      }),
+      table("order_products", [{ name: "order_id" }, { name: "product_id" }], {
+        primaryKey: ["order_id", "product_id"],
+      }),
+    ]);
+    const lineItemsId = tableId("public", "line_items");
+    const orderProductsId = tableId("public", "order_products");
+    const connected = connectedNodeIds(edges, lineItemsId);
+    expect(connected.size).toBe(2);
+    expect([...connected].sort()).toEqual([lineItemsId, orderProductsId].sort());
+  });
+
+  test("an id absent from every edge → the singleton { id } (never throws)", () => {
+    const { edges } = withFks();
+    const ghostId = tableId("public", "ghost");
+    expect([...connectedNodeIds(edges, ghostId)]).toEqual([ghostId]);
   });
 });
 
