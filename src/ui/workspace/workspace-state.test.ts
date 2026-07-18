@@ -11,6 +11,7 @@ import {
   bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
+  openOrFocusCreateTable,
   openOrFocusSettings,
   openTab,
   restoreErdLayouts,
@@ -196,6 +197,93 @@ describe("openOrFocusSettings (Story 8.6 — singleton)", () => {
     s = openTab(s, "settings"); // second call focuses, does not append
     expect(settingsTabs()).toHaveLength(1);
     expect(s.nextId).toBe(nextIdAfterOpen); // no id burned on the focus path
+  });
+});
+
+describe("openOrFocusCreateTable (Story 9.4 — singleton)", () => {
+  test("opens a single active create-table tab when none exists (title 'New Table', no suffix)", () => {
+    const s = openOrFocusCreateTable(openMany("table", "query")); // ids 1,2 → create-table id 3
+    expect(s.tabs).toHaveLength(3);
+    const created = s.tabs[2]!;
+    expect(created).toEqual({ id: 3, kind: "create-table", title: "New Table" });
+    expect(s.activeTabId).toBe(3);
+    expect(s.nextId).toBe(4);
+  });
+
+  test("focuses the existing create-table tab instead of opening a second (no duplicate)", () => {
+    let s = openOrFocusCreateTable(openMany("table", "query")); // create-table id 3, active
+    s = activateTab(s, 1); // switch away from create-table
+    const before = s;
+    s = openOrFocusCreateTable(s); // click create again
+    expect(s.tabs.filter((t) => t.kind === "create-table")).toHaveLength(1);
+    expect(s.tabs).toHaveLength(before.tabs.length); // no new tab
+    expect(s.activeTabId).toBe(3); // the existing create-table tab is focused
+    expect(s.nextId).toBe(before.nextId); // no id burned on the focus path (draft is NOT preserved here — the switch-away unmounted the panel)
+  });
+
+  test("is a no-op when the create-table tab is already active", () => {
+    const s = openOrFocusCreateTable(openMany("table")); // create-table active
+    expect(openOrFocusCreateTable(s)).toBe(s); // identical reference — true no-op
+  });
+
+  test("does not mutate the input state", () => {
+    const a = openMany("table");
+    const b = openOrFocusCreateTable(a);
+    expect(a.tabs).toHaveLength(1);
+    expect(b).not.toBe(a);
+  });
+
+  test("openTab('create-table') routes through the singleton seam (no duplicate 'New Table 2')", () => {
+    // The widened UI enum type-accepts "create-table"; openTab must not mint a numeric-suffixed
+    // duplicate — it delegates to openOrFocusCreateTable (open-then-focus, never two).
+    let s = openTab(openMany("table"), "create-table"); // opens the one create-table tab (id 2)
+    const createTabs = () => s.tabs.filter((t) => t.kind === "create-table");
+    expect(createTabs()).toHaveLength(1);
+    expect(createTabs()[0]?.title).toBe("New Table");
+    const nextIdAfterOpen = s.nextId;
+    s = openTab(s, "create-table"); // second call focuses, does not append
+    expect(createTabs()).toHaveLength(1);
+    expect(s.nextId).toBe(nextIdAfterOpen); // no id burned on the focus path
+  });
+});
+
+describe("create-table tab NON-persistence (Story 9.4)", () => {
+  test("toWorkspaceSnapshot DROPS a create-table tab (never reaches disk)", () => {
+    let state = openMany("table"); // id 1
+    state = openOrFocusCreateTable(state); // create-table id 2, active
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    // The create-table tab is filtered out; only the persisted document tab survives.
+    // (`snapshot.tabs.kind` is typed `WorkspaceTabKind`, which cannot even be compared to
+    // "create-table" — tsc itself proves the drop; the `toEqual` confirms it at runtime.)
+    expect(snapshot.tabs).toEqual([{ id: 1, kind: "table", title: "Table 1" }]);
+    // The active tab WAS the (now-dropped) create-table tab, so toWorkspaceSnapshot
+    // reconciles activeTabId to the first surviving tab — it must never emit a dangling id.
+    expect(snapshot.activeTabId).toBe(1);
+    expect(restoreWorkspace(snapshot).activeTabId).toBe(1);
+  });
+
+  test("toWorkspaceSnapshot reconciles activeTabId when create-table is active (no dangling id → Core save accepts)", () => {
+    // Regression (Story 9.4): dropping the active create-table tab must not leave
+    // activeTabId pointing at an id that is absent from snapshot.tabs. Core's save
+    // validator rejects such a snapshot (activeTabId must be a present tab id), which
+    // would fail workspace.save for as long as create-table is the active tab.
+    let state = openMany("table", "query"); // ids 1, 2
+    state = openOrFocusCreateTable(state); // create-table id 3, active
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    const ids = snapshot.tabs.map((t) => t.id);
+    expect(ids).toEqual([1, 2]); // create-table dropped
+    // The reconciled activeTabId is one of the surviving ids (Core's "present tab id" rule).
+    expect(snapshot.activeTabId).toBe(1);
+  });
+
+  test("toWorkspaceSnapshot emits activeTabId:null when create-table is the only tab (Core's empty-tabs rule)", () => {
+    // The empty-workspace variant: with create-table as the sole tab, the filtered tabs
+    // are empty, so activeTabId MUST be null — Core rejects a non-null activeTabId with
+    // no tabs.
+    const state = openOrFocusCreateTable(emptyWorkspace()); // create-table is the only tab, active
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    expect(snapshot.tabs).toEqual([]);
+    expect(snapshot.activeTabId).toBeNull();
   });
 });
 

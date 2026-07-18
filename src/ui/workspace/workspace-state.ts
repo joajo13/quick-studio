@@ -30,12 +30,15 @@ import {
 } from "../../shared/contract.ts";
 
 /**
- * The kinds of Tab the Workspace can hold — the five document kinds plus the
- * `settings` system singleton (Story 8.6). Alias of the shared contract's
- * {@link WorkspaceTabKind} — kept as `TabKind` so every existing UI importer keeps
- * working unchanged; `contract.ts` is the single source of truth.
+ * The kinds of Tab the Workspace can hold — the five document kinds, the `settings`
+ * system singleton (Story 8.6), plus the UI-only `create-table` singleton (Story 9.4).
+ * A SUPERSET of the shared contract's {@link WorkspaceTabKind}: `create-table` is a
+ * transient, React-memory-only authoring surface that must NEVER persist, so it stays
+ * OUT of the persisted `WORKSPACE_TAB_KINDS` enum and lives only here in the UI. The
+ * persisted `WorkspaceSnapshotTab.kind` stays `WorkspaceTabKind`, so tsc PROVES a
+ * `create-table` tab can never reach disk (see {@link toWorkspaceSnapshot}'s filter).
  */
-export type TabKind = WorkspaceTabKind;
+export type TabKind = WorkspaceTabKind | "create-table";
 
 /**
  * A reference to a live table bound to a `table` Tab (Story 3.2). It carries ONLY
@@ -79,6 +82,7 @@ const KIND_LABEL: Readonly<Record<TabKind, string>> = {
   chat: "Chat",
   report: "Report",
   settings: "Settings",
+  "create-table": "New Table",
 };
 
 /** All Tab kinds (includes the `settings` system singleton) — the widened contract enum. */
@@ -105,6 +109,10 @@ export function openTab(state: WorkspaceState, kind: TabKind): WorkspaceState {
   // caller reaches openTab with it (the widened enum now type-accepts "settings"), so
   // no path can mint a duplicate "Settings 2" tab that bypasses the singleton guard.
   if (kind === "settings") return openOrFocusSettings(state);
+  // Create-table is likewise a SINGLETON (Story 9.4) — route it through its sole
+  // open-or-focus seam even if a caller reaches openTab with it (the widened UI enum
+  // now type-accepts "create-table"), so no path can mint a duplicate "New Table 2".
+  if (kind === "create-table") return openOrFocusCreateTable(state);
   const id = state.nextId;
   // Suffix the title with the tab's unique, monotonic id (never reused) so two
   // coexisting tabs of the same kind can never share a title — even after an
@@ -177,6 +185,29 @@ export function openOrFocusSettings(state: WorkspaceState): WorkspaceState {
   if (existing) return activateTab(state, existing.id);
   const id = state.nextId;
   const tab: WorkspaceTab = { id, kind: "settings", title: "Settings" };
+  return { ...state, tabs: [...state.tabs, tab], activeTabId: id, nextId: id + 1 };
+}
+
+/**
+ * Open the create-table tab, or FOCUS it if one is already open (Story 9.4). Create-table
+ * is a SINGLETON — you author one new table at a time — so this is the SOLE open seam:
+ * if a `create-table` tab exists it delegates to {@link activateTab} (a no-op when it is
+ * already active), else it appends exactly one `create-table` tab (title `"New Table"`,
+ * no numeric suffix — unlike {@link openTab}) and makes it active. Mirrors
+ * {@link openOrFocusSettings}. Pure — returns a new state.
+ *
+ * NOTE on the draft's lifetime: the create-table draft lives in `CreateTablePanel`'s
+ * local state (preserved VERBATIM per the Story 9.4 relocation constraint — it is NOT
+ * lifted to App-held per-tab state the way query/chat/report drafts are). `TabContent`
+ * mounts only the active tab body, so the draft survives a re-click that is a no-op on
+ * the already-active tab, but a switch to another tab and back remounts the panel fresh
+ * (draft discarded). Lifting it is deferred — see deferred-work.md.
+ */
+export function openOrFocusCreateTable(state: WorkspaceState): WorkspaceState {
+  const existing = state.tabs.find((t) => t.kind === "create-table");
+  if (existing) return activateTab(state, existing.id);
+  const id = state.nextId;
+  const tab: WorkspaceTab = { id, kind: "create-table", title: "New Table" };
   return { ...state, tabs: [...state.tabs, tab], activeTabId: id, nextId: id + 1 };
 }
 
@@ -344,11 +375,28 @@ export function toWorkspaceSnapshot(
   erdLayouts?: Readonly<Record<string, ErdTabLayout>>,
   lastProvider?: ProviderKind | null,
 ): WorkspaceSnapshot {
+  // Drop any UI-only `create-table` tab (Story 9.4): it is a transient authoring
+  // surface that must NEVER persist. The `.filter` is REQUIRED by tsc — the widened
+  // UI `TabKind` won't assign into the `WorkspaceTabKind`-typed `WorkspaceSnapshotTab.kind`,
+  // so this filter is the compile-enforced non-persist boundary at the save side.
+  const persistedTabs = state.tabs.filter(
+    (t): t is WorkspaceTab & { readonly kind: WorkspaceTabKind } => t.kind !== "create-table",
+  );
+  // Reconcile `activeTabId` against the SURVIVING tabs (mirror `restoreWorkspace`'s
+  // fallback). If the active tab was the dropped create-table tab, keeping the raw
+  // `state.activeTabId` would emit a dangling id (∉ persisted tab ids, or a non-null id
+  // with empty tabs) and Core's save validator would reject the whole snapshot
+  // (`workspace-registry.ts` — activeTabId must be a present tab id, or null when empty),
+  // so `workspace.save` would fail for as long as create-table is active. Fall back to
+  // the first surviving tab, or null when none remain.
+  const activeTabId = persistedTabs.some((t) => t.id === state.activeTabId)
+    ? state.activeTabId
+    : (persistedTabs[0]?.id ?? null);
   const base: WorkspaceSnapshot = {
     version: WORKSPACE_SNAPSHOT_VERSION,
     panelSizes: [...panelSizes],
-    tabs: state.tabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title })),
-    activeTabId: state.activeTabId,
+    tabs: persistedTabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title })),
+    activeTabId,
     nextId: state.nextId,
   };
   const pruned = erdLayouts ? pruneErdLayouts(erdLayouts, state.tabs) : {};

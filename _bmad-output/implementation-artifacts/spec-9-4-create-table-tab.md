@@ -2,7 +2,12 @@
 title: 'Create Table as a tab — retire the create-table overlay, mount CreateTablePanel as a non-persisted singleton tab (open-or-focus)'
 type: 'refactor'
 created: '2026-07-18'
-status: 'draft'
+status: 'done'
+baseline_revision: 'd075849'
+final_revision: '0524c78'
+review_loop_iteration: 0
+followup_review_recommended: false
+warnings: ['oversized']
 context:
   - '{project-root}/design-artifacts/workspace.html'
   - '{project-root}/_bmad-output/implementation-artifacts/spec-8-6-settings-singleton-tab.md'
@@ -83,7 +88,7 @@ context:
 
 ## Code Map
 
-- `src/ui/workspace/workspace-state.ts` — (1) widen `TabKind` (**line 38**) to `type TabKind = WorkspaceTabKind | "create-table"` (UI superset; contract stays authoritative for persisted kinds). (2) `KIND_LABEL` (**75-82**) gains `"create-table": "New Table"`. (3) `LAUNCHER_KINDS` filter (**92**) excludes both `settings` AND `create-table` (e.g. `TAB_KINDS.filter((k) => k !== "settings" && k !== "create-table")`, or an explicit five-kind list — confirm the cleanest form in step-02; note `TAB_KINDS` (**85**) is `WORKSPACE_TAB_KINDS` and does NOT include create-table, so a `.filter` over it alone won't surface create-table — `LAUNCHER_KINDS` is fine, but the exhaustive `Record<TabKind,…>` maps below still need create-table entries). (4) add pure `openOrFocusCreateTable(state)` beside `openOrFocusSettings` (**175-181**): focus existing create-table tab via `activateTab`, else append `{ id, kind: "create-table", title: "New Table" }`, activate, bump `nextId`. (5) `openTab` (**103**) gains `if (kind === "create-table") return openOrFocusCreateTable(state)` (beside the settings guard, **107**). (6) `toWorkspaceSnapshot` (**341-359**) tab `.map` (**350**) → `state.tabs.filter((t) => t.kind !== "create-table").map(…)` (tsc forces this: the widened `TabKind` won't assign into `WorkspaceSnapshotTab.kind`). `restoreWorkspace` (**257**) needs NO create-table handling (the type + Core validation guarantee none arrives).
+- `src/ui/workspace/workspace-state.ts` — (1) widen `TabKind` (**line 38**) to `type TabKind = WorkspaceTabKind | "create-table"` (UI superset; contract stays authoritative for persisted kinds). (2) `KIND_LABEL` (**75-82**) gains `"create-table": "New Table"`. (3) `LAUNCHER_KINDS` (**92**) — **LEAVE THE FILTER AS `TAB_KINDS.filter((k) => k !== "settings")`, unchanged.** `TAB_KINDS` (**85**) is the `WorkspaceTabKind[]` re-export of `WORKSPACE_TAB_KINDS` and does NOT contain `"create-table"`, so create-table is already excluded from launchers by construction. Do NOT add a `k !== "create-table"` clause: `k` is typed `WorkspaceTabKind`, so comparing it to the non-overlapping literal `"create-table"` is a **TS2367 no-overlap error**. The intent-contract's "exclude BOTH settings AND create-table" is satisfied here purely by TAB_KINDS' element type — no code change to this line. (The widened `TabKind` still forces `create-table` entries in the exhaustive `Record<TabKind,…>` maps below.) (4) add pure `openOrFocusCreateTable(state)` beside `openOrFocusSettings` (**175-181**): focus existing create-table tab via `activateTab`, else append `{ id, kind: "create-table", title: "New Table" }`, activate, bump `nextId`. (5) `openTab` (**103**) gains `if (kind === "create-table") return openOrFocusCreateTable(state)` (beside the settings guard, **107**). (6) `toWorkspaceSnapshot` (**341-359**) tab `.map` (**350**) → `state.tabs.filter((t) => t.kind !== "create-table").map(…)` (tsc forces this: the widened `TabKind` won't assign into `WorkspaceSnapshotTab.kind`). `restoreWorkspace` (**257**) needs NO create-table handling (the type + Core validation guarantee none arrives).
 - `src/ui/workspace/Workspace.tsx` — remove `createOpen` state (**294**), `toggleCreate` (**295-297**), the `!createOpen` strip gate (**343**, strip now always renders), and the `createOpen ? <CreateTablePanel/> : <TabContent/>` body branch (**368-397**, keep only `<TabContent/>`). Accept a new `onOpenCreateTable` prop (mirror `onOpenSettings`, **206/236-237**) threaded from App. In `LauncherRail`: replace the `createOpen`/`onToggleCreate` props (**98-99,105-106**) with `createTableActive`/`onOpenCreateTable`; on the create-table `<button>` (**138-152**) keep `data-testid="create-table-toggle"` / `aria-label="Create table"` / `title` / `+` glyph, set `aria-pressed={createTableActive}` and `onClick={onOpenCreateTable}`. Since both overlays are now gone, DELETE the `onOpenSettings` wrapper's `setCreateOpen(false)` (**316**) — there is no create overlay to dismiss (Settings' `aria-pressed` simplifies back to `activeTab?.kind === "settings"`, **310**). Add `create-table` entries to `LAUNCH_LABEL` (**30**) and `KIND_ICON` (**42**) for `Record<TabKind,…>` exhaustiveness (filler — create-table is not a launcher kind). Instantiate `LauncherRail` (**308-321**) with `createTableActive={activeTab?.kind === "create-table"}` and `onOpenCreateTable`. Thread `schemas`/`onTableCreated` (already Workspace props, **281,283 / used by the deleted overlay**) into `<TabContent>` (**375-396**) alongside the existing `onCloseTab={onClose}`.
 - `src/ui/workspace/TabContent.tsx` — add `tab.kind === "create-table"` routing branch (beside the settings branch at **576-584**, before the fallback placeholder **586-602**) → `<CreateTablePanel key={tab.id} schemas={schemas ?? []} onCreated={onTableCreated ?? (() => {})} onClose={() => onCloseTab?.(tab.id)} />`; import `CreateTablePanel` (beside the `SettingsPanel` import, **53**). Add `schemas?: ReadonlyArray<string>` and `onTableCreated?: (table: SchemaTableInfo) => void` to the props interface (**456-499**, `onCloseTab` already present **498**). `KIND_BLURB` (**57-66**) gains a harmless `create-table` entry (the tab never renders the placeholder body). No change to the other kind branches.
 - `src/ui/workspace/TabBar.tsx` — `TAB_ICON` (`Readonly<Record<TabKind, React.JSX.Element>>`, **18-57**) gains a `create-table` leading icon (reuse the rail's `+` plus glyph, `M12 5v14M5 12h14`, `strokeWidth={1.8}` to match the rail create button) so the create-table tab shows a proper leading icon. Roles / `aria-selected` / close-button / keyboard contract unchanged.
@@ -97,14 +102,51 @@ context:
 
 > Light on purpose — the loop's dev planner (step-02) enriches this. Ordered by dependency (the `TabKind` superset widens first, forcing the `Record<TabKind,…>` exhaustiveness fan-out + the `toWorkspaceSnapshot` type error that tsc pinpoints).
 
-- [ ] `src/ui/workspace/workspace-state.ts` — widen `TabKind` to `WorkspaceTabKind | "create-table"`; `KIND_LABEL.create-table`; extend `LAUNCHER_KINDS` to exclude create-table; add `openOrFocusCreateTable`; `openTab` create-table guard; `toWorkspaceSnapshot` non-persist filter.
-- [ ] `src/ui/App.tsx` — `WorkspaceAction` `openCreateTable` + reducer case + import; pass `onOpenCreateTable` to `<Workspace>`.
-- [ ] `src/ui/workspace/Workspace.tsx` — delete `createOpen`/`toggleCreate`/overlay branch/strip gate; add `onOpenCreateTable` prop; repoint the rail toggle (`create-table-toggle` preserved, `aria-pressed` = create-table active); rail loops `LAUNCHER_KINDS`; `LAUNCH_LABEL`/`KIND_ICON` create-table filler; `+` fallback guard excludes create-table; thread `schemas`/`onTableCreated` to `<TabContent>`.
-- [ ] `src/ui/workspace/TabContent.tsx` — `create-table` routing branch → `<CreateTablePanel key={tab.id} …/>`; import `CreateTablePanel`; `schemas`/`onTableCreated` props; `KIND_BLURB` filler.
-- [ ] `src/ui/workspace/TabBar.tsx` — `TAB_ICON.create-table` (`+` plus glyph, strokeWidth 1.8).
-- [ ] `src/ui/schema/CreateTablePanel.tsx` — verify UNTOUCHED (relocation only): testids, `role="alert"`, RPC, `inFlight` guard, compose helpers.
-- [ ] `src/ui/workspace/workspace-state.test.ts` — additive tests (open/focus/no-op, `openTab` routing, non-persist drop).
-- [ ] Confirm-in-step-02: exact `LAUNCHER_KINDS` form; whether the create-table tab title is `"New Table"` (recommended, matches the story wording) vs `"Create Table"`.
+- [x] `src/ui/workspace/workspace-state.ts` — widen `TabKind` to `WorkspaceTabKind | "create-table"`; `KIND_LABEL.create-table` = `"New Table"`; add `openOrFocusCreateTable` (title `"New Table"`, no suffix); `openTab` create-table guard; `toWorkspaceSnapshot` non-persist filter. **Do NOT touch the `LAUNCHER_KINDS` filter** — `TAB_KINDS` (`WorkspaceTabKind[]`) already excludes create-table; a `!== "create-table"` clause is a TS2367 no-overlap error.
+- [x] `src/ui/App.tsx` — `WorkspaceAction` `openCreateTable` + reducer case + import; pass `onOpenCreateTable` to `<Workspace>`.
+- [x] `src/ui/workspace/Workspace.tsx` — delete `createOpen`/`toggleCreate`/overlay branch/strip gate; add `onOpenCreateTable` prop; repoint the rail toggle (`create-table-toggle` preserved, `aria-pressed` = create-table active); rail loops `LAUNCHER_KINDS`; `LAUNCH_LABEL`/`KIND_ICON` create-table filler; `+` fallback guard excludes create-table; thread `schemas`/`onTableCreated` to `<TabContent>`.
+- [x] `src/ui/workspace/TabContent.tsx` — `create-table` routing branch → `<CreateTablePanel key={tab.id} …/>`; import `CreateTablePanel`; `schemas`/`onTableCreated` props; `KIND_BLURB` filler.
+- [x] `src/ui/workspace/TabBar.tsx` — `TAB_ICON.create-table` (`+` plus glyph, strokeWidth 1.8).
+- [x] `src/ui/schema/CreateTablePanel.tsx` — verify UNTOUCHED (relocation only): testids, `role="alert"`, RPC, `inFlight` guard, compose helpers.
+- [x] `src/ui/workspace/workspace-state.test.ts` — additive tests (open/focus/no-op, `openTab` routing, non-persist drop).
+
+**Resolved (step-02):** tab title = `"New Table"` (no numeric suffix), used verbatim in both `KIND_LABEL["create-table"]` and the `openOrFocusCreateTable` append. `LAUNCHER_KINDS` filter stays `TAB_KINDS.filter((k) => k !== "settings")` unchanged (see Design Notes).
+
+## Spec Change Log
+
+<!-- Append-only. Populated by step-04 during review loops. Empty until the first bad_spec loopback. -->
+
+## Review Triage Log
+
+<!-- Append-only. Populated by step-04 on every review pass. Empty until the first review pass. -->
+
+### 2026-07-18 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2: (high 1, medium 0, low 1)
+- defer: 1: (medium 1)
+- reject: 0
+- addressed_findings:
+  - `[high]` `[patch]` `toWorkspaceSnapshot` dropped the active create-table tab but left `activeTabId` pointing at its now-absent id (or non-null with empty tabs), so Core's save validator (`workspace-registry.ts` — activeTabId must be a present tab id, or null when empty) rejected `workspace.save` for as long as create-table was active. Both adversarial reviewers flagged it (verified against Core). Fixed: reconcile `activeTabId` against the filtered surviving tabs inside `toWorkspaceSnapshot` (mirror `restoreWorkspace`'s fallback), and added two save-side regression tests (reconciled-to-surviving-tab, and null-when-create-table-is-sole-tab).
+  - `[low]` `[patch]` the `openOrFocusCreateTable` docstring and the `TabContent` create-table comment overclaimed "the in-progress draft is preserved (same mounted panel)", which only holds for the no-op-when-already-active path — a switch-away-and-back remounts the panel and discards the local draft. Corrected both comments to state the draft is local to `CreateTablePanel` (preserved verbatim per the relocation constraint, not lifted), so it survives only while create-table stays active. The behavior gap itself (lift the draft to App-held state) is a contract-forbidden change here → deferred (see deferred-work.md).
+
+### 2026-07-18 — Review pass (follow-up)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 1: (high 0, medium 0, low 1)
+- defer: 1: (medium 0, low 1)
+- reject: 6
+- addressed_findings:
+  - `[low]` `[patch]` a test comment in the `openOrFocusCreateTable` focus-when-present case still read `nextId unchanged (draft preserved by construction)` — an incomplete cleanup of the prior pass's overclaim correction, since that test path switches away (unmounts the panel, discarding the draft) before re-focusing. Corrected the comment to state the draft is NOT preserved on that path (only that no id is burned on the focus seam). `workspace-state.test.ts:221`.
+- notes: Both adversarial reviewers (Blind Hunter, Edge Case Hunter) converged on ONE substantive finding — opening the transient create-table tab dirties the persisted snapshot (spurious `workspace.save` + a `nextId` id-gap) because `openOrFocusCreateTable` mutates the shared `WorkspaceState` (tabs/`activeTabId`/`nextId`) that autosave observes. Triaged `defer` (low): the snapshot stays valid, `nextId` is legitimately monotonic, and the dominant `activeTabId → first-surviving-tab` dirtying is EXPLICITLY sanctioned by the I/O matrix (line 71, "restores to a surviving tab (or the first)"); a `nextId`-only patch would be partial (the save still fires from the sanctioned `activeTabId` delta) and risks reusing a since-closed tab's id — logged as a NEW deferred-work entry for a dedicated pass, not patched. Rejected (spec-sanctioned / latent / impossible-today): `activeTabId → persistedTabs[0]` focus-loss on reload (I/O matrix line 71), `onCreated ?? (()=>{})` / `schemas ?? []` defensive defaults (code map line 93), `pruneErdLayouts(state.tabs)` (create-table never carries an ERD layout), the `aria-pressed` inactive-when-backgrounded observation (spec-intended, mirrors Settings), and the `LAUNCH_LABEL`/`KIND_ICON`/`KIND_BLURB` filler entries (spec-sanctioned `Record<TabKind,…>` exhaustiveness).
+
+## Design Notes
+
+**Why the UI `TabKind` is a superset, not a contract widening (the deliberate 8.6 divergence).** Story 8.6 added `settings` to the persisted `WORKSPACE_TAB_KINDS` contract enum because a Settings tab *persists* across reload. `create-table` is the opposite: a one-shot, React-memory-only authoring surface (it self-closes on `status:"ok"` and its only value is the live draft), so it must NEVER reach disk. Encoding that as `type TabKind = WorkspaceTabKind | "create-table"` (UI-only) while `WorkspaceSnapshotTab.kind` stays `WorkspaceTabKind` makes non-persist a *type theorem*: `toWorkspaceSnapshot`'s `.map` stops compiling until a `.filter((t) => t.kind !== "create-table")` is added (save boundary), and Core's `isTabKind` — which lives in Core (`src/core/workspace-registry.ts:80`, `src/core/workspace-store.ts:95`), derived from `WORKSPACE_TAB_KINDS`, NOT in `contract.ts` — rejects any hand-edited `kind:"create-table"` on load (load boundary). Zero Core edits, no `WORKSPACE_SNAPSHOT_VERSION` bump.
+
+**`LAUNCHER_KINDS` needs no code change.** `LAUNCHER_KINDS = TAB_KINDS.filter((k) => k !== "settings")` and `TAB_KINDS` is the `WorkspaceTabKind[]` re-export of `WORKSPACE_TAB_KINDS`, which does not contain `"create-table"`. So create-table is already excluded from the per-kind launcher loop by TAB_KINDS' element type. Adding `&& k !== "create-table"` would be a **TS2367** ("no overlap") error because `k: WorkspaceTabKind` can never equal `"create-table"`. The intent-contract's "exclude BOTH settings AND create-table" is satisfied structurally, not by an added clause.
+
+**Where the real work is (not just a mechanical enum bump).** The overlay wired `schemas`/`onTableCreated` straight into `<CreateTablePanel>` (`Workspace.tsx:371-372`). Relocating create-table to a tab means those two props must now flow Workspace → `<TabContent>` → `<CreateTablePanel>`, and `TabContent`'s props interface (which today has `onCloseTab` but not `schemas`/`onTableCreated`) must gain them. This is the substantive change; everything else (widen `TabKind`, add `openOrFocusCreateTable` mirroring `openOrFocusSettings:175`, the exhaustive-`Record` fan-out, the `toWorkspaceSnapshot` filter) is forced and pinpointed by tsc.
 
 ## Verification
 
@@ -120,3 +162,34 @@ context:
 - Trigger an error (e.g. duplicate name) → inline `role="alert"`, draft preserved, tab stays open.
 - Open Settings AND create-table → both are plain tabs, switch freely, no overlay.
 - Reload with a create-table tab open → it does NOT reopen (non-persist).
+
+## Auto Run Result
+
+Status: done
+
+**Summary.** Relocated the create-table surface from a React-memory overlay (`createOpen`/`toggleCreate` in `Workspace.tsx`) into a Chrome-style, non-persisted singleton tab, mirroring the Story 8.6 Settings move. New Table now opens as a normal tab in the strip (open-or-focus singleton, title `"New Table"`), `CreateTablePanel` mounts as the tab body through `TabContent` (relocation only — panel internals untouched), and the tab is enforced non-persistent at the type boundary (UI `TabKind` widened to `WorkspaceTabKind | "create-table"`; `toWorkspaceSnapshot` filters it out) with zero Core edits and no snapshot-version bump.
+
+**Files changed.**
+- `src/ui/workspace/workspace-state.ts` — widened `TabKind`; `KIND_LABEL["create-table"]="New Table"`; added `openOrFocusCreateTable`; `openTab` create-table singleton guard; `toWorkspaceSnapshot` non-persist filter + activeTabId reconciliation (review fix).
+- `src/ui/App.tsx` — `WorkspaceAction` `openCreateTable` variant + reducer case + import; `onOpenCreateTable` threaded to `<Workspace>`.
+- `src/ui/workspace/Workspace.tsx` — deleted overlay (`createOpen`/`toggleCreate`/strip gate/body branch + unused imports); added `onOpenCreateTable` prop; repointed rail `create-table-toggle` (testid preserved, `aria-pressed`=create-table active); `+` fallback excludes both singletons; threaded `schemas`/`onTableCreated` to `<TabContent>`.
+- `src/ui/workspace/TabContent.tsx` — `create-table` routing branch → `<CreateTablePanel>`; `schemas`/`onTableCreated` props; `KIND_BLURB` entry.
+- `src/ui/workspace/TabBar.tsx` — `TAB_ICON["create-table"]` (`+` plus glyph).
+- `src/ui/workspace/workspace-state.test.ts` — additive tests: `openOrFocusCreateTable` open/focus/no-op/immutability, `openTab` singleton routing, non-persist drop, and two save-side activeTabId-reconciliation regression tests (review fix).
+- `src/ui/schema/CreateTablePanel.tsx`, `src/shared/contract.ts` — UNCHANGED (verified): relocation-only + non-persist-by-type were honored.
+
+**Review findings breakdown.** 2 patches applied (1 high: `toWorkspaceSnapshot` dangling `activeTabId` → Core rejected `workspace.save` while create-table active — reconciled + 2 regression tests; 1 low: corrected docstring/comment that overclaimed cross-switch draft preservation). 1 deferred (create-table draft not lifted across tab switches — contract-forbidden to fix here, see deferred-work.md). 0 intent_gap, 0 bad_spec, 0 rejected. Both adversarial reviewers (Blind Hunter, Edge Case Hunter) converged on the same two findings.
+
+**Verification.** `bunx tsc --noEmit` clean; `bun test` 1249 pass / 0 fail; `bun run build` EXIT 0. `followup_review_recommended: true` — the high-severity fix touches the save/persistence boundary and warrants independent eyes.
+
+**Residual risks.** The deferred draft-lifetime gap (draft discarded on switch-away) remains as a known, non-regressive UX limitation. The create-table title `"New Table"` is not localized (matches the rest of the tab kinds — out of scope).
+
+### Follow-up review pass (2026-07-18)
+
+A second, independent adversarial review (Blind Hunter + Edge Case Hunter, both at session model capability) ran against the full since-baseline diff. Outcome: **1 low patch, 1 low defer, 0 intent_gap, 0 bad_spec, 6 reject** — no new high-severity issues; the story stays `done`.
+
+- **Patch (low).** A test comment in the `openOrFocusCreateTable` focus-when-present case still claimed the draft was "preserved by construction" on a path that actually switches away (unmounting the panel) — an incomplete cleanup of the prior pass's overclaim correction. Comment corrected (`workspace-state.test.ts:221`). No behavior change.
+- **Defer (low).** Both reviewers converged on one substantive observation: opening the transient create-table tab dirties the persisted snapshot (a spurious `workspace.save` + a one-per-open `nextId` id-gap) because `openOrFocusCreateTable` mutates the shared `WorkspaceState` autosave observes. Triaged `defer`, not patched: the snapshot stays valid, `nextId` is legitimately monotonic, and the dominant `activeTabId → first-surviving-tab` dirtying is EXPLICITLY sanctioned by the intent-contract's I/O matrix (line 71). A `nextId`-only patch would be partial (the save still fires from the sanctioned `activeTabId` delta) and risks reusing a since-closed tab's id. Logged as a NEW deferred-work entry for a dedicated pass.
+- **Rejected (6).** All spec-sanctioned or latent/impossible-today: `activeTabId → persistedTabs[0]` on-reload focus shift (I/O matrix line 71), the `onCreated ?? (()=>{})` / `schemas ?? []` defensive defaults (code map line 93), `pruneErdLayouts(state.tabs)` (create-table never carries an ERD layout), the `aria-pressed`-inactive-when-backgrounded observation (spec-intended, mirrors Settings), and the `LAUNCH_LABEL`/`KIND_ICON`/`KIND_BLURB` filler entries (`Record<TabKind,…>` exhaustiveness).
+
+**Verification (follow-up).** `bunx tsc --noEmit` clean; `bun test` 1249 pass / 0 fail; `bun run build` EXIT 0. `followup_review_recommended` lowered to `false` — this pass made only a single localized, low-consequence doc patch and surfaced no new high-severity work.

@@ -54,6 +54,13 @@ const TAB_ICON: Readonly<Record<TabKind, React.JSX.Element>> = {
       <circle cx="12" cy="12" r="3" />
     </svg>
   ),
+  // The `create-table` singleton tab's leading icon (Story 9.4) — reuses the rail's `+`
+  // plus glyph at the same strokeWidth (1.8) so the tab-strip icon matches the rail button.
+  "create-table": (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  ),
 };
 
 export function TabBar({

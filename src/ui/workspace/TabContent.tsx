@@ -51,6 +51,7 @@ import { QueryTabView } from "./QueryTabView.tsx";
 import { ReportTabView } from "../report/ReportTabView.tsx";
 import { emptyReport, type ReportState, type ReportStateUpdate } from "../report/report-state.ts";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
+import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
 import type { TabKind, TableRef, WorkspaceTab } from "./workspace-state.ts";
 
 /** Short human blurb per Tab kind for the (non-table) placeholder body. */
@@ -63,6 +64,9 @@ const KIND_BLURB: Readonly<Record<TabKind, string>> = {
   // The `settings` tab renders SettingsPanel, never the placeholder body — this entry
   // only keeps the Record<TabKind,…> exhaustive under tsc.
   settings: "Manage connections and AI providers.",
+  // The `create-table` tab renders CreateTablePanel, never the placeholder body — this
+  // entry only keeps the Record<TabKind,…> exhaustive under tsc (Story 9.4).
+  "create-table": "Author a new table.",
 };
 
 function EmptyState(): React.JSX.Element {
@@ -468,6 +472,8 @@ export function TabContent({
   erdLayout,
   onErdLayoutChange,
   onCloseTab,
+  schemas,
+  onTableCreated,
 }: {
   tab: WorkspaceTab | null;
   /** PK column names of the active table tab's bound table (for the grid key icon). */
@@ -496,6 +502,10 @@ export function TabContent({
   onErdLayoutChange?: (tabId: number, layout: ErdTabLayout) => void;
   /** Close a tab by id — wired to the settings tab body's in-panel "close" (Story 8.6). */
   onCloseTab?: (id: number) => void;
+  /** Existing schema names for the create-table target selector (Story 9.4). */
+  schemas?: ReadonlyArray<string>;
+  /** Append a freshly-created table to the App-level list on create success (Story 9.4). */
+  onTableCreated?: (table: SchemaTableInfo) => void;
 }): React.JSX.Element {
   if (tab === null) {
     return <EmptyState />;
@@ -581,6 +591,24 @@ export function TabContent({
     // no-op while the singleton holds, but robust if two settings tabs ever coexist
     // (e.g. a legacy snapshot before restore's collapse defense runs).
     return <SettingsPanel key={tab.id} onClose={() => onCloseTab?.(tab.id)} />;
+  }
+
+  if (tab.kind === "create-table") {
+    // The create-table tab body (Story 9.4): CreateTablePanel mounts here in the normal
+    // tab-body slot (it used to be an overlay). Its "close" button AND its post-create
+    // auto-close both call onClose → the normal closeTab path, so the surface self-closes
+    // on a successful create exactly as it did in the overlay era. key={tab.id} mirrors
+    // every sibling branch so the body remounts per tab id — note only the ACTIVE tab
+    // body is mounted, so switching away unmounts the panel and its local draft is
+    // discarded (the draft is intentionally not lifted; see openOrFocusCreateTable).
+    return (
+      <CreateTablePanel
+        key={tab.id}
+        schemas={schemas ?? []}
+        onCreated={onTableCreated ?? (() => {})}
+        onClose={() => onCloseTab?.(tab.id)}
+      />
+    );
   }
 
   return (
