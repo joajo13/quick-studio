@@ -1023,3 +1023,121 @@ So that writing queries feels like a proper SQL editor.
 **Given** a schema/table/column prefix
 **When** I press Ctrl+Space (or continue typing)
 **Then** matching schemas/tables/columns from the loaded schema are suggested and insert on select; ⌘↵ still runs and the guarded-execute RPC behavior is unchanged
+
+## Epic 9: Polish, Chat-Driven Reports & Workspace Ergonomics
+
+> **Post-redesign iteration.** Epics 7–8 brought the UI to the neutral language and restored artifact fidelity; this epic acts on a fresh round of hands-on feedback from running the app. Three visual-polish items (9.1–9.3) were hand-tuned live and committed as the fixed visual direction — the loop implements the remaining feature and structural work (9.4–9.7) against that look rather than guessing it. The neutral prototypes remain the visual source of truth. shadcn/ui + Radix (from 8.1) and the existing neutral tokens are the component baseline; no coral, no new palette.
+
+### Story 9.1: Shell control icons — centered glyphs + a real Settings gear
+
+As a user,
+I want the tab close, new-tab, and Settings controls to look correct,
+So that the chrome reads as finished rather than slightly off.
+
+**Acceptance Criteria:**
+
+**Given** the tab strip and the rail
+**When** I view the close (`×`), new-tab (`+`), and Settings controls
+**Then** the close and new-tab glyphs are centered SVGs (not off-center text characters) and the Settings control shows a real lucide cog — NOT the previous circle-plus-rays mark that read as a sun — on both the rail toggle and the Settings tab's leading icon
+
+> Status: DONE (hand-tuned visual pass, committed). The loop only verifies/regression-tests this; no re-implementation.
+
+### Story 9.2: Report view — shadcn controls across the toolbar and blocks
+
+As a user,
+I want the Report view's controls to match the rest of the app,
+So that it doesn't look like a different, rougher screen.
+
+**Acceptance Criteria:**
+
+**Given** a Report tab
+**When** I view the toolbar (target picker + export/add buttons) and each block's controls (run, table/chart toggle, chart mark/x/y/series pickers, reorder/remove)
+**Then** every native `<select>` is a shadcn `Select` and every button is a shadcn `Button`, consistent in height, spacing, and treatment with the rest of the app — no bespoke mono/ink classes, no browser-default select chrome
+
+> Status: DONE (hand-tuned visual pass, committed). Radix Select forbids empty item values, so `__default__`/`__none__` sentinels map to null/"". The loop only verifies/regression-tests this.
+
+### Story 9.3: Borderless SQL console
+
+As a user,
+I want the query editor to blend into its panel,
+So that the console feels integrated, not boxed-in.
+
+**Acceptance Criteria:**
+
+**Given** the Query tab's SQL editor
+**When** I view it
+**Then** the editor has no border/rounded/background box (`recuadro`) — it sits directly on the card surface and reads as part of the panel — while CodeMirror highlighting, autocomplete, ⌘↵ run, and the guarded-execute RPC are unchanged
+
+> Status: DONE (hand-tuned visual pass, committed). The loop only verifies/regression-tests this.
+
+### Story 9.4: Create Table as a tab
+
+As a user,
+I want New Table to open as a normal tab,
+So that I can move between it and my work without an overlay hiding the tab strip.
+
+**Acceptance Criteria:**
+
+**Given** the rail's Create-table control
+**When** I click it
+**Then** a Create-table surface opens as a normal tab in the strip (routed through the same tab model as every other tab — open/activate/close/persist), NOT as an overlay that hides the tab strip and the new-tab `+`
+
+**Given** the CreateTablePanel's behavior (schema pickers, DDL compose, the create RPC, its confirm/guard flow, testids, and `role="alert"` lines)
+**When** it is relocated into a tab body
+**Then** all of it is preserved verbatim — this is a relocation (overlay → tab), mirroring how Settings moved in Story 8.6, not a rewrite
+
+**Given** the create flow completes (a table is created) or is closed
+**When** it resolves
+**Then** the tab closes (or stays, per the least-surprising choice) through the normal `closeTab` path and the created table is reflected in the schema tree
+
+### Story 9.5: ERD hover — column detail, PK/FK, and relationship highlight
+
+As a user,
+I want hovering a table in the ERD to show something useful,
+So that the diagram is explorable, not just a static picture.
+
+**Acceptance Criteria:**
+
+**Given** the ERD
+**When** I hover a table node
+**Then** its connected relationships/edges are visually highlighted (the related tables stand out from the rest) AND a tooltip/panel shows the table's columns with their types and PK/FK badges — resolving the current "empty" hover feel
+
+**Given** the hover ends
+**When** the pointer leaves the node
+**Then** the highlight and tooltip clear cleanly (no stale highlight if the node set changes mid-hover), and existing ERD pan/zoom/layout-persist behavior is unchanged
+
+### Story 9.6: Persist AI provider API keys across sessions
+
+As a user,
+I want my AI provider API key to be remembered,
+So that I don't have to re-enter it every time.
+
+**Acceptance Criteria:**
+
+**Given** I have entered and saved an AI provider API key in persistent mode
+**When** I close and reopen the app (persistent mode)
+**Then** the provider key is restored from the encrypted provider-key store (never plaintext, never logged) and the provider shows as configured without re-entry — the credential trust boundary (Ring 1, keychain/passphrase-derived key) is preserved
+
+**Given** the Settings AI-providers surface
+**When** a key is already persisted
+**Then** it clearly indicates the provider is configured (masked, never revealing the key) with an explicit remove/replace affordance, and the schema-only exposure note is preserved
+
+### Story 9.7: Generate reports from the chat (open, view, and edit)
+
+As a user,
+I want to ask the chat to build a report and then open, view, and edit it,
+So that I can go from a question to an editable report without hand-assembling blocks.
+
+**Acceptance Criteria:**
+
+**Given** the AI chat with a connected provider
+**When** I ask it to build a report (e.g. "make a report of revenue by country")
+**Then** the chat produces a report the Core assembles into a Report tab (prose + query blocks) that opens for viewing — the Core stays the sole Provider caller and sole risk gate (schema-only context by default; SQL runs through the guarded executor), and no data leaves the machine
+
+**Given** a chat-generated report is open in a Report tab
+**When** I edit it
+**Then** I can re-run its queries and edit its prose/charts with the SAME full editing affordances as a hand-built report (Story 9.2's shadcn controls), and the result exports via the existing snapshot/live-report paths
+
+**Given** the chat cannot produce a valid report (provider error, empty result, malformed spec)
+**When** it fails
+**Then** it degrades with a clear message and opens nothing half-built — never a partial or broken Report tab

@@ -130,3 +130,16 @@ development_status:
   8-7-surface-active-connection: done     # Story 8.7: Surface the active connection in Settings/Connections
   8-8-sql-editor-autocomplete: done       # Story 8.8: SQL editor — CodeMirror 6 highlighting + autocomplete
   epic-8-retrospective: optional
+
+  # Epic 9: Polish, Chat-Driven Reports & Workspace Ergonomics
+  # 9-1/9-2/9-3 were hand-tuned live and committed as the fixed visual direction (no spec; done).
+  # 9-4..9-7 carry draft specs for the loop to plan + implement, ordered easy→hard.
+  epic-9: in-progress
+  9-1-shell-control-icons: done              # Story 9.1: Centered close/new-tab glyphs + real Settings gear (visual pass, committed)
+  9-2-report-shadcn-controls: done           # Story 9.2: Report toolbar + block controls to shadcn Select/Button (visual pass, committed)
+  9-3-borderless-sql-console: done           # Story 9.3: Borderless SQL console — editor blends into the panel (visual pass, committed)
+  9-4-create-table-tab: ready-for-dev        # Story 9.4: Create Table as a tab (retire the overlay; mirrors 8.6)
+  9-5-erd-hover-detail: ready-for-dev        # Story 9.5: ERD hover — columns + PK/FK badges + relationship highlight
+  9-6-persist-provider-key: ready-for-dev    # Story 9.6: Persist AI provider API keys across sessions (persistent mode)
+  9-7-reports-from-chat: ready-for-dev       # Story 9.7: Generate reports from the chat (open, view, edit)
+  epic-9-retrospective: optional
