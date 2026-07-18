@@ -33,7 +33,13 @@ import type {
 } from "../shared/contract.ts";
 import { rpc, saveWorkspaceSync } from "./rpc/client.ts";
 import type { ChatState } from "./workspace/chat-model.ts";
-import { emptyReport, type ReportState, type ReportStateUpdate } from "./report/report-state.ts";
+import type { ReportSpec } from "../shared/report-spec.ts";
+import {
+  emptyReport,
+  reportStateFromSpec,
+  type ReportState,
+  type ReportStateUpdate,
+} from "./report/report-state.ts";
 import { createSaveScheduler, type SaveScheduler } from "./workspace/save-scheduler.ts";
 import { Workspace } from "./workspace/Workspace.tsx";
 import {
@@ -562,6 +568,18 @@ export function App(): React.JSX.Element {
     return <LayoutGate />;
   }
 
+  // Open a chat-generated ReportSpec as a new Report tab (Story 9.7). ONE synchronous
+  // handler: read the id `openTab` is about to mint (report is a non-singleton kind, so
+  // this is deterministic — `workspace-state.ts:116`), dispatch the open, then seed
+  // `reportStates` for that exact id. React 18 batches both into one commit, so the
+  // newly-activated report tab mounts with its built state already present — no
+  // empty-report flash. Exactly one id-minting dispatch; the seed stays synchronous.
+  const onOpenReport = (spec: ReportSpec): void => {
+    const id = workspace.nextId;
+    dispatch({ type: "open", kind: "report" });
+    setReportStates((cur) => new Map(cur).set(id, reportStateFromSpec(spec)));
+  };
+
   return (
     <div className="h-full">
       <Workspace
@@ -619,6 +637,7 @@ export function App(): React.JSX.Element {
         lastProvider={lastProvider}
         reportStates={reportStates}
         onReportStateChange={onReportStateChange}
+        onOpenReport={onOpenReport}
         erdLayouts={erdLayouts}
         onErdLayoutChange={onErdLayoutChange}
         extraTables={createdTables}

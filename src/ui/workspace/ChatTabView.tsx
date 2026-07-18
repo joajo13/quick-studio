@@ -44,6 +44,7 @@ import {
   type SandboxRenderDoc,
 } from "../../shared/contract.ts";
 import { extractChartFence, parseChartSpec } from "../../shared/chart-spec.ts";
+import { extractReport, type ReportSpec } from "../../shared/report-spec.ts";
 import { SandboxFrame } from "../sandbox/SandboxFrame.tsx";
 import { DataGrid } from "../data/DataGrid.tsx";
 import { rpc } from "../rpc/client.ts";
@@ -78,6 +79,7 @@ export type SendOutcome =
       readonly answer: string;
       readonly query: string | null;
       readonly reasoning: string | null;
+      readonly report: ReportSpec | null;
       readonly context: ChatContextSummary;
     }
   | { readonly kind: "error"; readonly message: string };
@@ -115,11 +117,15 @@ export async function streamSend(
         if (partial.text.trim().length === 0 && reasoning === null) {
           outcome = { kind: "error", message: "empty response" };
         } else {
+          // A validated report strips its ```report fence from the committed answer
+          // so the bubble shows prose, not raw JSON (mirrors the ```chart strip).
+          const answer = chunk.report !== null ? extractReport(partial.text).markdown : partial.text;
           outcome = {
             kind: "answer",
-            answer: partial.text,
+            answer,
             query: chunk.query,
             reasoning,
+            report: chunk.report,
             context: chunk.context,
           };
         }
@@ -272,7 +278,15 @@ export function decideMessageView(
   // JSON is malformed (parse fails → rawChart null) — exactly the "invalid chart" edge the
   // I/O matrix says must render Markdown only, never the raw JSON (P1).
   const { markdown } = extractChartFence(message.text);
-  return { bubbleText: markdown, showBubble: chartDoc === null };
+  // A committed report-bearing message already had its ```report fence stripped at
+  // commit time (streamSend); strip it here too (idempotent, mirrors the chart fence
+  // strip) so raw JSON can never surface even if a caller feeds an unstripped text.
+  const { markdown: withoutReport } = extractReport(markdown);
+  // A report-only answer (a bare ```report fence with no surrounding prose) strips to an
+  // empty string; suppress the empty prose bubble so only the "open in report tab" action
+  // shows, never a blank bubble beside it.
+  const reportOnlyBlank = message.report !== null && withoutReport.trim() === "";
+  return { bubbleText: withoutReport, showBubble: chartDoc === null && !reportOnlyBlank };
 }
 
 /** A memo entry pairing a composed doc with the (text, run-entry) inputs it was built from. */
@@ -347,6 +361,7 @@ const ICON_DOWN = "M17 14V4h3v10zM17 14l-4 7a2 2 0 0 1-2-2v-3H6a2 2 0 0 1-2-2.3l
 const ICON_SHARE = "M8 11l8-4M8 13l8 4M18 8a2.4 2.4 0 1 0 0-4.8A2.4 2.4 0 0 0 18 8ZM6 14.4a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8ZM18 20.8a2.4 2.4 0 1 0 0-4.8 2.4 2.4 0 0 0 0 4.8Z";
 const ICON_REGEN = "M20 11a8 8 0 0 0-14-4.5L4 8M4 4v4h4M4 13a8 8 0 0 0 14 4.5L20 16M20 20v-4h-4";
 const ICON_MORE = "M5 12h.01M12 12h.01M19 12h.01";
+const ICON_REPORT = "M5 3h14v18H5zM9 8h6M9 12h6M9 16h3";
 
 /**
  * The generated-query block under an assistant message: the SQL read-only inside the
@@ -531,6 +546,7 @@ export function ChatTabView({
   state,
   onStateChange,
   lastProvider = null,
+  onOpenReport,
 }: {
   /** The session-only chat state for this Tab (never persisted to disk/snapshot). */
   state: ChatState;
@@ -541,6 +557,12 @@ export function ChatTabView({
    * Optional (defaults to `null`) so existing call sites/tests need not thread it.
    */
   lastProvider?: ProviderKind | null;
+  /**
+   * Open a chat-generated {@link ReportSpec} as a new Report tab (Story 9.7). Optional
+   * (existing call sites/tests need not thread it) — when absent, a report-bearing
+   * message renders its "open in report tab" action as a no-op click.
+   */
+  onOpenReport?: (spec: ReportSpec) => void;
 }): React.JSX.Element {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -668,7 +690,14 @@ export function ChatTabView({
       }
       if (outcome.kind === "answer") {
         onStateChange(
-          appendAnswer(afterUser, outcome.answer, outcome.context, outcome.query, outcome.reasoning),
+          appendAnswer(
+            afterUser,
+            outcome.answer,
+            outcome.context,
+            outcome.query,
+            outcome.reasoning,
+            outcome.report,
+          ),
         );
       } else {
         setError(outcome.message);
@@ -822,6 +851,9 @@ export function ChatTabView({
               // render doc (memoized for stable identity, P2); everything else keeps the
               // plain-text bubble (chartDoc === null).
               const chartDoc = m.role === "assistant" ? chartDocs.get(i)?.doc ?? null : null;
+              // A Core-validated ReportSpec, hoisted to a const so the "open" click closure
+              // stays type-narrowed (no cast) and the affordance can gate on it + the handler.
+              const reportSpec = m.role === "assistant" ? m.report : null;
               // The plain bubble shows fence-STRIPPED prose (never raw ```chart``` JSON) and is
               // suppressed once the sandbox renders the rich block — no duplicated prose (P1).
               const { bubbleText, showBubble } = decideMessageView(m, chartDoc);
@@ -863,6 +895,22 @@ export function ChatTabView({
                             setRuns((r) => ({ ...r, [i]: { ...runEntry(i), selectedRow: row } }))
                           }
                         />
+                      ) : null}
+                      {/* Story 9.7: a Core-validated ReportSpec renders a single explicit "open
+                          in report tab" action — the only way a chat-generated report ever
+                          opens. Mirrors ChatQueryRun's raw <button>+Icon "open in editor"
+                          pattern (this view imports no shadcn Button). */}
+                      {reportSpec !== null && onOpenReport !== undefined ? (
+                        <button
+                          type="button"
+                          title="Open in report tab"
+                          aria-label="open in report tab"
+                          onClick={() => onOpenReport(reportSpec)}
+                          className="inline-flex w-fit items-center gap-1.5 rounded-md border border-[var(--coral-line)] px-2.5 py-1 font-mono text-[12px] lowercase text-[var(--foreground)] transition-colors hover:bg-[var(--accent)]"
+                        >
+                          <Icon path={ICON_REPORT} className="h-3.5 w-3.5" />
+                          open in report tab
+                        </button>
                       ) : null}
                       {/* Story 5.6: a validated chart spec + query rows renders rich Markdown +
                           an Observable Plot chart inside the Ring 3 sandbox iframe. The container

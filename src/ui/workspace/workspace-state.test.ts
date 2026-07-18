@@ -77,6 +77,21 @@ describe("openTab", () => {
     expect(a.activeTabId).toBeNull();
     expect(b).not.toBe(a);
   });
+
+  test("opening a report mints exactly state.nextId and activates it — the App open seam invariant", () => {
+    // App.onOpenReport reads `id = workspace.nextId` to predict the tab openTab will mint,
+    // then seeds reportStates[id]. This test PINS that coupling: for the non-singleton
+    // `report` kind, the opened tab's id === the prior nextId and becomes active. If this
+    // ever breaks (e.g. report becomes a singleton or id logic changes), the App seed would
+    // land on the wrong id and the report tab would mount empty — so keep this green.
+    const before = openMany("table", "chat"); // arbitrary non-empty state; nextId === 3
+    const predicted = before.nextId;
+    const after = openTab(before, "report");
+    const opened = after.tabs.find((t) => t.kind === "report");
+    expect(opened?.id).toBe(predicted);
+    expect(after.activeTabId).toBe(predicted);
+    expect(after.nextId).toBe(predicted + 1);
+  });
 });
 
 describe("closeTab — non-active tab", () => {

@@ -12,6 +12,7 @@
  */
 
 import { parseChartSpec, type ChartSpec } from "./chart-spec.ts";
+import type { ReportSpec } from "./report-spec.ts";
 
 /* ------------------------------------------------------------------ *
  * Frozen-data schema — versioned, typed cell values
@@ -539,6 +540,10 @@ export type ChatContextSummary = {
  *  - `done` — the terminal frame: the Core-extracted `query` (pure fenced-block
  *    extraction over the fully-accumulated answer, `null` when none) plus the
  *    schema-only `context` summary — feeds the unchanged 5.3 run/confirm affordance.
+ *    Story 9.7 additively widens this frame with the Core-validated `report`: a
+ *    `ReportSpec` when the model emitted a well-formed ` ```report ` fence that passed
+ *    `parseReportSpec`, else `null` — the sole gate for the chat's "open in report tab"
+ *    affordance.
  *  - `error` — a redacted terminal failure (pre-flight validation OR a mid-stream
  *    provider throw). Carries a mapped {@link RpcErrorCode} + a terse message; the
  *    provider key NEVER appears here (redacted, stderr-only in Core).
@@ -547,7 +552,12 @@ export type ChatContextSummary = {
 export type ChatStreamChunk =
   | { readonly type: "text-delta"; readonly text: string }
   | { readonly type: "reasoning-delta"; readonly text: string }
-  | { readonly type: "done"; readonly query: string | null; readonly context: ChatContextSummary }
+  | {
+      readonly type: "done";
+      readonly query: string | null;
+      readonly report: ReportSpec | null;
+      readonly context: ChatContextSummary;
+    }
   | { readonly type: "error"; readonly code: RpcErrorCode; readonly message: string };
 
 /* ------------------------------------------------------------------ *

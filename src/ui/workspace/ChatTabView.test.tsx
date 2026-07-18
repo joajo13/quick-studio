@@ -77,6 +77,7 @@ describe("streamSend", () => {
       {
         type: "done",
         query: "SELECT 1;",
+        report: null,
         context: { policy: "schema-only", tables: 2, rowsIncluded: 0 },
       },
     ]);
@@ -99,7 +100,7 @@ describe("streamSend", () => {
   test("answer-only stream (no reasoning) -> reasoning outcome is null", async () => {
     const { fn } = stubStream([
       { type: "text-delta", text: "there are 2 tables" },
-      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+      { type: "done", query: null, report: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
     ]);
     const outcome = await streamSend("openai", "how many tables?", () => {}, fn);
     expect(outcome.kind).toBe("answer");
@@ -107,6 +108,32 @@ describe("streamSend", () => {
       expect(outcome.reasoning).toBeNull();
       expect(outcome.query).toBeNull();
     }
+  });
+
+  test("a done chunk carrying a report -> the outcome carries it AND strips the ```report fence from the answer", async () => {
+    const report = { blocks: [{ kind: "query" as const, sql: "SELECT country, revenue FROM t" }] };
+    const { fn } = stubStream([
+      { type: "text-delta", text: "here is your report:\n\n```report\n" },
+      { type: "text-delta", text: `${JSON.stringify(report)}\n\`\`\`` },
+      { type: "done", query: null, report, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+    ]);
+    const outcome = await streamSend("anthropic", "make a report", () => {}, fn);
+    expect(outcome.kind).toBe("answer");
+    if (outcome.kind === "answer") {
+      expect(outcome.report).toEqual(report);
+      expect(outcome.answer).toContain("here is your report");
+      expect(outcome.answer).not.toContain("```report");
+    }
+  });
+
+  test("a done chunk with report:null -> the outcome carries a null report, answer unstripped", async () => {
+    const { fn } = stubStream([
+      { type: "text-delta", text: "there are 2 tables" },
+      { type: "done", query: null, report: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+    ]);
+    const outcome = await streamSend("openai", "how many tables?", () => {}, fn);
+    expect(outcome.kind).toBe("answer");
+    if (outcome.kind === "answer") expect(outcome.report).toBeNull();
   });
 
   test("an error chunk -> error outcome (mapped via envelopeText, feeds the banner)", async () => {
@@ -128,7 +155,7 @@ describe("streamSend", () => {
   test("done with an empty/whitespace answer AND no reasoning -> error (no blank bubble)", async () => {
     const { fn } = stubStream([
       { type: "text-delta", text: "   " }, // only whitespace streamed
-      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+      { type: "done", query: null, report: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
     ]);
     const outcome = await streamSend("openai", "hi", () => {}, fn);
     expect(outcome.kind).toBe("error");
@@ -138,7 +165,7 @@ describe("streamSend", () => {
   test("done with an empty answer but WITH reasoning still commits (reasoning is informative)", async () => {
     const { fn } = stubStream([
       { type: "reasoning-delta", text: "thinking about it" },
-      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+      { type: "done", query: null, report: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
     ]);
     const outcome = await streamSend("anthropic", "hi", () => {}, fn);
     expect(outcome.kind).toBe("answer");
@@ -368,6 +395,7 @@ describe("reconcileChartDocs (Story 5.6, P2 — stable doc identity)", () => {
     text,
     query: null,
     reasoning: null,
+    report: null,
     context: { policy: "schema-only", tables: 1, rowsIncluded: 0 },
   });
 
@@ -405,6 +433,7 @@ describe("decideMessageView (Story 5.6, P1 — no raw JSON, no duplicate prose)"
     text: chartAnswer,
     query: null,
     reasoning: null,
+    report: null,
     context: { policy: "schema-only", tables: 1, rowsIncluded: 0 },
   };
   const composedDoc: SandboxRenderDoc = { markdown: "here is the trend:", chart: null, data: makeChartData(2) };
@@ -442,6 +471,33 @@ describe("decideMessageView (Story 5.6, P1 — no raw JSON, no duplicate prose)"
     expect(bubbleText).toBe("just a plain answer");
     expect(showBubble).toBe(true);
   });
+
+  test("a report-ONLY answer (bare ```report fence, no prose) suppresses the empty bubble (Story 9.7)", () => {
+    // The fence strips to "", so the bubble would render blank beside the "open in report tab"
+    // action. With a non-null report and a blank stripped body, the bubble is suppressed.
+    const spec = { blocks: [{ kind: "query" as const, sql: "SELECT 1" }] };
+    const reportOnly: ChatMessage = {
+      ...chartMsg,
+      text: `\`\`\`report\n${JSON.stringify(spec)}\n\`\`\``,
+      report: spec,
+    };
+    const { bubbleText, showBubble } = decideMessageView(reportOnly, null);
+    expect(bubbleText.trim()).toBe("");
+    expect(showBubble).toBe(false);
+  });
+
+  test("a report answer WITH surrounding prose still shows the (stripped) prose bubble", () => {
+    const spec = { blocks: [{ kind: "query" as const, sql: "SELECT 1" }] };
+    const withProse: ChatMessage = {
+      ...chartMsg,
+      text: `here you go:\n\n\`\`\`report\n${JSON.stringify(spec)}\n\`\`\``,
+      report: spec,
+    };
+    const { bubbleText, showBubble } = decideMessageView(withProse, null);
+    expect(showBubble).toBe(true);
+    expect(bubbleText).toContain("here you go");
+    expect(bubbleText).not.toContain("```report");
+  });
 });
 
 describe("static structure", () => {
@@ -460,6 +516,7 @@ describe("static structure", () => {
       state,
       "there are 3 tables",
       { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
       null,
       null,
     );
@@ -481,6 +538,7 @@ describe("static structure", () => {
       { policy: "schema-only", tables: 3, rowsIncluded: 0 },
       null,
       "counting the tables in the schema",
+      null,
     );
     const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
     expect(html).toContain("reasoning");
@@ -494,6 +552,7 @@ describe("static structure", () => {
       state,
       "there are 3 tables",
       { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
       null,
       null,
     );
@@ -511,6 +570,7 @@ describe("static structure", () => {
       { policy: "schema-only", tables: 2, rowsIncluded: 0 },
       "SELECT count(*) FROM customers;",
       null,
+      null,
     );
     const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
     expect(html).toContain("SELECT count(*) FROM customers;");
@@ -526,12 +586,46 @@ describe("static structure", () => {
       { policy: "schema-only", tables: 3, rowsIncluded: 0 },
       null,
       null,
+      null,
     );
     const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
     // The fence is rendered as a styled code block, not shown as literal markdown.
     expect(html).toContain("<pre><code");
     expect(html).toContain("SELECT 1");
     expect(html).not.toContain("```");
+  });
+
+  test("a null report renders NO open-report action", () => {
+    let state = setProvider(emptyChatState(), "anthropic");
+    state = appendUserMessage(state, "how many tables?");
+    state = appendAnswer(
+      state,
+      "there are 3 tables",
+      { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
+      null,
+      null,
+    );
+    const html = renderToStaticMarkup(<ChatTabView state={state} onStateChange={() => {}} />);
+    expect(html).not.toContain("open in report tab");
+  });
+
+  test("a non-null report renders the 'open in report tab' action", () => {
+    let state = setProvider(emptyChatState(), "anthropic");
+    state = appendUserMessage(state, "make a report of revenue by country");
+    const report = { blocks: [{ kind: "query" as const, sql: "SELECT country, revenue FROM t" }] };
+    state = appendAnswer(
+      state,
+      "here is your report",
+      { policy: "schema-only", tables: 2, rowsIncluded: 0 },
+      null,
+      null,
+      report,
+    );
+    const html = renderToStaticMarkup(
+      <ChatTabView state={state} onStateChange={() => {}} onOpenReport={() => {}} />,
+    );
+    expect(html).toContain("open in report tab");
   });
 
   test("an assistant answer with raw HTML is escaped at the chat mount, never mounted live (Story 8.4)", () => {
@@ -541,6 +635,7 @@ describe("static structure", () => {
       state,
       "<script>alert(1)</script> and <img src=x onerror=alert(2)>",
       { policy: "schema-only", tables: 3, rowsIncluded: 0 },
+      null,
       null,
       null,
     );

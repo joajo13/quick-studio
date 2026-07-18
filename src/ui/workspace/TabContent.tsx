@@ -49,6 +49,7 @@ import { emptyChatState, type ChatState } from "./chat-model.ts";
 import { ErdTabView } from "./ErdTabView.tsx";
 import { QueryTabView } from "./QueryTabView.tsx";
 import { ReportTabView } from "../report/ReportTabView.tsx";
+import type { ReportSpec } from "../../shared/report-spec.ts";
 import { emptyReport, type ReportState, type ReportStateUpdate } from "../report/report-state.ts";
 import { SettingsPanel } from "../settings/SettingsPanel.tsx";
 import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
@@ -469,6 +470,7 @@ export function TabContent({
   lastProvider,
   reportState,
   onReportStateChange,
+  onOpenReport,
   erdLayout,
   onErdLayoutChange,
   onCloseTab,
@@ -496,6 +498,8 @@ export function TabContent({
   reportState?: ReportState;
   /** Update the active report tab's session state. */
   onReportStateChange?: (next: ReportStateUpdate) => void;
+  /** Open a chat-generated ReportSpec as a new Report tab (Story 9.7). */
+  onOpenReport?: (spec: ReportSpec) => void;
   /** The active ERD tab's persisted layout (Story 4.2), or undefined for dagre fallback. */
   erdLayout?: ErdTabLayout;
   /** Report the active ERD tab's captured geometry up, keyed by tab id (Story 4.2). */
@@ -551,6 +555,7 @@ export function TabContent({
         state={chatState ?? emptyChatState()}
         onStateChange={onChatStateChange ?? (() => {})}
         lastProvider={lastProvider ?? null}
+        onOpenReport={onOpenReport}
       />
     );
   }

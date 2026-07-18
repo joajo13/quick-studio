@@ -140,6 +140,14 @@ describe("buildChatSystemPrompt", () => {
     // SQL-block behavior is preserved (both directives coexist).
     expect(prompt).toContain("```sql fenced block");
   });
+
+  test("also instructs the ```report fenced JSON spec (Story 9.7), alongside sql/chart", () => {
+    const prompt = buildChatSystemPrompt(assemblePayload(SCHEMA));
+    expect(prompt).toContain("```report");
+    expect(prompt).toContain("blocks");
+    expect(prompt).toContain("```sql fenced block");
+    expect(prompt).toContain("```chart");
+  });
 });
 
 describe("extractQuery", () => {
@@ -190,7 +198,7 @@ describe("createChatResponder — answerStream I/O matrix", () => {
       { type: "reasoning-delta", text: "about tables" },
       { type: "text-delta", text: "there are " },
       { type: "text-delta", text: "2 tables" },
-      { type: "done", query: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
+      { type: "done", query: null, report: null, context: { policy: "schema-only", tables: 2, rowsIncluded: 0 } },
     ]);
     expect(calls()).toBe(1);
   });
@@ -207,8 +215,79 @@ describe("createChatResponder — answerStream I/O matrix", () => {
     expect(done).toEqual({
       type: "done",
       query: "SELECT count(*) FROM customers;",
+      report: null,
       context: { policy: "schema-only", tables: 2, rowsIncluded: 0 },
     });
+  });
+
+  test("done.report is extracted + validated from a ```report fence over the ACCUMULATED answer", async () => {
+    const spec = {
+      title: "Revenue by country",
+      blocks: [
+        { kind: "query" as const, sql: "SELECT country, sum(amount) AS revenue FROM orders GROUP BY country" },
+      ],
+    };
+    const { responder } = makeResponder({
+      generateStream: streamOf(
+        { type: "text-delta", text: "here you go:\n\n```report\n" },
+        { type: "text-delta", text: `${JSON.stringify(spec)}\n\`\`\`` },
+      ),
+    });
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "make a report" }));
+    const done = chunks.at(-1);
+    expect(done && "report" in done ? done.report : undefined).toEqual(spec);
+    // A report answer degrades cleanly: `extractQuery` runs over the report-fence-STRIPPED
+    // markdown, so the ```report JSON is NEVER mis-captured as a runnable query (which would
+    // surface a spurious "run query" affordance alongside the "open report" action).
+    expect(done && "query" in done ? done.query : undefined).toBeNull();
+    expect(done && "context" in done ? done.context : undefined).toEqual({
+      policy: "schema-only",
+      tables: 2,
+      rowsIncluded: 0,
+    });
+  });
+
+  test("a malformed ```report fence -> done.report is null (degrades, opens nothing)", async () => {
+    const { responder } = makeResponder({
+      generateStream: streamOf({ type: "text-delta", text: "```report\n{ not json ]\n```" }),
+    });
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "make a report" }));
+    const done = chunks.at(-1);
+    expect(done && "report" in done ? done.report : undefined).toBeNull();
+  });
+
+  test("no ```report fence (prose-only answer) -> done.report is null", async () => {
+    const { responder } = makeResponder({
+      generateStream: streamOf({ type: "text-delta", text: "there are 2 tables" }),
+    });
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "how many?" }));
+    const done = chunks.at(-1);
+    expect(done && "report" in done ? done.report : undefined).toBeNull();
+  });
+
+  test("a report answer that ALSO carries a standalone ```sql fence still suppresses done.query", async () => {
+    // A report answer is its own answer type: even a genuinely separate ```sql fence must
+    // not surface a "run query" affordance beside the "open report" action.
+    const spec = { blocks: [{ kind: "query" as const, sql: "SELECT 1" }] };
+    const text = `here:\n\n\`\`\`report\n${JSON.stringify(spec)}\n\`\`\`\n\nalso:\n\n\`\`\`sql\nSELECT 99\n\`\`\``;
+    const { responder } = makeResponder({ generateStream: streamOf({ type: "text-delta", text }) });
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "make a report" }));
+    const done = chunks.at(-1);
+    expect(done && "report" in done ? done.report : undefined).toEqual(spec);
+    expect(done && "query" in done ? done.query : undefined).toBeNull();
+  });
+
+  test("a FAILED report attempt + a valid standalone ```sql fence keeps done.query (query not swallowed)", async () => {
+    // Suppression is gated on a VALID report (`report !== null`), not the mere presence of a
+    // ```report fence. A report the model abandoned/mangled is NOT a report answer, so a
+    // genuinely runnable ```sql block in the same message must still surface its run affordance.
+    const badReport = `\`\`\`report\n{ "blocks": [] }\n\`\`\``; // empty blocks -> parseReportSpec null
+    const text = `${badReport}\n\nrun this instead:\n\n\`\`\`sql\nSELECT count(*) FROM customers;\n\`\`\``;
+    const { responder } = makeResponder({ generateStream: streamOf({ type: "text-delta", text }) });
+    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "make a report" }));
+    const done = chunks.at(-1);
+    expect(done && "report" in done ? done.report : undefined).toBeNull();
+    expect(done && "query" in done ? done.query : undefined).toBe("SELECT count(*) FROM customers;");
   });
 
   test("the payload the model receives carries the schema text and zero rows", async () => {

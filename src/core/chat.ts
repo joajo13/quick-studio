@@ -38,6 +38,7 @@ import type {
   SchemaTableInfo,
 } from "../shared/contract.ts";
 import { PROVIDER_KINDS } from "../shared/contract.ts";
+import { extractReport, parseReportSpec } from "../shared/report-spec.ts";
 import { reasoningProviderOptions } from "./ai-provider.ts";
 import type { ResolveModelResult } from "./ai-provider.ts";
 import type { RegistryResult } from "./provider-registry.ts";
@@ -91,6 +92,9 @@ export function buildChatSystemPrompt(payload: ChatProviderPayload): string {
     "when a query answers the question, output exactly one statement in a ```sql fenced block.",
     "when a chart helps, also emit exactly one ```chart fenced block containing a json object with:",
     `  "mark" (one of line, bar, dot, area), "x" and "y" set to result column names, an optional "series" column, and an optional "title".`,
+    "when the user asks you to build a report, emit exactly one ```report fenced block containing a json object with:",
+    `  an optional "title" string, and a non-empty "blocks" array of ordered blocks, each either`,
+    `  {"kind":"prose","markdown":"..."} or {"kind":"query","sql":"...","chart"?:{"mark":..., "x":..., "y":..., "series"?:..., "title"?:...}}.`,
     "do not invent tables or columns.",
   ].join("\n");
   return `${instruction}\n\n${payload.schema.text}`;
@@ -368,8 +372,17 @@ export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
         return;
       }
 
-      // Terminal frame: extract the query once over the fully-accumulated answer.
-      yield { type: "done", query: extractQuery(full), context };
+      // Terminal frame: extract the query + report once over the fully-accumulated
+      // answer. `parseReportSpec` is the Core-side gate — a missing/malformed fence
+      // yields `null`, and NOTHING opens on the UI side until a spec passes it. A report
+      // answer is its own answer type: when the model produced a VALID report
+      // (`report !== null`), the standalone "run query" affordance is suppressed so a
+      // report never doubles as a runnable single query. But a report attempt that FAILS
+      // validation is NOT a report answer — it must not swallow a genuinely separate,
+      // runnable ` ```sql ` block in the same message, so the query affordance is kept.
+      const report = parseReportSpec(extractReport(full).rawReport);
+      const query = report !== null ? null : extractQuery(full);
+      yield { type: "done", query, report, context };
     },
   };
 }

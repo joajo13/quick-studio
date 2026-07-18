@@ -17,6 +17,7 @@ import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { ErdTabLayout, ExposureInfo, ProviderKind, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import type { ChatState } from "./chat-model.ts";
+import type { ReportSpec } from "../../shared/report-spec.ts";
 import type { ReportState, ReportStateUpdate } from "../report/report-state.ts";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
@@ -231,6 +232,7 @@ export function Workspace({
   lastProvider,
   reportStates,
   onReportStateChange,
+  onOpenReport,
   erdLayouts,
   onErdLayoutChange,
   onStop,
@@ -276,6 +278,8 @@ export function Workspace({
   reportStates: ReadonlyMap<number, ReportState>;
   /** Update the report state for report Tab `id`. */
   onReportStateChange: (id: number, next: ReportStateUpdate) => void;
+  /** Open a chat-generated ReportSpec as a new Report tab (Story 9.7). */
+  onOpenReport?: (spec: ReportSpec) => void;
   /** Persisted ERD layouts keyed by stringified tab id (Story 4.2). */
   erdLayouts: Readonly<Record<string, ErdTabLayout>>;
   /** Report an ERD tab's captured geometry up for the debounced persist. */
@@ -391,6 +395,7 @@ export function Workspace({
                   onReportStateChange={(next) => {
                     if (activeTab !== null) onReportStateChange(activeTab.id, next);
                   }}
+                  onOpenReport={onOpenReport}
                   erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
                   onErdLayoutChange={onErdLayoutChange}
                 />

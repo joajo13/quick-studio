@@ -70,15 +70,16 @@ describe("reducers", () => {
     expect(s1.provider).toBe("anthropic");
   });
 
-  test("appendAnswer appends the assistant entry with its context, null query and reasoning", () => {
+  test("appendAnswer appends the assistant entry with its context, null query/reasoning/report", () => {
     const s0 = appendUserMessage(setProvider(emptyChatState(), "anthropic"), "hi");
-    const s1 = appendAnswer(s0, "there are 3 tables", CONTEXT, null, null);
+    const s1 = appendAnswer(s0, "there are 3 tables", CONTEXT, null, null, null);
     expect(s1.messages).toHaveLength(2);
     expect(s1.messages[1]).toEqual({
       role: "assistant",
       text: "there are 3 tables",
       query: null,
       reasoning: null,
+      report: null,
       context: CONTEXT,
     });
     // Prior state untouched.
@@ -87,12 +88,27 @@ describe("reducers", () => {
 
   test("appendAnswer carries a non-null extracted query and reasoning", () => {
     const s0 = appendUserMessage(setProvider(emptyChatState(), "anthropic"), "how many customers?");
-    const s1 = appendAnswer(s0, "run this:", CONTEXT, "SELECT count(*) FROM customers;", "let me think");
+    const s1 = appendAnswer(s0, "run this:", CONTEXT, "SELECT count(*) FROM customers;", "let me think", null);
     expect(s1.messages[1]).toEqual({
       role: "assistant",
       text: "run this:",
       query: "SELECT count(*) FROM customers;",
       reasoning: "let me think",
+      report: null,
+      context: CONTEXT,
+    });
+  });
+
+  test("appendAnswer carries a non-null Core-validated report", () => {
+    const report = { blocks: [{ kind: "query" as const, sql: "SELECT 1" }] };
+    const s0 = appendUserMessage(setProvider(emptyChatState(), "anthropic"), "make a report");
+    const s1 = appendAnswer(s0, "here is your report", CONTEXT, null, null, report);
+    expect(s1.messages[1]).toEqual({
+      role: "assistant",
+      text: "here is your report",
+      query: null,
+      reasoning: null,
+      report,
       context: CONTEXT,
     });
   });
@@ -128,7 +144,7 @@ describe("resolveDefaultProvider (Story 8.5 — default provider resolution)", (
 });
 
 describe("accumulateStream", () => {
-  const done: ChatStreamChunk = { type: "done", query: null, context: CONTEXT };
+  const done: ChatStreamChunk = { type: "done", query: null, report: null, context: CONTEXT };
 
   test("text-delta appends to the answer channel only", () => {
     let p = EMPTY_PARTIAL;
