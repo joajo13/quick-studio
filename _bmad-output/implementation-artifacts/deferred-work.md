@@ -241,7 +241,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
 location: `assembleSchema` (`driver.ts`, PK introspection queries)
 reason: `assembleSchema` builds `primaryKey` by pushing PK column names in the columns query's schema/table/ordinal order gated by a membership Set, and neither the Postgres nor MySQL PK query orders by `ordinal_position`. For a composite PK whose key order differs from column order (PK `(b,a)` with `a` earlier in the table), `primaryKey` is `["a","b"]` — misreported. Pagination stays correct (the ORDER BY set is still total/deterministic) and the grid PK icon (membership-based) is unaffected, so it is invisible in Story 3.2; it matters once a consumer relies on PK column order (e.g. Story 3.3 row edit/where-clause construction).
-status: open
+status: done 2026-07-18
+resolution: resolved by sweep bundle dw-introspection-query-fidelity
 
 ### DW-32: Acknowledge (and, if desired, mitigate with keyset/snapshot pagination) that the `table.rows` COUNT and page SELECT are two non-atomic round-trips, so `total` and page contents can disagree — and OFFSET pages can drift — under concurrent writes to the browsed table
 
@@ -319,7 +320,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
 location: `src/core/driver-postgres.ts` (FK introspection)
 reason: `src/core/driver-postgres.ts` filters only `contype='f'`; on a partitioned parent every partition carries an inherited copy of the FK, producing duplicate near-identical edges. Fix is a one-line `AND con.conparentid = 0` but carries a minor Postgres-version-compatibility consideration (conparentid exists in PG 11+), so it warrants focused attention.
-status: open
+status: done 2026-07-18
+resolution: resolved by sweep bundle dw-introspection-query-fidelity
 
 ### DW-43: Preserve ERD layout stability when a table is created (avoid a full dagre reshuffle of every node) — naturally addressed alongside Story 4.2 layout persistence
 

@@ -21,7 +21,7 @@ import {
   type IntrospectedIndex,
 } from "./driver.ts";
 import { buildMysqlConfig, createMutex } from "./driver-mysql.ts";
-import { mapUnsafeResult } from "./driver-postgres.ts";
+import { mapUnsafeResult, pgSupportsConparentid } from "./driver-postgres.ts";
 
 /** A synthetic engine/OS error carrying the `code`/`errno` tags drivers surface. */
 function fakeErr(tags: { code?: string; errno?: number }): Error {
@@ -424,6 +424,77 @@ describe("assembleSchema — foreign-key folding (Story 4.1)", () => {
       { schema: "public", table: "t", column: "c", dataType: "text", nullable: true },
     ]);
     expect(schema.tables[0]?.foreignKeys).toEqual([]);
+  });
+});
+
+describe("assembleSchema — primary-key folding (DW-31 key order)", () => {
+  test("a composite PK folds in KEY order, not table-column order", () => {
+    // Columns arrive in table order [a, b]; the PK's own ordinal order is [b, a].
+    // `primaryKey` must mirror the KEY order (the adapters pre-order the PK rows by the
+    // key's own `ordinal_position`), so it comes out ["b", "a"], not ["a", "b"].
+    const schema = assembleSchema(
+      "postgres",
+      [
+        { schema: "public", table: "t", column: "a", dataType: "integer", nullable: false },
+        { schema: "public", table: "t", column: "b", dataType: "integer", nullable: false },
+      ],
+      [],
+      [],
+      [
+        { schema: "public", table: "t", column: "b" },
+        { schema: "public", table: "t", column: "a" },
+      ],
+    );
+    expect(schema.tables[0]?.primaryKey).toEqual(["b", "a"]);
+  });
+
+  test("a single-column PK folds to a one-element list", () => {
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "users", column: "id", dataType: "integer", nullable: false }],
+      [],
+      [],
+      [{ schema: "public", table: "users", column: "id" }],
+    );
+    expect(schema.tables[0]?.primaryKey).toEqual(["id"]);
+  });
+
+  test("a table with no PK rows carries an empty `primaryKey`", () => {
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "logs", column: "msg", dataType: "text", nullable: true }],
+      [],
+      [],
+      [],
+    );
+    expect(schema.tables[0]?.primaryKey).toEqual([]);
+  });
+
+  test("a PK row for a table absent from the column list never spawns a phantom table", () => {
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "users", column: "id", dataType: "integer", nullable: false }],
+      [],
+      [],
+      [
+        { schema: "public", table: "users", column: "id" },
+        // No `ghost` table exists in the column list — this PK row must be dropped.
+        { schema: "public", table: "ghost", column: "x" },
+      ],
+    );
+    expect(schema.tables.map((t) => `${t.schema}.${t.name}`)).toEqual(["public.users"]);
+    expect(schema.tables[0]?.primaryKey).toEqual(["id"]);
+  });
+});
+
+// DW-42: `pg_constraint.conparentid` exists only on PostgreSQL 11+
+// (`server_version_num >= 110000`), so the FK query gates the partition-copy filter on
+// this boundary. Prove the boundary directly (no live DB needed).
+describe("pgSupportsConparentid — PG 11 version boundary (DW-42)", () => {
+  test("PG 10 (100000) is unsupported; PG 11 (110000) and PG 16 (160001) are supported", () => {
+    expect(pgSupportsConparentid(100000)).toBe(false);
+    expect(pgSupportsConparentid(110000)).toBe(true);
+    expect(pgSupportsConparentid(160001)).toBe(true);
   });
 });
 

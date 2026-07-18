@@ -263,9 +263,9 @@ export type SchemaForeignKeyInfo = {
  * One table (or view) of the introspected schema. `schema` is the owning
  * namespace/database as the engine reports it; `name` and `columns` mirror the
  * live database verbatim, ordered as introspected (schema/table/ordinal).
- * `primaryKey` lists the primary-key column names in column order (empty when
- * the table has none) — the deterministic browse ORDER-BY key and the source of
- * the grid's PK key-icon (Story 3.2). `indexes` lists the table's indexes
+ * `primaryKey` lists the primary-key column names in key order (the PK's own
+ * column ordinal order, empty when the table has none) — the deterministic browse
+ * ORDER-BY key and the source of the grid's PK key-icon (Story 3.2). `indexes` lists the table's indexes
  * (Story 3.5), each with its ordered columns and uniqueness (empty when the table
  * has none) — mirroring how `primaryKey` is always present. `foreignKeys` lists the
  * table's outbound foreign keys (Story 4.1) — the ERD's edge source (empty when the

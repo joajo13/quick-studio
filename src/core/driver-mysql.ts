@@ -24,6 +24,7 @@ import {
   type IntrospectedColumn,
   type IntrospectedForeignKey,
   type IntrospectedIndex,
+  type IntrospectedPrimaryKey,
 } from "./driver.ts";
 
 /** One row of the MySQL `information_schema.columns` introspection query. */
@@ -62,11 +63,6 @@ type MysqlFkRow = {
   readonly referenced_table_name: string;
   readonly referenced_column_name: string;
 };
-
-/** Set-membership key for a PK column: `schema table column`. */
-function pkKey(schema: string, table: string, column: string): string {
-  return `${schema} ${table} ${column}`;
-}
 
 /**
  * Bound on graceful teardown (ms). Mirrors the postgres adapter's
@@ -223,6 +219,10 @@ export function createMysqlDriver(url: string): Driver {
 
       // Primary-key columns from KEY_COLUMN_USAGE (`constraint_name = 'PRIMARY'` is
       // MySQL's fixed PK constraint name), scoped the same way as the columns query.
+      // ORDERED by `ordinal_position` — the column's position WITHIN the PK constraint
+      // (key order), not the table ordinal — so `assembleSchema` folds
+      // `SchemaTableInfo.primaryKey` in the key's own column order: a composite PK `(b, a)`
+      // stays `["b","a"]` even when `a` sits earlier in the table (DW-31).
       const pkWhere =
         database !== null
           ? "table_schema = ?"
@@ -231,14 +231,17 @@ export function createMysqlDriver(url: string): Driver {
       const [pkRows] = await conn.query(
         `SELECT table_schema, table_name, column_name
          FROM information_schema.key_column_usage
-         WHERE constraint_name = 'PRIMARY' AND ${pkWhere}`,
+         WHERE constraint_name = 'PRIMARY' AND ${pkWhere}
+         ORDER BY table_schema, table_name, ordinal_position`,
         pkParams,
       );
-      const pkSet = new Set(
-        (pkRows as unknown as readonly MysqlPkRow[]).map((r) =>
-          pkKey(r.table_schema, r.table_name, r.column_name),
-        ),
-      );
+      const primaryKeys: IntrospectedPrimaryKey[] = (
+        pkRows as unknown as readonly MysqlPkRow[]
+      ).map((r) => ({
+        schema: r.table_schema,
+        table: r.table_name,
+        column: r.column_name,
+      }));
 
       // Index metadata (Story 3.5) from `information_schema.statistics`: one row per
       // (index, column), ordered by `SEQ_IN_INDEX` so the assembler folds columns in
@@ -312,10 +315,9 @@ export function createMysqlDriver(url: string): Driver {
           column: r.column_name,
           dataType: r.data_type,
           nullable: r.is_nullable === "YES",
-          isPrimaryKey: pkSet.has(pkKey(r.table_schema, r.table_name, r.column_name)),
         }),
       );
-      return assembleSchema("mysql", columns, indexes, foreignKeys);
+      return assembleSchema("mysql", columns, indexes, foreignKeys, primaryKeys);
       };
       try {
         return await withTimeout(introspect(), INTROSPECTION_TIMEOUT_MS);
