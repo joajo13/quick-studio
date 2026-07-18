@@ -358,7 +358,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
       </header>
 
       {section === "providers" ? (
-        <ProvidersPanel />
+        <ProvidersPanel mode={active?.mode} />
       ) : (
       <div className="min-h-0 flex-1 space-y-4 overflow-auto p-4">
         {error !== null ? (

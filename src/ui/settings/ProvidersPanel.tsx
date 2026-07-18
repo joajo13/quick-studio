@@ -14,6 +14,7 @@
 import { useEffect, useState } from "react";
 import {
   PROVIDER_KINDS,
+  type ConnectionMode,
   type ListProvidersResult,
   type ProviderKind,
   type ProviderSummary,
@@ -121,8 +122,12 @@ function ProviderRow({
  * The AI-providers section body (no header/close — hosted inside `SettingsPanel`'s
  * switcher). Loads the configured list once on mount, then lists the three known
  * kinds statically, overlaying "not configured" for the unset ones.
+ *
+ * `mode` is the already-loaded `connection.active` run mode, threaded from
+ * `SettingsPanel` (no duplicate RPC). When it is `ephemeral`, a terse note makes the
+ * by-design memory-only behaviour discoverable; `persistent`/absent renders nothing extra.
  */
-export function ProvidersPanel(): React.JSX.Element {
+export function ProvidersPanel({ mode }: { mode?: ConnectionMode }): React.JSX.Element {
   const [state, setState] = useState<ProvidersState>(emptyProviders);
   const [loading, setLoading] = useState(true);
   const [listLoaded, setListLoaded] = useState(false);
@@ -191,6 +196,12 @@ export function ProvidersPanel(): React.JSX.Element {
         <div className="rounded-[var(--radius)] border border-err-line bg-err-soft px-3 py-2">
           <ErrorLine text={error} />
         </div>
+      ) : null}
+
+      {mode === "ephemeral" ? (
+        <p className="font-mono text-xs lowercase text-muted-foreground">
+          ephemeral session · keys are not remembered after restart
+        </p>
       ) : null}
 
       {loading ? (

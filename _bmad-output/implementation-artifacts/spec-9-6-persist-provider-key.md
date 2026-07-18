@@ -2,10 +2,15 @@
 title: 'Persist AI provider API keys across sessions — verify the persistent-mode restore invariant and close the ephemeral-mode discoverability gap that makes it look broken'
 type: 'refactor' # feature | bugfix | refactor | chore
 created: '2026-07-18'
-status: 'draft' # draft | ready-for-dev | in-progress | in-review | done | blocked
+status: 'done' # draft | ready-for-dev | in-progress | in-review | done | blocked
+baseline_revision: 'e2ef393bd5c7ba8efff06b02199be480f3853c85'
+final_revision: 'cb222d6043a6e18a4c9aaa74467ab54304ffca31'
+review_loop_iteration: 0 # incremented by step-04 before each review loopback
+followup_review_recommended: false # set by step-04 on status: done from the final review pass significance judgment
 context:
   - 'Story 5.1 (spec-5-1-configure-ai-providers.md) built the encrypted provider-key store + AI-providers Settings surface — this story verifies its cross-session persistence and closes the one honest UX gap.'
   - 'Story 2.2 / 2.3 (spec-2-2-encrypted-credential-store.md, spec-2-3-passphrase-fallback.md) own the at-rest crypto + key-load (keychain / passphrase-derived) substrate this store reuses UNCHANGED.'
+warnings: [oversized] # frozen intent-contract pushes total past 1600 tokens; body kept tight
 ---
 
 <intent-contract>
@@ -57,39 +62,102 @@ So in PERSISTENT mode (the default) a saved key IS restored on reopen and IS sho
 
 </intent-contract>
 
-## Acceptance Criteria
-
-- **Given** persistent mode and a provider key saved via the AI-providers Settings surface, **when** the app is closed and reopened, **then** the key is restored from the ENCRYPTED `provider-keys.enc` (decrypted under the keychain or passphrase-derived key), the provider shows as `configured · …{last4}` without re-entry, and the raw key is never returned or logged — and a store-level unit test proves this save → reopen → restored round-trip (no Docker, no live DB).
-- **Given** persistent mode on a keychain-less machine with no passphrase available, **when** the store is reopened, **then** it fails with a typed `passphrase-declined` arm surfaced as an `internal_error` envelope (no crash, no plaintext in `detail`), and the panel shows nothing configured rather than crashing.
-- **Given** a configured provider, **when** the user replaces the key, **then** it upserts by kind (one record), re-encrypts, and the masked `keyPreview` updates; **when** the user removes it, **then** the record is dropped and a second remove is an idempotent success.
-- **Given** ephemeral mode (e.g. a dev container with `QS_MODE=ephemeral`), **when** a key is set and the process restarts, **then** no `provider-keys.enc` is written, the key is gone (memory-only, by design), AND the AI-providers surface shows a terse note that the session is ephemeral and keys are not remembered across restarts — so the behavior is discoverable, not mistaken for a persistence bug.
-- **Given** the AI-providers surface, **when** inspected, **then** the run-mode signal is derived from the EXISTING `connection.active` / `ConnectionMode` (no new provider-side RPC, no raw-key exposure), the Ring-1 boundary and crypto substrate are untouched, and the ephemeral no-write gate is unchanged.
-- **Given** the suite, **when** run, **then** `bunx tsc --noEmit` is clean, `bun test` is green (with the new store restore round-trip test), and `bun run build` succeeds.
-
 ## Code Map
 
-<!-- Line anchors reconciled to the tree read on 2026-07-18. The exact wiring of the mode
-     signal (thread from SettingsPanel vs. read connection.active in ProvidersPanel) is an
-     implementation choice — confirm in step-02. NO change to provider-key-store.ts,
-     provider-registry.ts, rpc.ts, or the crypto substrate. -->
+<!-- Line anchors reconciled to the tree read on 2026-07-18 (step-02 investigation). The mode-signal
+     wiring is RESOLVED: thread `mode={active?.mode}` from SettingsPanel (single source of truth, zero new
+     RPC). NO change to provider-key-store.ts, provider-registry.ts, rpc.ts, server.ts, or the crypto substrate. -->
 
-- `src/core/provider-key-store.test.ts` — ADD (the load-bearing verification). A persistent-mode restore round-trip: open the store against a temp dir with an injected fixed key (`loadStoreKey` dep) or a stubbed passphrase provider, `saveKey({provider:"anthropic", apiKey})`, then open a SECOND store instance against the SAME `dir` + same key dep, assert `getKey("anthropic")` / `listKeys()` return the record — proving reopen rehydrates from `provider-keys.enc`. ADD the ephemeral counterpart: `openProviderKeyStore({ mode: "ephemeral" })`, `saveKey`, confirm NO file at `join(dir, PROVIDER_STORE_FILE_NAME)` and that a fresh ephemeral open sees nothing. **Confirm in step-02** whether an equivalent persistent reopen test already exists (Story 5.1's I/O matrix lists "persistent restart → keys decrypt and reload"); if present, EXTEND/assert it explicitly rather than duplicate. NO production-code change in `provider-key-store.ts`.
-- `src/ui/settings/ProvidersPanel.tsx` — ADD a run-mode signal. Accept the mode (e.g. a new optional `mode?: ConnectionMode` prop threaded from `SettingsPanel`, OR read `connection.active` here — confirm in step-02). When `mode === "ephemeral"`, render a terse mono informational line above the list (NOT `role="alert"`): "ephemeral session · keys are not remembered after restart". When `persistent` or unknown, render nothing extra — the existing `configured · …last4` display already tells the true story. NO change to the `providers.list/set/remove` calls, the `password` input, the masked display, or the mutation gates.
-- `src/ui/settings/SettingsPanel.tsx` — thread the already-loaded mode into `<ProvidersPanel />` (`line 361`) IF the threading approach is chosen: it already fetches `active` via `rpc<ActiveConnectionInfo>("connection.active")` (`248-257`) and holds `active.mode`; pass `mode={active?.mode}` to `ProvidersPanel`. NO other change; `data-testid="settings-panel"`, the section switcher, and connections flow are untouched.
-- `src/ui/settings/providers-model.ts` — likely NO change (pure secret-free view-model, no mode concern). Only touch if step-02 chooses to carry the mode through the model rather than as a prop; prefer the prop.
-- `src/shared/contract.ts` — NO change. `ConnectionMode` (`384`), `ActiveConnectionInfo.mode` (`395-396`), `ProviderSummary` (`472-476`), and `providers.*` types already exist and are reused verbatim.
-- `src/core/provider-key-store.ts`, `src/core/provider-registry.ts`, `src/core/rpc.ts`, `src/core/server.ts`, `src/core/crypto.ts`, `src/core/store-key.ts`, `src/core/passphrase-key.ts` — NO change. Listed to PIN the no-touch boundary: the persistence mechanism, the secret-free registry, the RPC handlers, the shared-passphrase wiring, and the crypto substrate are all preserved invariants.
+- `src/core/provider-key-store.test.ts` — **VERIFY-ONLY, NO CHANGE.** Step-02 confirmed the load-bearing restore invariant is ALREADY comprehensively fenced (14 tests green, 0 fail): persistent save→reopen decrypted round-trip at `test("relaunch survival: save then reopen fresh instance → decrypted round-trip")` (l.42-56); passphrase reopen round-trip (l.167-191); ephemeral no-write at `describe("… ephemeral writes nothing to disk")` → `"a set in ephemeral mode holds in memory and writes no file under the dir"` (l.104-118); plus upsert-by-kind (l.74), idempotent remove (l.84), multi-provider coexistence (l.94), raw-file-no-key-material (l.58), and every typed error arm (key-invalid l.127, corrupt l.138/193/225, schema-unknown l.149, passphrase-declined l.213). Per the intent-contract's "if present, EXTEND/assert rather than duplicate", coverage is already complete — do NOT add a duplicate store test; just keep this suite green.
+- `src/ui/settings/ProvidersPanel.tsx` — **ADD the run-mode signal.** Today `export function ProvidersPanel(): React.JSX.Element` is prop-less (217 lines) and already holds `rpc` (l.23). Add an optional `mode?: ConnectionMode` prop (add `ConnectionMode` to the EXISTING contract import at l.15-22 — same source as `PROVIDER_KINDS`/`ProviderSummary`). When `mode === "ephemeral"`, render one terse mono informational line (NOT `role="alert"`) in the gap between the error-envelope block (ends l.194) and the `{loading ? …}` block (l.196): `ephemeral session · keys are not remembered after restart`. When `persistent` or `undefined`, render nothing extra — the existing `configured · …last4` display already tells the true story. NO change to the `providers.list/set/remove` calls, the `password` input, the masked display, or the mutation gates.
+- `src/ui/settings/SettingsPanel.tsx` — **THREAD the already-loaded mode.** It already fetches `active` via `rpc<ActiveConnectionInfo>("connection.active")` (l.248-257, state var l.224) and reads `active.mode` at l.381. Change the render at l.361 from `<ProvidersPanel />` to `<ProvidersPanel mode={active?.mode} />` (`active` may be `null` on boot/error → `active?.mode` is `undefined`, which the panel treats as "no note"). NO other change; the section switcher and connections flow are untouched.
+- `src/ui/settings/ProvidersPanel.test.tsx` — **ADD** a component test mirroring the existing `.test.tsx` testing-library pattern (e.g. `ConfirmRun.test.tsx`, `ChatTabView.test.tsx`): stub `rpc` from `../rpc/client.ts` so the mount `providers.list` resolves without a live Core; render `<ProvidersPanel mode="ephemeral" />` → the ephemeral note is present and is NOT `role="alert"`; render `<ProvidersPanel mode="persistent" />` and `<ProvidersPanel />` → the ephemeral note is absent. There is no existing `ProvidersPanel.test.tsx` today (only the pure `providers-model.test.ts`); this is the mode-signal edge-case fence.
+- `src/ui/settings/providers-model.ts` — **NO change** (pure secret-free view-model; the mode note is presentation-only and carried as a prop, not through the model).
+- `src/shared/contract.ts` — **NO change.** `ConnectionMode` (l.384), `ActiveConnectionInfo.mode` (l.396), `ProviderSummary` (l.472-475), and `providers.*` types already exist and are reused verbatim.
+- `src/core/provider-key-store.ts`, `src/core/provider-registry.ts`, `src/core/rpc.ts`, `src/core/server.ts`, `src/core/crypto.ts`, `src/core/store-key.ts`, `src/core/passphrase-key.ts` — **NO change.** Listed to PIN the no-touch boundary: the persistence mechanism, the secret-free registry, the RPC handlers, the shared-passphrase wiring, and the crypto substrate are preserved invariants.
+
+## Tasks & Acceptance
+
+**Execution:**
+- [x] `src/ui/settings/ProvidersPanel.tsx` -- add optional `mode?: ConnectionMode` prop and render the terse ephemeral info line (not `role="alert"`) in the l.194→196 gap when `mode === "ephemeral"`; render nothing extra otherwise -- closes the discoverability gap without touching list/mutations/masked display/gates.
+- [x] `src/ui/settings/SettingsPanel.tsx` -- pass `mode={active?.mode}` to `<ProvidersPanel />` at l.361 -- threads the already-loaded run mode from the single `connection.active` source with zero new RPC.
+- [x] `src/ui/settings/ProvidersPanel.test.tsx` -- ADD a component test asserting the ephemeral note shows only for `mode="ephemeral"` (and is a plain line, not `role="alert"`) and is absent for `persistent`/undefined -- fences the "Mode signal on the surface" I/O row. (Implemented with the repo's actual convention — `renderToStaticMarkup` + `mock.module` — since there is no testing-library; same assertions.)
+- [x] `src/core/provider-key-store.test.ts` -- VERIFY-ONLY (no edit): the existing 14-test suite (persistent reopen round-trip l.42, ephemeral no-write l.105, upsert/remove/typed arms) stays green -- the persistent-restore invariant is already fenced; not duplicated.
+
+**Acceptance Criteria:**
+- Given persistent mode and a key saved via the AI-providers surface, when the app is closed and reopened, then the key is restored from the encrypted `provider-keys.enc` (decrypted under keychain/passphrase key), shown as `configured · …{last4}` without re-entry, and never returned or logged — this invariant stays fenced by the green store round-trip test (`provider-key-store.test.ts:42`), which the story keeps passing rather than duplicating.
+- Given ephemeral mode (e.g. a dev container with `QS_MODE=ephemeral`), when a key is set and the process restarts, then no `provider-keys.enc` is written and the key is gone (fenced by `provider-key-store.test.ts:104-118`), AND the AI-providers surface shows a terse note that the session is ephemeral and keys are not remembered — so the behavior is discoverable, not mistaken for a persistence bug.
+- Given the AI-providers surface, when rendered, then the run-mode signal derives solely from the existing `connection.active` / `ConnectionMode` threaded as `mode={active?.mode}` — no new provider-side RPC, no raw-key exposure, and the Ring-1 boundary, crypto substrate, and ephemeral no-write gate are all untouched.
+- Given a `connection.active` failure or a persistent boot where `active` is null, when the panel renders, then `mode` is `undefined`, the ephemeral note is omitted, and the panel is otherwise unchanged (no crash).
+- Given the suite, when run, then `bunx tsc --noEmit` is clean, `bun test` is green (including the new `ProvidersPanel.test.tsx` and the unchanged store suite), and `bun run build` succeeds.
+
+## Spec Change Log
+
+## Review Triage Log
+
+### 2026-07-18 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 1: (high 0, medium 0, low 1)
+- defer: 0
+- reject: 6: (high 0, medium 1, low 5)
+- addressed_findings:
+  - `[low]` `[patch]` `ProvidersPanel.test.tsx` ephemeral assertion strengthened: under SSR (`renderToStaticMarkup`, no mount effect, `error` stays null) the `not.toContain('role="alert"')` check was vacuous. Now it positively asserts the note is a plain `<p>` (`/<p\b[^>]*>[^<]*ephemeral session/`) and is NOT the `bg-err-soft` role=alert error envelope — a real guard on the "plain line, not alert" constraint. tsc clean, 3/3 panel tests green.
+- rejected (recorded for transparency, not actioned):
+  - `[medium]` connection.active failure → `mode` undefined → ephemeral note omitted. REJECTED: this is the explicitly designed behavior (I/O matrix "Mode signal on the surface" + the AC for a null `active`); the failure scenario is practically unreachable since `connection.active` and the provider RPCs hit the same Core, so a degraded panel loses far more than the note.
+  - `[low]` note flash-in delay after the async `connection.active` resolve. REJECTED: cosmetic, inherent to the spec-chosen single-source async load; resolve latency of a local Core RPC is negligible.
+  - `[low]` SSR test does not exercise note + loaded provider list together / role check vacuity. REJECTED (coexistence part): the note is a sibling of the `{loading?}` block and renders independently of list state; the vacuity is addressed by the patch above; a client-render harness does not exist in this repo (out of scope).
+  - `[low]` note styled with the same muted className as `loading…`. REJECTED: this is the spec's Design-Notes golden shape verbatim; emphasizing it risks reading as the alert the spec forbids.
+  - `[low]` microcopy hardcoded / coupled to the test by substring. REJECTED: normal for a copy assertion.
+  - `[low]` a future third `ConnectionMode` member would fall through to `null` with no compile break. REJECTED: over-engineering an `assertNever` for a 2-member union in an optional-note ternary; the fallthrough is safe.
+
+## Design Notes
+
+- **The "persistence bug" is a discoverability gap, not a store defect — step-02 proved it.** The store-level restore invariant is already comprehensively fenced by 14 green tests (persistent save→reopen decrypted round-trip at `provider-key-store.test.ts:42`, passphrase reopen at l.167, ephemeral no-write at l.105, plus upsert/remove/multi-provider/all typed error arms). This resolves the intent-contract's open question ("confirm whether an equivalent reopen test already exists"): it does, and it is complete, so the story adds **no** duplicate store test and instead spends its code budget on the honest UX signal.
+- **Mode signal is threaded, not independently fetched.** `SettingsPanel` already holds `active` from a single `connection.active` call (l.248-257) and reads `active.mode` at l.381; passing `mode={active?.mode}` into `<ProvidersPanel />` (l.361) is one attribute, zero new RPC, and one source of truth — avoiding a duplicate in-flight request and any risk of the two surfaces disagreeing. Because `active` can be `null` on a persistent boot or a fetch error, the prop is optional and an absent/`persistent` mode renders no extra line — only `ephemeral` triggers the note.
+- **Golden shape of the note** (presentation only, secret-free, not an alert):
+  ```tsx
+  {mode === "ephemeral" ? (
+    <p className="font-mono text-xs lowercase text-muted-foreground">
+      ephemeral session · keys are not remembered after restart
+    </p>
+  ) : null}
+  ```
 
 ## Verification
 
 **Commands:**
-- `bunx tsc --noEmit` — expected: no type errors (a new optional `mode?: ConnectionMode` prop on `ProvidersPanel` is additive; the reused contract types already compile).
-- `bun test` — expected: full suite green, INCLUDING the new/extended `provider-key-store.test.ts` persistent restore round-trip and ephemeral no-persist assertions. **Persistence is fully testable via the store's own unit tests — no Docker, no live database, no container.** The existing `provider-registry` and `providers-model` suites (pure, no DOM) are unaffected by a UI-only mode note.
-- `bun run build` — expected: OK (regenerates the UI bundle embedding the mode-aware AI-providers surface).
+- `bunx tsc --noEmit` -- expected: no type errors (the new optional `mode?: ConnectionMode` prop is additive; reused contract types already compile).
+- `bun test` -- expected: full suite green, including the new `ProvidersPanel.test.tsx` mode-note assertions and the UNCHANGED `provider-key-store.test.ts` (persistent restore round-trip + ephemeral no-write). Persistence is proven purely via the store's own unit tests — **no Docker, no live database, no container.**
+- `bun run build` -- expected: OK (regenerates the UI bundle embedding the mode-aware AI-providers surface).
 
 **Trust-boundary check (grep, mirrors Story 5.1):**
 - No `ai`/`@ai-sdk/*` import and no raw-`apiKey` read outside `src/core/`; the AI-providers surface still handles only `ProviderSummary` (secret-free) and the run-mode literal.
 
 **Manual checks (optional — the persistence claim is proven by the unit test, not manual):**
-- Persistent (default): Settings → ai providers, set an Anthropic key → `configured · …last4`; restart the app → still configured, no re-entry.
+- Persistent (default): Settings → ai providers, set an Anthropic key → `configured · …last4`; restart the app → still configured, no re-entry, no ephemeral note.
 - Ephemeral (`QS_MODE=ephemeral`, the dev-container case): set a key → shows the ephemeral note; restart → `not configured` with the note explaining why; confirm no `provider-keys.enc` was written under the app dir.
+
+## Auto Run Result
+
+Status: **done**
+
+**Summary of implemented change.** The reported "I have to re-enter my provider key every time" was diagnosed as a discoverability gap, not a persistence defect: step-02 confirmed the persistent-mode restore invariant is already fenced by the existing green store suite (14 tests, incl. the save→reopen decrypted round-trip and the ephemeral no-write test), so no store/crypto/RPC/contract code was touched. The change surfaces the run mode on the AI-providers Settings surface — when the session is `ephemeral`, a terse plain line ("ephemeral session · keys are not remembered after restart") now explains the by-design memory-only behavior; `persistent`/unknown renders nothing extra. The mode is threaded from the already-loaded `connection.active` (zero new RPC).
+
+**Files changed.**
+- `src/ui/settings/ProvidersPanel.tsx` — added optional `mode?: ConnectionMode` prop; renders the terse ephemeral note (plain `<p>`, not `role="alert"`) between the error envelope and the loading/list block; masked display, mutations, and gates unchanged.
+- `src/ui/settings/SettingsPanel.tsx` — passes `mode={active?.mode}` to `<ProvidersPanel />` (single source of truth, no duplicate RPC).
+- `src/ui/settings/ProvidersPanel.test.tsx` — NEW: asserts the note shows only for `mode="ephemeral"`, is a plain paragraph and not the `role="alert"`/`bg-err-soft` envelope, and is absent for `persistent`/undefined (repo convention: `renderToStaticMarkup` + `mock.module`).
+- `src/core/provider-key-store.test.ts` — VERIFY-ONLY, untouched; the persistent-restore + ephemeral-no-write invariants stay fenced and green.
+
+**Review findings breakdown.** 2 reviewers (Blind Hunter + Edge Case Hunter). No security or hard-constraint violation. 7 findings deduped → **1 patch applied** (low: strengthened the vacuous SSR `role=alert` assertion into a positive plain-`<p>` / not-`bg-err-soft` check), **0 deferred**, **6 rejected** (1 medium + 5 low — the medium being the spec-designed "omit note on `connection.active` failure", which matches the AC and I/O matrix). Full detail in the Review Triage Log above.
+
+**Verification performed.**
+- `bunx tsc --noEmit` → clean (exit 0).
+- `bun test` → 1262 pass, 0 fail, 3119 expect() calls across 72 files (includes the new panel tests and the unchanged store suite). The `[rpc] handler 'execute' threw: relation "secret" does not exist` line is an expected error-path test log, not a failure.
+- `bun run build` → OK (regenerated the gitignored `*-bundle.generated.ts`).
+- Trust-boundary: the change touches only Ring-2 presentation; no `apiKey`/`ai`/`@ai-sdk` read introduced outside `src/core/`; the surface still handles only `ProviderSummary` + the run-mode literal.
+
+**Follow-up review recommendation:** `false` — the only review-driven change was a single localized low-severity test-assertion hardening; no behavior/API/security/data impact.
+
+**Residual risks.** On a `connection.active` RPC failure the ephemeral note is omitted (by design, per the AC) — practically unreachable since the same Core serves both RPCs. The panel tests, bound by the repo's SSR-only (`renderToStaticMarkup`) convention, do not exercise the note alongside a fully-loaded provider list; the note renders independently of list state, so coverage risk is low.

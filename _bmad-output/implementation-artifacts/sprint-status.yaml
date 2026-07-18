@@ -140,6 +140,6 @@ development_status:
   9-3-borderless-sql-console: done           # Story 9.3: Borderless SQL console — editor blends into the panel (visual pass, committed)
   9-4-create-table-tab: done        # Story 9.4: Create Table as a tab (retire the overlay; mirrors 8.6)
   9-5-erd-hover-detail: done        # Story 9.5: ERD hover — columns + PK/FK badges + relationship highlight
-  9-6-persist-provider-key: ready-for-dev    # Story 9.6: Persist AI provider API keys across sessions (persistent mode)
+  9-6-persist-provider-key: done    # Story 9.6: Persist AI provider API keys across sessions (persistent mode)
   9-7-reports-from-chat: ready-for-dev       # Story 9.7: Generate reports from the chat (open, view, edit)
   epic-9-retrospective: optional
