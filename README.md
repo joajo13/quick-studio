@@ -133,3 +133,15 @@ Build a self-contained binary locally:
 ```sh
 bun run build:binary   # → dist/quick-studio
 ```
+
+### Run with Docker (pre-seeded demo DB)
+
+For eyeballing the UI without installing Bun or provisioning a database, a
+one-command Docker stack boots quick-studio against a disposable, seeded Postgres:
+
+```sh
+docker compose up -d        # then open http://127.0.0.1:6060
+```
+
+See [docs/docker-development.md](docs/docker-development.md) for how it works, the
+everyday commands, and troubleshooting.

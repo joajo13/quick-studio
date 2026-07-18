@@ -1,0 +1,58 @@
+# quick-studio — local dev stack.
+#
+#   docker compose up          # build UI + boot app, pre-connected to a seeded PG
+#   open http://127.0.0.1:6060 # view the UI (use 127.0.0.1, NOT localhost)
+#
+# The app runs in EPHEMERAL mode (connection string passed as a positional arg),
+# so it never touches the OS keychain. Postgres is disposable and re-seeded from
+# docker/seed.sql the first time its data volume is created.
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    ports:
+      # Host 5433 avoids clashing with the Windows PostgreSQL service on 5432.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - ./docker/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+      - qs_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    working_dir: /app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      QS_NO_OPEN: "1"        # headless: never launch a browser inside the container
+      QS_HOST: "127.0.0.1"   # loopback bind → app is NOT "exposed" → no UI banner
+      QS_PORT: "6060"
+    ports:
+      # Host 6060 → container 8080 (socat) → app on 127.0.0.1:6060. The browser
+      # dials 127.0.0.1:6060, so the Host header matches the app's loopback bind.
+      - "127.0.0.1:6060:8080"
+    volumes:
+      - .:/app                       # live source — edit on the host, rebuild + restart
+      - qs_node_modules:/app/node_modules   # keep Linux deps out of the host tree
+    # Install deps (cached in the volume after the first run), build the UI
+    # bundles, start the loopback→wildcard forwarder, then boot pre-connected to
+    # the demo DB via the service DNS name.
+    command: >
+      sh -c "bun install &&
+             bun run build &&
+             socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:6060 &
+             exec bun run bin/quick-studio.ts postgres://demo:demo@db:5432/demo"
+
+volumes:
+  qs_pgdata:
+  qs_node_modules:
