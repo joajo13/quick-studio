@@ -220,7 +220,6 @@ function badRequest(message: string, detail: string): RegistryResult<never> {
 /** The fully-prepared, schema-only request handed to the single streaming call. */
 type PreparedRequest = {
   readonly provider: ProviderKind;
-  readonly apiKey: string;
   readonly model: LanguageModel;
   readonly system: string;
   readonly prompt: string;
@@ -294,7 +293,6 @@ function prepareRequest(
       ok: true,
       value: {
         provider,
-        apiKey,
         model: resolved.model,
         system: buildChatSystemPrompt(payload),
         prompt: message,
@@ -302,6 +300,29 @@ function prepareRequest(
       },
     };
   })();
+}
+
+/**
+ * Extract a numeric HTTP status from a provider error — its own `statusCode` then
+ * `status`, returned only when it is an integer in the HTTP range 100–599 (else
+ * `undefined`). A `number` primitive cannot encode the key, so it is the ONLY
+ * provider-derived value the error path is allowed to log (see the `answerStream`
+ * catch invariant); the range/integer check merely keeps the diagnostic honest.
+ */
+function errorStatusCode(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  for (const key of ["statusCode", "status"] as const) {
+    // A hostile error could expose `statusCode`/`status` as a throwing getter;
+    // reading it must never escape (answerStream's catch is Total — never throws).
+    let v: unknown;
+    try {
+      v = (err as Record<string, unknown>)[key];
+    } catch {
+      continue;
+    }
+    if (typeof v === "number" && Number.isInteger(v) && v >= 100 && v <= 599) return v;
+  }
+  return undefined;
 }
 
 /**
@@ -320,7 +341,7 @@ export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
         yield { type: "error", code: prepared.code, message: prepared.message };
         return;
       }
-      const { provider, apiKey, model, system, prompt, tables } = prepared.value;
+      const { provider, model, system, prompt, tables } = prepared.value;
 
       const context: ChatContextSummary = {
         policy: "schema-only",
@@ -363,11 +384,13 @@ export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
         // spurious "stream failed" log, and no misleading `error` chunk (the caller is
         // already gone and the controller is dead, so it could not be delivered anyway).
         if (signal?.aborted) return;
-        // Redact the key from the cause before logging: a provider auth error can echo
-        // the credential, and the spec forbids the key ever being logged or sent.
-        const rawCause = err instanceof Error ? err.message : String(err);
-        const cause = apiKey.length > 0 ? rawCause.split(apiKey).join("***") : rawCause;
-        process.stderr.write(`[chat] provider stream failed: ${cause}\n`);
+        // Security invariant: the provider key must NEVER reach any log. An auth error
+        // can echo the credential in forms substring-redaction can't cover, so we never
+        // interpolate the raw provider error — only a numeric status, which cannot carry it.
+        const status = errorStatusCode(err);
+        process.stderr.write(
+          `[chat] provider stream failed${status === undefined ? "" : ` (http ${status})`}\n`,
+        );
         yield { type: "error", code: "internal_error", message: "provider call failed" };
         return;
       }
