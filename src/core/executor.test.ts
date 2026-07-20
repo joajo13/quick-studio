@@ -14,6 +14,7 @@ import type { DatabaseSchema, DbEngine } from "../shared/contract.ts";
 import type { ConnectionSeams } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import {
+  boundRawRead,
   createExecutor,
   firstKeyword,
   splitStatements,
@@ -186,7 +187,8 @@ describe("raw path — reads run read-only", () => {
     expect(reply.ok).toBe(true);
     if (reply.ok) expect(reply.result.status).toBe("rows");
     expect(readOnlyCalls.length).toBe(1);
-    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM users");
+    // The auto-run raw SELECT is bounded at the fetch (DW-36): MAX_RESULT_ROWS + 1.
+    expect(readOnlyCalls[0]!.sql).toBe(`SELECT * FROM users\nLIMIT ${MAX_RESULT_ROWS + 1}`);
     expect(queryCalls.length).toBe(0);
   });
 
@@ -216,6 +218,117 @@ describe("raw path — reads run read-only", () => {
       expect(reply.result.data.rows.length).toBe(MAX_RESULT_ROWS);
       expect(reply.result.truncated).toBe(true);
     }
+  });
+});
+
+/* ---- Raw read fetch bound (DW-36) ------------------------------------ */
+
+describe("raw read fetch bound (DW-36)", () => {
+  const BOUND = MAX_RESULT_ROWS + 1;
+
+  test("unbounded SELECT gets a Core LIMIT appended before runReadOnly", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(readOnlyCalls[0]!.sql).toBe(`SELECT * FROM users\nLIMIT ${BOUND}`);
+  });
+
+  test("already-LIMITed SELECT is passed verbatim (user's own bound wins)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t LIMIT 5" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t LIMIT 5");
+  });
+
+  test("SHOW is a read but is passed verbatim (not a SELECT)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SHOW TABLES" });
+    expect(readOnlyCalls.length).toBe(1);
+    expect(readOnlyCalls[0]!.sql).toBe("SHOW TABLES");
+  });
+
+  test("trailing line comment: the appended LIMIT lands on a NEW line, not inside the comment", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t -- note" });
+    expect(readOnlyCalls[0]!.sql).toBe(`SELECT * FROM t -- note\nLIMIT ${BOUND}`);
+  });
+
+  test("inner-LIMIT-only SELECT is passed verbatim (a top-level LIMIT word is present)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM (SELECT a FROM t LIMIT 5) x" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM (SELECT a FROM t LIMIT 5) x");
+  });
+
+  test("row-locking SELECT ... FOR UPDATE is passed verbatim (a trailing LIMIT would be a syntax error)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t FOR UPDATE" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t FOR UPDATE");
+  });
+
+  test("mysql LOCK IN SHARE MODE is passed verbatim (locking tail must follow LIMIT)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor({ engine: "mysql" });
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t LOCK IN SHARE MODE" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t LOCK IN SHARE MODE");
+  });
+
+  test("postgres FETCH FIRST n ROWS ONLY is passed verbatim (a second row-count clause is illegal)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t FETCH FIRST 10 ROWS ONLY" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t FETCH FIRST 10 ROWS ONLY");
+  });
+
+  test("truncation sentinel: a MAX+1-row fetch caps to MAX rows and sets truncated", async () => {
+    const rows = Array.from({ length: BOUND }, (_v, i) => [i]);
+    const { exec } = makeExecutor({ readOnlyResult: { columns: [{ name: "n" }], rows, rowsAffected: 0 } });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT n FROM big" });
+    expect(reply.ok).toBe(true);
+    if (reply.ok && reply.result.status === "rows") {
+      expect(reply.result.data.rows.length).toBe(MAX_RESULT_ROWS);
+      expect(reply.result.truncated).toBe(true);
+    }
+  });
+
+  test("exact fit: an exactly-MAX-row fetch returns all rows, truncated false", async () => {
+    const rows = Array.from({ length: MAX_RESULT_ROWS }, (_v, i) => [i]);
+    const { exec } = makeExecutor({ readOnlyResult: { columns: [{ name: "n" }], rows, rowsAffected: 0 } });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT n FROM big" });
+    expect(reply.ok).toBe(true);
+    if (reply.ok && reply.result.status === "rows") {
+      expect(reply.result.data.rows.length).toBe(MAX_RESULT_ROWS);
+      expect(reply.result.truncated).toBe(false);
+    }
+  });
+
+  test("mutation path: a confirmed raw DELETE reaches runQuery with NO LIMIT appended", async () => {
+    const { exec, queryCalls, readOnlyCalls } = makeExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "DELETE FROM users", confirmed: true });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls.length).toBe(1);
+    expect(queryCalls[0]!.sql).toBe("DELETE FROM users");
+    expect(readOnlyCalls.length).toBe(0);
+  });
+
+  // Direct units for the pure helper: `verb`/`words` arrive already upper-cased from
+  // topLevelWords, so callers pass "SELECT" (never a lowercase verb).
+  test("boundRawRead unit: SELECT with no LIMIT gets the bound; SHOW and LIMITed pass through", () => {
+    expect(boundRawRead("SELECT 1", "SELECT", ["SELECT"])).toBe(`SELECT 1\nLIMIT ${BOUND}`);
+    // mysql SHOW: not a SELECT → verbatim.
+    expect(boundRawRead("SHOW TABLES", "SHOW", ["SHOW", "TABLES"])).toBe("SHOW TABLES");
+    // Top-level LIMIT already present → verbatim.
+    expect(boundRawRead("SELECT * FROM t LIMIT 5", "SELECT", ["SELECT", "FROM", "T", "LIMIT"])).toBe(
+      "SELECT * FROM t LIMIT 5",
+    );
+    // A trailing line comment is defeated by the leading newline.
+    expect(boundRawRead("SELECT 1 -- note", "SELECT", ["SELECT"])).toBe(`SELECT 1 -- note\nLIMIT ${BOUND}`);
+    // A row-count or row-locking word makes a trailing LIMIT illegal → verbatim.
+    expect(boundRawRead("SELECT * FROM t FETCH FIRST 5 ROWS ONLY", "SELECT", ["SELECT", "FROM", "T", "FETCH", "FIRST", "ROWS", "ONLY"])).toBe(
+      "SELECT * FROM t FETCH FIRST 5 ROWS ONLY",
+    );
+    expect(boundRawRead("SELECT * FROM t FOR UPDATE", "SELECT", ["SELECT", "FROM", "T", "FOR", "UPDATE"])).toBe(
+      "SELECT * FROM t FOR UPDATE",
+    );
+    expect(boundRawRead("SELECT * FROM t LOCK IN SHARE MODE", "SELECT", ["SELECT", "FROM", "T", "LOCK", "IN", "SHARE", "MODE"])).toBe(
+      "SELECT * FROM t LOCK IN SHARE MODE",
+    );
   });
 });
 
@@ -770,7 +883,8 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
     const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users", connectionId: "conn-b" });
     expect(reply.ok && reply.result.status).toBe("rows");
     expect(target.readOnlyCalls.length).toBe(1);
-    expect(target.readOnlyCalls[0]!.sql).toBe("SELECT * FROM users");
+    // Fetch bound (DW-36) applies on the re-targeted read too.
+    expect(target.readOnlyCalls[0]!.sql).toBe(`SELECT * FROM users\nLIMIT ${MAX_RESULT_ROWS + 1}`);
     expect(boot.readOnlyCalls.length).toBe(0);
   });
 

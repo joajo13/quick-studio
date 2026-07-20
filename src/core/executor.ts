@@ -325,6 +325,63 @@ function toRowsResult(result: DriverQueryResult): ExecuteResult {
 }
 
 /**
+ * Bound the FETCH — not just the display slice — of an auto-classified raw SELECT read
+ * by appending a Core-computed `LIMIT` before the statement reaches `runReadOnly` (DW-36).
+ * Without this the driver (postgres.js / mysql2) buffers EVERY row into Core memory and
+ * only afterwards does `toRowsResult` slice to {@link MAX_RESULT_ROWS}, so a
+ * `SELECT * FROM huge_table` OOMs the Core process before the cap ever applies — the cap
+ * bounds the response payload, not the fetch.
+ *
+ * The bound is `MAX_RESULT_ROWS + 1`: the `+ 1` is the exact sentinel `toRowsResult` already
+ * reads to set `truncated`, so a bounded fetch of MAX+1 detects "there were more rows" the
+ * same way an unbounded fetch did — `toRowsResult` needs NO change.
+ *
+ * The bound is appended ONLY for a `SELECT` whose top-level words contain NONE of
+ * {@link NO_FETCH_BOUND_WORDS} — the conservative "provably safe to append `LIMIT`" set.
+ * When any appears the statement is returned verbatim and only the Core-side cap applies
+ * (byte-identical to today — safe, never a syntax error). The reasons, per word:
+ *  - `LIMIT` / `FETCH` — the statement already carries a row-count clause (`LIMIT n`,
+ *    SQL-standard `FETCH FIRST n ROWS ONLY`); appending a second is a syntax error, and a
+ *    user-supplied bound is left as the user's own choice.
+ *  - `UPDATE` / `SHARE` / `LOCK` — a row-locking tail (`FOR UPDATE`, `FOR SHARE`,
+ *    `FOR NO KEY UPDATE`, `FOR KEY SHARE`, MySQL `LOCK IN SHARE MODE`) must FOLLOW `LIMIT`;
+ *    appending `LIMIT` after it is a syntax error on both engines.
+ * A `SHOW` (verb !== `SELECT`) is likewise passed verbatim — it returns small fixed
+ * metadata and does not reliably accept a trailing `LIMIT`.
+ *
+ * KNOWN LIMITATIONS (the fetch stays unbounded — no worse than before this change, i.e.
+ * NOT a regression, just not covered): `words` is the flat `topLevelWords` output, which
+ * does NOT track parenthesis depth, so a `LIMIT`/`FETCH` inside a subquery or one arm of a
+ * `UNION` suppresses the outer bound (`(SELECT … LIMIT 5) UNION SELECT * FROM huge` is left
+ * unbounded); Postgres `LIMIT ALL` counts as a `LIMIT` yet means "no limit"; and an explicit
+ * large `LIMIT 500000` is honored as the user's bound. These exotic shapes fall back to the
+ * Core-side cap; the common `SELECT * FROM huge_table` (the OOM vector DW-36 targets) is bounded.
+ *
+ * The bound is a Core integer literal (never a value spliced from user text — same precedent
+ * as `table-rows.ts`), and the leading newline defeats a trailing `-- …` line comment that
+ * would otherwise swallow the appended clause.
+ */
+export function boundRawRead(stmt: string, verb: string | undefined, words: readonly string[]): string {
+  if (verb !== "SELECT" || words.some((w) => NO_FETCH_BOUND_WORDS.has(w))) return stmt;
+  return `${stmt}\nLIMIT ${MAX_RESULT_ROWS + 1}`;
+}
+
+/**
+ * Top-level words whose presence makes appending a trailing `LIMIT` either a syntax error
+ * or redundant, so {@link boundRawRead} leaves the statement verbatim: an existing row-count
+ * clause (`LIMIT`, `FETCH FIRST … ROWS`) and a row-locking tail (`FOR UPDATE`/`FOR SHARE`/
+ * MySQL `LOCK IN SHARE MODE`) that must itself follow `LIMIT`. Matching a rare unquoted
+ * identifier here only over-suppresses (falls back to the Core cap) — never breaks a query.
+ */
+const NO_FETCH_BOUND_WORDS: ReadonlySet<string> = new Set([
+  "LIMIT",
+  "FETCH",
+  "UPDATE",
+  "SHARE",
+  "LOCK",
+]);
+
+/**
  * Build the guarded executor over the injected seams. `execute` returns an ALREADY-
  * formed {@link RpcReply}: a protocol violation is a `bad_request` envelope; a domain
  * outcome (rows / ok / confirmation_required) rides inside `okReply`. A seam throw
@@ -377,7 +434,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     if (isRead) {
       // Auto-run inside an engine READ-ONLY transaction (rolled back): a hidden write
       // (volatile/writing function) then fails at the engine, never commits.
-      const result = await runReadOnly(stmt, []);
+      const result = await runReadOnly(boundRawRead(stmt, verb, words), []);
       return okReply(toRowsResult(result));
     }
 

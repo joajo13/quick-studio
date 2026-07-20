@@ -277,7 +277,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
 location: `executeRaw` / `toRowsResult` (`executor.ts`)
 reason: Reviewer severity: medium. `executor.ts` `executeRaw` read path runs `runReadOnly(stmt, [])` then `toRowsResult` slices to `MAX_RESULT_ROWS` AFTER the driver (postgres.js / mysql2) has already buffered every row in memory. The Core-side cap only bounds the response payload, not the fetch, so a large read OOMs the Core process. Story 3.1 explicitly scopes DB-side pagination/`LIMIT` to Story 3.2 ("a Core-side row cap is the only responsiveness measure here"), so this is a known-limitation deferral to the pagination story, not a 3.1 defect — but the current cap gives no memory protection.
-status: open
+status: done 2026-07-20
+resolution: resolved by sweep bundle dw-raw-read-fetch-bound
 
 ### DW-37: Make the structured `createTable` type/constraint allowlist engine-aware — postgres-only tokens (`UUID`, `JSONB`, `TIMESTAMPTZ`, `SERIAL`, …) and bare `VARCHAR` (no length) compose invalid DDL on MySQL and fail opaquely at the engine
 
