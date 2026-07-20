@@ -33,24 +33,62 @@ import { rowsToFrozenData } from "./frozen-map.ts";
 export const MAX_RESULT_ROWS = 1000;
 
 /**
- * The fixed, engine-blind allowlist of canonical column types the structured
- * `createTable` composer may emit. There is NO raw-text fallback — a type token not
- * in this set is a `bad_request` at validation, and an assertion at compose time.
+ * The engine-aware DDL map: each canonical column token → the exact DDL fragment
+ * that is VALID on that engine. Two tiers of validation hang off this one table:
+ *  1. shape gate — the union of all keys (`CREATE_TABLE_TYPES`), applied engine-blind
+ *     before any connection round-trip;
+ *  2. compose gate — per-engine lookup once the target engine is known, so MySQL never
+ *     composes DDL the engine would reject (bare `VARCHAR` needs a length; `UUID` has no
+ *     native MySQL type). A shape-valid token absent from the target engine's map is a
+ *     contract-level `bad_request` BEFORE any DDL runs — never an opaque engine
+ *     `internal_error`. There is NO raw-text fallback.
+ * `Record<DbEngine, …>` keeps this exhaustive: if `DbEngine` ever grows a third value the
+ * compiler forces a new engine map here rather than silently falling through.
+ */
+const CREATE_TABLE_TYPE_DDL: Record<DbEngine, Record<string, string>> = {
+  postgres: {
+    INTEGER: "INTEGER",
+    BIGINT: "BIGINT",
+    SMALLINT: "SMALLINT",
+    TEXT: "TEXT",
+    VARCHAR: "VARCHAR",
+    BOOLEAN: "BOOLEAN",
+    DATE: "DATE",
+    TIMESTAMP: "TIMESTAMP",
+    NUMERIC: "NUMERIC",
+    REAL: "REAL",
+    "DOUBLE PRECISION": "DOUBLE PRECISION",
+    UUID: "UUID",
+    JSON: "JSON",
+  },
+  // MySQL differs on exactly two tokens: bare `VARCHAR` is invalid (needs a length) so it
+  // renders `VARCHAR(255)`, and there is no native `UUID` type so the key is OMITTED —
+  // `UUID` is postgres-only and rejected on MySQL rather than silently remapped to CHAR(36).
+  mysql: {
+    INTEGER: "INTEGER",
+    BIGINT: "BIGINT",
+    SMALLINT: "SMALLINT",
+    TEXT: "TEXT",
+    VARCHAR: "VARCHAR(255)",
+    BOOLEAN: "BOOLEAN",
+    DATE: "DATE",
+    TIMESTAMP: "TIMESTAMP",
+    NUMERIC: "NUMERIC",
+    REAL: "REAL",
+    "DOUBLE PRECISION": "DOUBLE PRECISION",
+    JSON: "JSON",
+  },
+};
+
+/**
+ * The fixed, engine-blind shape allowlist the structured `createTable` composer accepts.
+ * Derived as the UNION of the per-engine map keys — single source of truth, so the shape
+ * gate can never drift from the engine-aware DDL map. A token not in this set is a
+ * `bad_request` at validation, and an assertion at compose time.
  */
 const CREATE_TABLE_TYPES: ReadonlySet<string> = new Set([
-  "INTEGER",
-  "BIGINT",
-  "SMALLINT",
-  "TEXT",
-  "VARCHAR",
-  "BOOLEAN",
-  "DATE",
-  "TIMESTAMP",
-  "NUMERIC",
-  "REAL",
-  "DOUBLE PRECISION",
-  "UUID",
-  "JSON",
+  ...Object.keys(CREATE_TABLE_TYPE_DDL.postgres),
+  ...Object.keys(CREATE_TABLE_TYPE_DDL.mysql),
 ]);
 
 /**
@@ -573,22 +611,32 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
 
     const engine = await getEngine();
-    const defs = columns.defs.map((d) => {
+    // Compose the column fragments engine-aware: the shape gate above (union allowlist)
+    // proves the token is canonical, but a token can be shape-valid yet unsupported on THIS
+    // engine (e.g. UUID on MySQL). We build defs imperatively so such a token can short-
+    // circuit with a contract-level `bad_request` BEFORE any DDL runs — never an opaque
+    // engine `internal_error`.
+    const defs: string[] = [];
+    for (const d of columns.defs) {
       const type = d.type.trim().toUpperCase();
       // Invariant (never a raw-text fallback): validation already rejected an
       // out-of-allowlist type, so reaching compose with one is a bug, not user input.
       if (!CREATE_TABLE_TYPES.has(type)) {
         throw new Error(`invariant violation: unvalidated createTable type '${type}'`);
       }
-      return `${quoteIdent(d.name)} ${type}${d.notNull ? " NOT NULL" : ""}`;
-    });
+      const ddl = CREATE_TABLE_TYPE_DDL[engine][type];
+      // Shape-valid but no representation on this engine (UUID on MySQL): reject with an
+      // honest bad_request naming column/token/engine, before runQuery — not an engine error.
+      if (ddl === undefined) {
+        return bad(`column '${d.name}' type '${type}' is not supported on ${engine}`);
+      }
+      defs.push(`${quoteIdent(d.name)} ${ddl}${d.notNull ? " NOT NULL" : ""}`);
+    }
     if (pkCols.length > 0) {
       defs.push(`PRIMARY KEY (${pkCols.map((c) => quoteIdent(c)).join(", ")})`);
     }
     const sql = `CREATE TABLE ${qualified(quoteIdent, table.schema, table.table)} (${defs.join(", ")})`;
     const result = await runQuery(sql, []);
-    // engine is read for placeholder parity / future engine-specific DDL; unused here.
-    void engine;
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 

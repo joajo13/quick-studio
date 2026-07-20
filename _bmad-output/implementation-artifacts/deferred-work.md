@@ -285,7 +285,8 @@ resolution: resolved by sweep bundle dw-raw-read-fetch-bound
 origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
 location: `CREATE_TABLE_TYPES` / `executeCreateTable` (`executor.ts`)
 reason: Reviewer severity: low. `executor.ts` `CREATE_TABLE_TYPES` is a single engine-blind allowlist; `executeCreateTable` emits the validated token verbatim. On MySQL a "valid" structured `createTable` carrying `UUID`/bare `VARCHAR` composes DDL the engine rejects → `internal_error`. Not a safety hole (values are still parameterized, identifiers quote-escaped, and it fails closed at the engine with no raw-text echo), purely a contract-quality gap; the fix is to gate/map type tokens per engine.
-status: open
+status: done 2026-07-20
+resolution: resolved by sweep bundle dw-engine-aware-createtable-types
 
 ### DW-38: Map postgres raw-read result rows positionally (array row-mode) rather than by column name, so a `SELECT` with duplicate output column names (`SELECT id, id`, `a.id, b.id`) does not collapse same-named columns to a single (last) value
 

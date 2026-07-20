@@ -815,6 +815,68 @@ describe("structured createTable — fixed allowlist, no raw-text fallback", () 
     });
     expect(badPk.ok).toBe(false);
   });
+
+  test("mysql renders bare VARCHAR as VARCHAR(255) (length required by the engine)", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "s", type: "VARCHAR" }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe("CREATE TABLE `t` (`s` VARCHAR(255))");
+  });
+
+  test("mysql UUID (no native type) → bad_request before any DDL runs", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "id", type: "UUID" }] },
+    });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+    expect(queryCalls.length).toBe(0);
+  });
+
+  test("postgres renders bare VARCHAR unchanged (unbounded)", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "postgres" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "s", type: "VARCHAR" }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe('CREATE TABLE "t" ("s" VARCHAR)');
+  });
+
+  test("postgres UUID stays valid and renders UUID", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "postgres" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "id", type: "UUID" }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe('CREATE TABLE "t" ("id" UUID)');
+  });
+
+  test("mysql rejects an engine-unsupported token in ANY position (not just first) → no DDL runs", async () => {
+    // The reject fires per-column, so a supported column preceding an unsupported one must
+    // still short-circuit BEFORE runQuery — a structurally-valid request never composes DDL
+    // an engine would reject, regardless of where the offending column sits.
+    const { exec, queryCalls } = makeExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: {
+        kind: "createTable",
+        table: "t",
+        columns: [
+          { name: "ok", type: "INTEGER" },
+          { name: "id", type: "UUID" },
+        ],
+      },
+    });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+    expect(queryCalls.length).toBe(0);
+  });
 });
 
 /* ---- Path (a): un-widenable + request-shape validation --------------- */
