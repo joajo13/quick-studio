@@ -8,7 +8,14 @@
  */
 
 import { describe, expect, mock, test } from "bun:test";
-import { FROZEN_SCHEMA_VERSION, okReply, errorReply, type FrozenData, type RpcReply } from "../shared/contract.ts";
+import {
+  FROZEN_SCHEMA_VERSION,
+  okReply,
+  errorReply,
+  type ConnectionSummary,
+  type FrozenData,
+  type RpcReply,
+} from "../shared/contract.ts";
 import { LIVE_REPORT_SCHEMA_VERSION, type LiveReportBlock, type LiveReportDoc } from "../shared/live-report.ts";
 import {
   buildExecuteParams,
@@ -16,6 +23,7 @@ import {
   CANNOT_REACH_HTML,
   classifyReply,
   CONFIRM_NOTE,
+  makeDomHost,
   NEEDS_QS_HTML,
   renderResultBlock,
   runLiveReport,
@@ -73,11 +81,18 @@ function fakeSlot(): FakeSlot {
 function fakeHost() {
   const statuses: string[] = [];
   const slots: FakeSlot[] = [];
+  // The picker is REPLACEABLE (DW-52): record the connections + selectedId of the LATEST render.
+  let pickerConnections: ReadonlyArray<ConnectionSummary> = [];
+  let pickerSelectedId: string | null = null;
+  let pickerRenders = 0;
   let pick: ((id: string | null) => void) | null = null;
   let refresh: (() => void) | null = null;
   const host: LiveHost = {
     setStatus: (html) => statuses.push(html),
-    renderPicker: (_connections, onPick) => {
+    renderPicker: (connections, selectedId, onPick) => {
+      pickerConnections = connections;
+      pickerSelectedId = selectedId;
+      pickerRenders += 1;
       pick = onPick;
     },
     renderRefresh: (onRefresh) => {
@@ -93,6 +108,15 @@ function fakeHost() {
     host,
     statuses,
     slots,
+    get pickerConnections() {
+      return pickerConnections;
+    },
+    get pickerSelectedId() {
+      return pickerSelectedId;
+    },
+    get pickerRenders() {
+      return pickerRenders;
+    },
     get pick() {
       return pick;
     },
@@ -361,6 +385,55 @@ describe("runLiveReport — token present", () => {
     expect(slot.clears).toBe(2);
   });
 
+  test("overlapping runs at the connection-load boundary (DW-52 guard): a superseded run resolving its connections.list LAST mutates neither status nor picker", async () => {
+    // Deferred `connections.list` replies we resolve by hand, so run-1 and run-2 overlap at the
+    // `loadConnections` await — the exact re-entrancy boundary DW-52 added the post-await
+    // `isCurrent()` guard for. A superseded FAILED run must not plant a stale banner nor a
+    // Default-only picker over the newer healthy run's UI.
+    const listResolvers: Array<(reply: RpcReply<unknown>) => void> = [];
+    const conns: ReadonlyArray<ConnectionSummary> = [
+      { id: "conn-a", name: "Alpha", host: "h", engine: "pg" },
+      { id: "conn-b", name: "Bravo", host: "h", engine: "pg" },
+    ];
+    const rpc = mock(async (method: string): Promise<RpcReply<unknown>> => {
+      if (method === "connections.list") {
+        return new Promise<RpcReply<unknown>>((resolve) => listResolvers.push(resolve));
+      }
+      return okReply({ status: "rows", data: numData, truncated: false });
+    });
+    const deps: LiveDeps = { getToken: () => "tok", rpc };
+    const f = fakeHost();
+    const flush = async (): Promise<void> => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    };
+
+    // Run 1 (the initial runAll) kicks off and suspends awaiting connections.list.
+    const p = runLiveReport(doc([qb({ sql: "select 1", view: "table" })]), deps, f.host);
+    await flush();
+    expect(listResolvers).toHaveLength(1);
+
+    // Trigger an overlapping run 2 via Refresh while run 1 is still awaiting its list.
+    f.refresh!();
+    await flush();
+    expect(listResolvers).toHaveLength(2);
+
+    // Resolve the LATEST run (2) FIRST — a healthy list — it renders the picker + queries the block.
+    listResolvers[1]!(okReply(conns));
+    await flush();
+    expect(f.pickerConnections).toEqual(conns);
+    expect(f.pickerRenders).toBe(1);
+
+    // Then resolve the SUPERSEDED run (1) LAST, as a FAILURE: its late resolve hits `if (!isCurrent())
+    // return` before any mutation — no stale CANNOT_REACH banner, and run 2's picker is untouched.
+    listResolvers[0]!(errorReply("internal_error", "down"));
+    await flush();
+    await p;
+
+    expect(f.statuses).toEqual([]); // the superseded failure never set the banner
+    expect(f.pickerRenders).toBe(1); // only run 2 ever rendered the picker
+    expect(f.pickerConnections).toEqual(conns); // run 2's named connections survived
+  });
+
   test("refresh re-queries every block against the current pick", async () => {
     let executes = 0;
     const { deps } = depsFor({
@@ -370,12 +443,149 @@ describe("runLiveReport — token present", () => {
       },
     });
     const f = fakeHost();
+    // Refresh now round-trips `connections.list` inside `runAll` before the executes, so drain
+    // enough microtasks (mirroring the overlapping-runs flush) to observe every execute call.
+    const flush = async (): Promise<void> => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    };
     await runLiveReport(doc([qb(), qb()]), deps, f.host);
     expect(executes).toBe(2);
     f.refresh!();
-    await Promise.resolve();
-    await Promise.resolve();
+    await flush();
     expect(executes).toBe(4);
+  });
+
+  test("recovery via Refresh: connections.list fails then succeeds — banner set then cleared, picker gains named connections, block renders live data", async () => {
+    const conns: ReadonlyArray<ConnectionSummary> = [
+      { id: "conn-a", name: "Alpha", host: "h", engine: "pg" },
+      { id: "conn-b", name: "Bravo", host: "h", engine: "pg" },
+    ];
+    let listCalls = 0;
+    const { deps } = depsFor({
+      connections: () => {
+        listCalls += 1;
+        return listCalls === 1 ? errorReply("internal_error", "down") : connOk(conns);
+      },
+    });
+    const f = fakeHost();
+    const flush = async (): Promise<void> => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    };
+
+    await runLiveReport(doc([qb({ sql: "select 1", view: "table" })]), deps, f.host);
+    // Initial run failed: ONLY the banner was set, the query slot carries the inline note, no data.
+    expect(f.statuses).toEqual([CANNOT_REACH_HTML]);
+    expect(f.pickerRenders).toBe(1);
+    expect(f.slots[0]!.errors).toContain(CANNOT_REACH_BLOCK_NOTE);
+    expect(f.slots[0]!.htmls.some((h) => h.includes("<table"))).toBe(false);
+
+    // Core recovers; the viewer clicks Refresh.
+    f.refresh!();
+    await flush();
+
+    // The banner is set THEN cleared (order matters — a stale banner must never outlive recovery),
+    // the (rebuilt) picker carries the named connections, and the block renders live data.
+    expect(f.statuses).toEqual([CANNOT_REACH_HTML, ""]);
+    expect(f.pickerRenders).toBe(2);
+    expect(f.pickerConnections).toEqual(conns);
+    expect(f.slots[0]!.htmls.some((h) => h.includes("<table"))).toBe(true);
+  });
+
+  test("still-down Refresh: connections.list fails on both runs — no execute ever issued, each slot shows the note", async () => {
+    const { deps, rpc } = depsFor({ connections: () => errorReply("internal_error", "down") });
+    const f = fakeHost();
+    const flush = async (): Promise<void> => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    };
+
+    await runLiveReport(doc([qb({ sql: "select 1" }), qb({ sql: "select 2" })]), deps, f.host);
+    f.refresh!();
+    await flush();
+
+    // No `execute` RPC is ever attempted while the Core is down (only `connections.list`).
+    expect(rpc.mock.calls.every((c) => c[0] !== "execute")).toBe(true);
+    // Each query slot (re-)shows the cleared "cannot reach" note.
+    for (const slot of f.slots) {
+      expect(slot.errors).toContain(CANNOT_REACH_BLOCK_NOTE);
+    }
+  });
+
+  test("down→up preserves the named pick: pick conn-b, a failed Refresh keeps it, a successful Refresh still shows it selected", async () => {
+    const conns: ReadonlyArray<ConnectionSummary> = [
+      { id: "conn-a", name: "Alpha", host: "h", engine: "pg" },
+      { id: "conn-b", name: "Bravo", host: "h", engine: "pg" },
+    ];
+    let listShouldFail = false;
+    const { deps } = depsFor({
+      connections: () => (listShouldFail ? errorReply("internal_error", "down") : connOk(conns)),
+    });
+    const f = fakeHost();
+    const flush = async (): Promise<void> => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    };
+
+    // Healthy load: picker shows Default selected.
+    await runLiveReport(doc([qb({ view: "table" })]), deps, f.host);
+    expect(f.pickerSelectedId).toBe(null);
+
+    // The viewer picks a named connection.
+    f.pick!("conn-b");
+    await flush();
+    expect(f.pickerSelectedId).toBe("conn-b");
+
+    // Core goes down: a failed Refresh rebuilds a Default-only picker but NEVER resets `current`.
+    listShouldFail = true;
+    f.refresh!();
+    await flush();
+    expect(f.pickerSelectedId).toBe("conn-b");
+
+    // Core back up: the successful Refresh's picker render still shows conn-b selected.
+    listShouldFail = false;
+    f.refresh!();
+    await flush();
+    expect(f.pickerSelectedId).toBe("conn-b");
+    expect(f.pickerConnections).toEqual(conns);
+    // The picker was rebuilt once per run: initial + pick + failed refresh + successful refresh.
+    expect(f.pickerRenders).toBe(4);
+  });
+
+  test("recovery reconciles a vanished pick to Default — no phantom execute against the missing id", async () => {
+    const withB: ReadonlyArray<ConnectionSummary> = [
+      { id: "conn-a", name: "Alpha", host: "h", engine: "pg" },
+      { id: "conn-b", name: "Bravo", host: "h", engine: "pg" },
+    ];
+    const withoutB: ReadonlyArray<ConnectionSummary> = [{ id: "conn-a", name: "Alpha", host: "h", engine: "pg" }];
+    let listCalls = 0;
+    const executeConns: Array<string | null> = [];
+    const { deps } = depsFor({
+      // conn-b is present for the initial load AND the pick, then vanishes before the Refresh.
+      connections: () => {
+        listCalls += 1;
+        return connOk(listCalls <= 2 ? withB : withoutB);
+      },
+      execute: (params) => {
+        executeConns.push((params as { connectionId: string | null }).connectionId);
+        return okReply({ status: "rows", data: numData, truncated: false });
+      },
+    });
+    const f = fakeHost();
+    const flush = async (): Promise<void> => {
+      for (let i = 0; i < 6; i += 1) await Promise.resolve();
+    };
+
+    await runLiveReport(doc([qb({ view: "table" })]), deps, f.host);
+    f.pick!("conn-b");
+    await flush();
+    expect(f.pickerSelectedId).toBe("conn-b");
+
+    // conn-b is gone on the next Refresh: the pick reconciles to Default rather than a phantom id.
+    f.refresh!();
+    await flush();
+    expect(f.pickerSelectedId).toBe(null);
+    expect(f.pickerConnections).toEqual(withoutB);
+    // The post-recovery `execute` targeted Default (null) — the vanished "conn-b" is never queried
+    // again (it was legitimately queried once by the pick, while it still existed).
+    expect(executeConns.at(-1)).toBe(null);
   });
 
   test("empty report → an affordance, never a blank body", async () => {
@@ -398,5 +608,119 @@ describe("runLiveReport — token present", () => {
     const html = f.slots[0]!.htmls.join("");
     expect(html).not.toContain("<script>");
     expect(html).toContain("&lt;/td&gt;&lt;script&gt;");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * DOM host (makeDomHost) — the replaceable-picker contract (DW-52)
+ * ------------------------------------------------------------------ */
+
+/**
+ * A minimal fake `Document`/element (this repo has no jsdom) that models the ONE DOM behavior the
+ * picker fix depends on: setting `<select>.value` to an id with no matching `<option>` leaves
+ * `selectedIndex` at -1 and the value blank (the real DOM contract). Only the members `makeDomHost`
+ * touches are implemented.
+ */
+type FakeNode = {
+  tagName: string;
+  className: string;
+  textContent: string;
+  type: string;
+  readonly children: FakeNode[];
+  value: string;
+  selectedIndex: number;
+  innerHTML: string;
+  appendChild: (child: FakeNode) => FakeNode;
+  addEventListener: () => void;
+};
+function fakeElement(tag: string): FakeNode {
+  const children: FakeNode[] = [];
+  let value = "";
+  let html = "";
+  const el = {
+    tagName: tag,
+    className: "",
+    textContent: "",
+    type: "",
+    children,
+    selectedIndex: -1,
+    appendChild: (child: FakeNode) => {
+      children.push(child);
+      return child;
+    },
+    addEventListener: () => {},
+    get innerHTML() {
+      return html;
+    },
+    set innerHTML(v: string) {
+      html = v;
+      if (v === "") children.length = 0; // mirrors clearing a container
+    },
+    get value() {
+      return value;
+    },
+    set value(v: string) {
+      if (tag === "select") {
+        // Real `<select>.value` only sticks when an <option> carries it; otherwise it blanks.
+        const idx = children.findIndex((o) => o.value === v);
+        el.selectedIndex = idx;
+        value = idx >= 0 ? v : "";
+      } else {
+        value = v;
+      }
+    },
+  };
+  return el as FakeNode;
+}
+function fakeDoc(): Document {
+  return { createElement: (tag: string) => fakeElement(tag) } as unknown as Document;
+}
+function pickerSelect(pickerSlot: FakeNode): FakeNode {
+  // pickerSlot → <label> → <select>
+  return pickerSlot.children[0]!.children[0]!;
+}
+
+describe("makeDomHost — replaceable picker", () => {
+  const conns: ReadonlyArray<ConnectionSummary> = [
+    { id: "conn-a", name: "Alpha", host: "h", engine: "pg" },
+    { id: "conn-b", name: "Bravo", host: "h", engine: "pg" },
+  ];
+
+  function setup() {
+    const doc = fakeDoc();
+    const mount = fakeElement("div");
+    const controls = fakeElement("div");
+    const pickerSlot = fakeElement("span");
+    const status = fakeElement("p");
+    const host = makeDomHost(
+      doc,
+      mount as unknown as HTMLElement,
+      controls as unknown as HTMLElement,
+      pickerSlot as unknown as HTMLElement,
+      status as unknown as HTMLElement,
+    );
+    return { host, pickerSlot };
+  }
+
+  test("reflects the current pick, and REPLACES (never stacks) the prior picker on re-render", () => {
+    const { host, pickerSlot } = setup();
+
+    host.renderPicker(conns, "conn-b", () => {});
+    expect(pickerSlot.children).toHaveLength(1); // one <label>
+    expect(pickerSelect(pickerSlot).value).toBe("conn-b");
+
+    // A second render replaces rather than appends a second picker, and reflects the new pick.
+    host.renderPicker(conns, null, () => {});
+    expect(pickerSlot.children).toHaveLength(1);
+    expect(pickerSelect(pickerSlot).value).toBe(""); // Default
+  });
+
+  test("an id with no matching option falls back to Default (never a blank control)", () => {
+    const { host, pickerSlot } = setup();
+    // A Default-only list (failure path) asked to reflect a still-held named pick.
+    host.renderPicker([], "conn-b", () => {});
+    const select = pickerSelect(pickerSlot);
+    expect(select.value).toBe(""); // fell back to Default, not blank
+    expect(select.selectedIndex).toBe(0); // the Default <option>
   });
 });
