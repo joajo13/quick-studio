@@ -35,19 +35,41 @@ reserves the **entire** `@quick-studio/*` namespace — you do not need to publi
 packages for each platform.
 
 **3. Publish the unscoped placeholder** to hold `quick-studio` itself. A ready-to-publish
-package is prepared (see the session notes / scratchpad `npm-placeholder/`); it is a minimal
-`0.0.1` that states the project is in development and points at the repo. Publishing it is a
-public, effectively irreversible act — npm only allows unpublishing within 72 hours, and the
-name stays blocked afterwards either way — so read the manifest before you push it.
+package is prepared (scratchpad `npm-placeholder/`); it is a minimal `0.0.1` that states the
+project is in development. Publishing it is a public, effectively irreversible act — npm only
+allows unpublishing within 72 hours, and the name stays blocked afterwards either way.
+
+**This local publish requires 2FA on the npm account.** A first attempt on 2026-07-21 as
+`joajo13` returned `E403: Two-factor authentication or granular access token with bypass 2fa
+enabled is required to publish packages`. The bypass-token escape hatch is being retired (see
+step 5), so enabling 2FA is the path. It costs nothing operationally: CI publishing goes
+through OIDC and never sees a 2FA prompt, and account 2FA is what stops a compromised npm
+login from pushing malware to everyone who installs this package.
+
+Alternative if 2FA is genuinely refused: skip the placeholder and let the first real CI
+release create the package — trusted publishing can publish a package that does not yet
+exist. The cost is leaving the name unclaimed until Story 11.4 ships.
 
 ## Before the first real release
 
 **4. Wire the git remote.** `git remote -v` is currently empty, so `.github/workflows/release.yml`
 has never run and the README's `../../releases` links resolve to nothing.
 
-**5. Add `NPM_TOKEN` to GitHub repository secrets.** Use an npm **automation** token — a
-classic publish token tied to interactive 2FA cannot work unattended in CI. Story 11.4's
-`publish.yml` reads it. If provenance attestation is wanted, also grant `id-token: write`.
+**5. Configure a trusted publisher for each package** at npmjs.com → package → Settings →
+Trusted Publisher. There is **no `NPM_TOKEN` and no token of any kind** — Story 11.4's
+`publish.yml` authenticates via OIDC, which GitHub Actions mints per run.
+
+Register all four packages (`quick-studio`, `@quick-studio/win32-x64`, `@quick-studio/linux-x64`,
+`@quick-studio/linux-arm64`), each pointing at this repo and the workflow filename `publish.yml`.
+Only one trusted publisher is allowed per package and the filename must match exactly, so
+`publish.yml` must not be renamed afterwards without reconfiguring all four.
+
+Why not a token: npm is retiring the 2FA-bypass granular access tokens that unattended
+publishing depended on — they lose sensitive account operations in **August 2026** and lose
+direct publishing around **January 2027**, degrading to staged publishes that need human 2FA
+approval anyway. Trusted publishing is npm's own recommended replacement and needs neither a
+stored secret nor 2FA. Requirements it imposes on the workflow: npm CLI >= 11.5.1,
+Node >= 22.14.0, GitHub-hosted runners only.
 
 **6. Push the first `v*` tag — but only after Story 11.4 has landed.** A tag pushed earlier
 triggers the old two-platform `release.yml` and burns a version number for a release you do

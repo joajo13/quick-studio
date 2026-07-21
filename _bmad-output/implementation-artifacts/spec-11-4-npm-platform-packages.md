@@ -27,10 +27,12 @@ context:
 - Every scoped publish passes `--access public`. Scoped packages default to **restricted**, and a silently-private platform package breaks every install with a 404 that looks like a missing binary.
 - The main manifest is **generated**, and carries: `bin` → the shim, `files` → the shim + README, `engines.node`, `optionalDependencies`, and **no** `dependencies`, `devDependencies`, `scripts.prepare`, or `scripts.prepublishOnly`.
 - The binary inside each platform package keeps its **executable permission bit** on POSIX targets — npm preserves modes in the tarball, but the packaging script must set them, and 11.3's matrix flags a lost mode bit as a packaging-side bug.
-- Publishing requires `NPM_TOKEN` from repository secrets. The workflow must fail clearly when it is absent rather than half-publishing.
+- Publishing uses **npm Trusted Publishing (OIDC)** — no long-lived token exists anywhere. The workflow declares `permissions: { id-token: write, contents: read }` and the npm CLI mints a short-lived signed token per run. This is npm's own recommended path and it is not optional-by-preference: 2FA-bypass granular access tokens lose sensitive account operations in **August 2026** and lose direct-publish entirely around **January 2027**, so an `NPM_TOKEN`-based workflow would be built on a deprecated mechanism.
+- Trusted publishing has hard environmental requirements the workflow must satisfy: **npm CLI >= 11.5.1**, **Node >= 22.14.0**, and a **GitHub-hosted runner** (self-hosted is unsupported). Pin these explicitly in the workflow rather than inheriting whatever the runner ships.
 
 **Block If:**
 - **The `@quick-studio` npm organization must exist before this story's publish step can run at all.** Scoped packages cannot be published into a scope with no owning org (or same-named user). This is an operator prerequisite, not something the loop can create — see `epic-11-manual-prereqs.md`. Implement and unit-test the packaging script regardless; only the live publish is gated on it. The scope string lives in **one constant**, never spread across the script.
+- **A trusted publisher must be configured on npmjs.com for EACH of the four packages** (`quick-studio` plus the three `@quick-studio/*`), naming this repo and the exact workflow filename. Only one trusted publisher per package is allowed, and the filename must match exactly — so the workflow file must be named once and not renamed afterwards without reconfiguring all four. Another operator prerequisite.
 - If npm's `os`/`cpu` filtering plus `optionalDependencies` cannot be made to install exactly one platform package under the package managers worth supporting (npm, and at minimum a documented statement about pnpm/yarn), HALT — the whole distribution design rests on this behavior.
 - If the total unpacked size of a platform package (the Story 1.7 binary measured ~95 MB) exceeds npm's per-package limits, flag it for a decision (compression, or falling back to a postinstall download from Releases) rather than silently shipping something that cannot publish.
 
@@ -50,7 +52,8 @@ context:
 | npx one-liner | `npx -y quick-studio postgres://x` | Downloads main + one platform package, shim launches the binary, Ephemeral session boots | Documented that `-y` skips npx's install prompt |
 | Update via npx | `npx quick-studio@latest` | npm resolves the newest version; npx's cache is bypassed by the explicit tag | Documented in the README |
 | Publish order | tag `v0.1.0` with `NPM_TOKEN` | Three `@quick-studio/*` packages publish, then unscoped `quick-studio` | A failed platform leg aborts before the main package publishes |
-| Missing token | `NPM_TOKEN` unset | Workflow fails with a clear message, nothing published | No partial publish |
+| OIDC unavailable | workflow missing `id-token: write`, or run on a self-hosted runner | Publish fails clearly before any package is pushed | No partial publish; never fall back to a token |
+| Trusted publisher not configured | a package with no trusted publisher registered on npmjs.com | That package's publish is rejected; the workflow stops | Operator prerequisite, surfaced as a clear failure |
 | Scoped default visibility | first publish of `@quick-studio/linux-x64` | Published **public** via an explicit `--access public` | Without it the publish either fails or succeeds privately and breaks every install |
 | macOS install attempt | `npm i -g quick-studio` on darwin | Main package installs; no platform package matches; the shim's message (11.3) names macOS as a later phase | Deliberate, documented gap |
 | Re-publish of an existing version | tag re-pushed for an already-published version | npm rejects the duplicate version; the workflow surfaces it as a clear failure | Never force/unpublish |
@@ -69,7 +72,7 @@ context:
 ## Code Map
 
 - `scripts/build-npm-packages.ts` (new) — inputs: a directory of built binaries + a version string. Outputs a build tree of package directories with generated manifests. Holds the scope constant (`@quick-studio`) and the shared platform list, and sets POSIX executable bits. Fails loudly on any missing input.
-- `.github/workflows/publish.yml` (new) — on `v*` tags: obtain the binaries (download the 11.2 release artifacts, or `needs:` the release workflow — step-02's call, and the two workflows must not race to build the same binaries twice), run the packaging script, then `npm publish` each platform package followed by the main package, authenticated via `NPM_TOKEN`. Consider `--provenance` (requires `id-token: write` permission) — optional, flag if it complicates the token setup.
+- `.github/workflows/publish.yml` (new) — on `v*` tags: obtain the binaries (download the 11.2 release artifacts, or `needs:` the release workflow — step-02's call, and the two workflows must not race to build the same binaries twice), run the packaging script, then `npm publish --access public` on each platform package followed by the main package, authenticated by **OIDC trusted publishing** (`id-token: write`, npm CLI >= 11.5.1, Node >= 22.14.0). No `NPM_TOKEN` secret is read. Provenance attestation comes essentially free once `id-token: write` is present. **The filename `publish.yml` is load-bearing** — it is registered with npm per package; renaming it silently breaks every publish.
 - `package.json` — unchanged as the development manifest, except for what 11.3 already changed. It is explicitly **not** the published artifact any more; add a short comment or README note so this is not re-discovered the hard way.
 - `README.md` — restructure Install around npm as the primary channel (`npx -y quick-studio <db-url>` for a throwaway run, `npm i -g quick-studio` for a permanent one), with the standalone binary as the secondary channel. Delete the "requires Bun at run time" caveat that 1.7's review added — after this story it is false for the published package and true only for a git checkout.
 
@@ -81,7 +84,7 @@ context:
 - [ ] Verify npm's `os`/`cpu` + `optionalDependencies` resolution behavior for the package managers in scope before building on it.
 - [ ] Write `scripts/build-npm-packages.ts` (platform manifests, main manifest, executable bits, loud failures).
 - [ ] Confirm the generated main manifest has no `dependencies` and no build scripts.
-- [ ] Write `.github/workflows/publish.yml` with the strict publish order, `--access public` on every scoped publish, and `NPM_TOKEN` handling.
+- [ ] Write `.github/workflows/publish.yml` with the strict publish order, `--access public` on every scoped publish, and OIDC trusted publishing (`id-token: write`, pinned npm/Node versions) — no token secret.
 - [ ] Decide how publish obtains binaries without rebuilding them (artifact download vs workflow chaining).
 - [ ] Dry-run the packaging locally (`npm pack` on each generated package; inspect tarball contents and sizes).
 - [ ] Install-test from a local tarball on a Node-only machine, then verify `npx -y quick-studio <db-url>` end to end once published.

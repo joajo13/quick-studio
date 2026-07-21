@@ -1272,7 +1272,7 @@ So that restoring my session reopens each tab against the right database.
 
 **Out of scope:** macOS binaries (a later phase — see the platform-scope note above); code signing and notarization (Windows SmartScreen friction on the *standalone binary* channel is accepted and documented — npm is the recommended path precisely because it sidesteps it); Homebrew/Scoop/winget manifests; true in-place binary self-replacement (11.5 deliberately delegates instead — see its spec); Windows-on-ARM.
 
-**Manual prerequisites (NOT loop-executable — the operator does these once).** Creating the `quick-studio` npm organization (which is what actually reserves the `@quick-studio/*` scope), publishing a placeholder to hold the unscoped `quick-studio` name, wiring the git remote, adding an npm automation token to GitHub secrets as `NPM_TOKEN`, and pushing the first `v*` tag. See `epic-11-manual-prereqs.md`. Every story below is scoped to what a loop can actually do: code, workflows, generated manifests, and docs.
+**Manual prerequisites (NOT loop-executable — the operator does these once).** Creating the `quick-studio` npm organization (which is what actually reserves the `@quick-studio/*` scope), publishing a placeholder to hold the unscoped `quick-studio` name, wiring the git remote, registering a **trusted publisher (OIDC)** for each of the four packages — there is no publish token anywhere, because npm is retiring the 2FA-bypass tokens unattended publishing relied on — and pushing the first `v*` tag. See `epic-11-manual-prereqs.md`. Every story below is scoped to what a loop can actually do: code, workflows, generated manifests, and docs.
 
 ### Story 11.1: CLI surface — `--help`, `--version`, and an explicit `--ephemeral`
 
