@@ -39,16 +39,25 @@ package is prepared (scratchpad `npm-placeholder/`); it is a minimal `0.0.1` tha
 project is in development. Publishing it is a public, effectively irreversible act — npm only
 allows unpublishing within 72 hours, and the name stays blocked afterwards either way.
 
-**This local publish requires 2FA on the npm account.** A first attempt on 2026-07-21 as
-`joajo13` returned `E403: Two-factor authentication or granular access token with bypass 2fa
-enabled is required to publish packages`. The bypass-token escape hatch is being retired (see
-step 5), so enabling 2FA is the path. It costs nothing operationally: CI publishing goes
-through OIDC and never sees a 2FA prompt, and account 2FA is what stops a compromised npm
-login from pushing malware to everyone who installs this package.
+**These bootstrap publishes require 2FA on the npm account.** A first attempt on 2026-07-21
+as `joajo13` returned `E403: Two-factor authentication or granular access token with bypass
+2fa enabled is required to publish packages`. The bypass-token escape hatch is being retired
+(see step 5), so enabling 2FA is the path — and it is a one-time cost, not an ongoing one:
+after the four bootstrap publishes, CI goes through OIDC and never sees a 2FA prompt again.
+Account 2FA is also what stops a compromised npm login from pushing malware to everyone who
+installs this package.
 
-Alternative if 2FA is genuinely refused: skip the placeholder and let the first real CI
-release create the package — trusted publishing can publish a package that does not yet
-exist. The cost is leaving the name unclaimed until Story 11.4 ships.
+**There is no way around this initial publish.** npm cannot publish the *first* version of a
+package via OIDC: a trusted publisher is registered in the package's own Settings page on
+npmjs.com, which does not exist until the package does. (PyPI allows pre-configuring an
+unpublished name; npm does not — `npm/cli` issue #8544 tracks the gap.) So every one of the
+four packages needs one manual bootstrap publish before CI can ever take over.
+
+**Publish all four placeholders in one sitting** — prepared in the scratchpad:
+`npm-placeholder/` (unscoped `quick-studio`) and `npm-placeholder-scoped/{win32-x64,
+linux-x64,linux-arm64}/` (the `@quick-studio/*` trio, each already carrying
+`publishConfig.access = "public"` so no `--access` flag is needed). The scoped three require
+the org from step 2 to exist first.
 
 ## Before the first real release
 
