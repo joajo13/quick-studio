@@ -1,0 +1,11 @@
+{
+  "_comment": "Dev-only seccomp profile for the persistent-mode container. Allows every syscall by default, but makes the Linux kernel keyring syscalls fail with ENOSYS. This forces @napi-rs/keyring to report the keychain UNAVAILABLE, so quick-studio's credential store is created in PASSPHRASE mode (salt persisted to the data volume) instead of the container's ephemeral keyutils keyring — which does not survive a container restart. Not for production; a real deployment would use a keychain that persists.",
+  "defaultAction": "SCMP_ACT_ALLOW",
+  "syscalls": [
+    {
+      "names": ["keyctl", "add_key", "request_key"],
+      "action": "SCMP_ACT_ERRNO",
+      "errnoRet": 38
+    }
+  ]
+}

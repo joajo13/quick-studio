@@ -1,0 +1,42 @@
+# Persistent-mode override for the local dev stack.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.persistent.yml up -d
+#   open http://127.0.0.1:6060
+#
+# Runs quick-studio in PERSISTENT mode (the app default — no positional connection
+# string) so saved Connections and AI provider keys are encrypted at rest and
+# survive a restart. Because the container is headless (no OS keychain), the
+# encryption key is derived from QS_PASSPHRASE (a dev-only passphrase). The
+# encrypted store lives on the `qs_persistent_data` volume via XDG_DATA_HOME, so
+# it persists across `restart` and `up`/`down` (but NOT `down -v`).
+#
+# Unlike ephemeral mode, the app boots with NO connection — add the demo DB in the
+# UI (Settings -> Connections): postgres://demo:demo@db:5432/demo. It will persist.
+services:
+  app:
+    # Make the kernel keyring syscalls fail → @napi-rs/keyring reports the keychain
+    # unavailable → the credential store is created in PASSPHRASE mode (persists on
+    # the volume) instead of the container's ephemeral keyutils keyring.
+    security_opt:
+      - seccomp:./docker/no-keyring.seccomp.json
+    environment:
+      # No QS_MODE => persistent (the app default). No positional connstring below.
+      QS_PASSPHRASE: "devpass"          # dev-only: derives the at-rest encryption key (headless, no keychain)
+      XDG_DATA_HOME: "/data"            # store dir becomes /data/quick-studio (on the volume)
+      # Disable the Secret Service D-Bus so @napi-rs/keyring reports the keychain
+      # UNAVAILABLE → the store is created in PASSPHRASE mode (salt persisted to
+      # /data), which survives a container restart. Without this the container's
+      # ephemeral kernel/session keyring makes a keychain-mode store that cannot be
+      # unlocked after restart ("key-unavailable").
+      DBUS_SESSION_BUS_ADDRESS: ""
+    volumes:
+      - qs_persistent_data:/data        # durable home for the encrypted store
+    # Persistent boot: NO positional connection string (that would force ephemeral).
+    command: >
+      sh -c "bun install &&
+             bun run build &&
+             (socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:6060 &) &&
+             exec bun run bin/quick-studio.ts"
+
+volumes:
+  qs_persistent_data:
