@@ -160,3 +160,26 @@ development_status:
   10-5-multi-root-schema-tree: backlog       # Story 10.5: Multi-root schema tree (lazy introspect, per-root state, isolated errors)
   10-6-tabs-carry-connection: backlog        # Story 10.6: Tabs carry connectionId + survive its removal on restore
   epic-10-retrospective: optional
+
+  # Epic 11: One-Command Distribution & First-Run Setup
+  # npm is the primary channel (platform-package pattern: node shim + one prebuilt-binary
+  # package per platform via optionalDependencies), so npx supplies install/update/launch.
+  # Ordered easy->hard with a hard dependency chain on the distribution half:
+  #   11-3 needs 11-2 (binaries per platform); 11-4 needs 11-3 (the shim it packages);
+  #   11-5 needs 11-1 (generated version) + 11-4 (a registry to query).
+  #   11-6 and 11-7 are CLI-UX stories, independent of the npm chain (only 11-1's flag surface),
+  #   but they SHARE src/core/store-presence.ts: 11-6 introduces it, 11-7 consumes it. Whichever
+  #   runs first creates it — never two divergent presence checks (see both specs' Block-Ifs).
+  # MANUAL PREREQS (operator, not loop): git remote wired, first v* tag pushed,
+  # NPM_TOKEN in repo secrets, scoped-vs-unscoped platform package naming decided.
+  # Cross-cutting invariant: Ephemeral mode never writes to disk (Epic 2) — binds 11-5's
+  # cache and 11-6's setup. Loopback/token/gates/RPC/exposure warning unchanged throughout.
+  epic-11: backlog
+  11-1-cli-surface-help-version: backlog     # Story 11.1: CLI surface — --help, --version, explicit --ephemeral
+  11-2-release-matrix-native: backlog        # Story 11.2: Release matrix on native runners + SHA256SUMS + keyring gate
+  11-3-node-launcher-shim: backlog           # Story 11.3: Node-compatible launcher shim (npx works without Bun)
+  11-4-npm-platform-packages: backlog        # Story 11.4: Platform packages + end-to-end publish workflow
+  11-5-update-check-and-command: backlog     # Story 11.5: TTL update check (ephemeral-safe) + delegating `update` command
+  11-6-persistent-first-run-setup: backlog   # Story 11.6: First-run setup for Persistent mode (interactive passphrase)
+  11-7-bare-command-routing: backlog         # Story 11.7: Bare-command routing — boot or onboard
+  epic-11-retrospective: optional
