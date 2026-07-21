@@ -32,7 +32,24 @@ import { envelopeText } from "../rpc/envelope-text.ts";
 type LoadState =
   | { readonly phase: "loading" }
   | { readonly phase: "ready"; readonly schema: DatabaseSchema }
+  // "empty" = no connection target configured (the persistent-mode boot with no
+  // URL). It is NOT an error — the app is fine, there is just nothing to browse
+  // yet. Distinct phase so it renders a calm call-to-action, never the red alert.
+  // (Epic 10 replaces the message-string match below with a dedicated `no-target`
+  //  ConnectionFailureKind + a real multi-root tree.)
+  | { readonly phase: "empty" }
   | { readonly phase: "error"; readonly text: string };
+
+/**
+ * Is this failure the "there is no connection to browse" case (Persistent boot with
+ * no URL), as opposed to a genuine connect error? Matched on the neutral message the
+ * Core emits in `connection.ts` (`doConnect`), which is the only signal we have client-
+ * side today. Epic 10 will give it its own `ConnectionFailureKind` so this string
+ * match can go away.
+ */
+function isNoConnectionTarget(failure: string, message: string): boolean {
+  return failure === "unsupported_scheme" && message === "no connection target configured";
+}
 
 /**
  * Merge the introspected tables with the optimistically-created ones, deduped by
@@ -135,7 +152,11 @@ export function SchemaTree({
         return;
       }
       if (reply.result.status === "failed") {
-        setLoad({ phase: "error", text: `${reply.result.failure}: ${reply.result.message}` });
+        setLoad(
+          isNoConnectionTarget(reply.result.failure, reply.result.message)
+            ? { phase: "empty" }
+            : { phase: "error", text: `${reply.result.failure}: ${reply.result.message}` },
+        );
         return;
       }
       setLoad({ phase: "ready", schema: reply.result.schema });
@@ -177,7 +198,9 @@ export function SchemaTree({
             ? load.schema.engine
             : load.phase === "error"
               ? "connection error"
-              : "connecting…"}
+              : load.phase === "empty"
+                ? "sin conexión"
+                : "connecting…"}
         </span>
       </div>
 
@@ -191,6 +214,25 @@ export function SchemaTree({
       <div className="min-h-0 flex-1 overflow-auto">
         {load.phase === "loading" ? (
           <p className="px-3 py-2 text-xs lowercase text-muted-foreground">loading schema…</p>
+        ) : load.phase === "empty" ? (
+          <div className="flex flex-col items-center gap-2.5 px-5 pt-10 text-center">
+            <svg
+              aria-hidden
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={1.6}
+              className="h-7 w-7 text-muted-foreground/60"
+            >
+              <ellipse cx="12" cy="5" rx="8" ry="3" />
+              <path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5" />
+              <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6" />
+            </svg>
+            <p className="text-[12.5px] font-medium text-foreground">Sin conexión activa</p>
+            <p className="text-[11.5px] leading-relaxed text-muted-foreground">
+              Agregá una conexión en Ajustes para explorar tablas.
+            </p>
+          </div>
         ) : load.phase === "error" ? (
           <p role="alert" className="px-3 py-2 text-xs lowercase text-red-400">
             {load.text}
