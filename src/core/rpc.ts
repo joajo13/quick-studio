@@ -36,8 +36,16 @@ import type { WorkspaceRegistry } from "./workspace-registry.ts";
  */
 export type RpcContext = {
   readonly requestShutdown: () => void;
-  /** Open + introspect the Core's connection, resolving a neutral outcome payload. */
-  readonly connect: () => Promise<ConnectResult>;
+  /**
+   * Open + introspect a connection (Story 1.3; targeted in Story 10.4): `params` may
+   * carry an optional `connectionId` naming a SAVED connection — absent/`null` ⇒ the boot
+   * connection, byte-identical to the pre-10.4 paramless call. Returns an ALREADY-formed
+   * {@link RpcReply} so it can signal `bad_request` (a non-string id) / `not_found` /
+   * `internal_error` (an unresolvable target) itself; the neutral {@link ConnectResult} —
+   * including a classified driver failure — still rides INSIDE `okReply` as a domain
+   * outcome, never an error envelope.
+   */
+  readonly connect: (params: unknown) => Promise<RpcReply<ConnectResult>>;
   /**
    * Read the credential-free descriptor of the in-memory ACTIVE connection + run mode
    * (Story 8.7). A PURE read: derives from the already-held url, opens no driver, forces
@@ -142,11 +150,15 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     return { stopping: true };
   },
   /**
-   * Open (idempotently) and introspect the Core-held connection. The neutral
-   * {@link ConnectResult} — including host/auth/network/unsupported-scheme
-   * failures — is a normal OK payload; only a genuine bug rejects → internal_error.
+   * Open (idempotently) and introspect a connection — the boot one, or the saved target
+   * named by an optional `connectionId` (Story 10.4). The capability validates that id
+   * and resolves the target itself, returning a fully-formed reply (`bad_request` on a
+   * non-string id, `not_found`/`internal_error` on an unresolvable one); we tag it
+   * `preformed`, exactly like `table.rows`. The neutral {@link ConnectResult} — including
+   * host/auth/network/unsupported-scheme failures — is still a normal OK payload, so the
+   * wire bytes of a paramless `connect` are unchanged; only a genuine bug → internal_error.
    */
-  connect: (_params, ctx): Promise<ConnectResult> => ctx.connect(),
+  connect: async (params, ctx): Promise<Preformed> => preformed(await ctx.connect(params)),
   /**
    * Read the credential-free descriptor of the in-memory ACTIVE connection + run mode
    * (Story 8.7). SINGULAR `connection.active` (the one live target) is a DISTINCT namespace

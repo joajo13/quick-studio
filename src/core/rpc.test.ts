@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { okReply } from "../shared/contract.ts";
 import type {
   ActiveConnectionInfo,
   ConnectResult,
@@ -126,12 +127,14 @@ function stubCtx(
 ): RpcContext & {
   calls: number;
   connectCalls: number;
+  connectParams: unknown;
   tableRowsCalls: number;
   executeCalls: number;
 } {
   const ctx = {
     calls: 0,
     connectCalls: 0,
+    connectParams: undefined as unknown,
     tableRowsCalls: 0,
     executeCalls: 0,
     connections: fakeRegistry(),
@@ -140,9 +143,14 @@ function stubCtx(
     requestShutdown() {
       ctx.calls++;
     },
-    async connect(): Promise<ConnectResult> {
+    // Story 10.4: `connect` is a PREFORMED handler taking `params` (the optional
+    // `connectionId`), so the stub returns an already-formed reply. Mechanical — the
+    // paramless wire bytes are identical (`preformed(okReply(x))` serializes exactly as
+    // dispatch's auto-`okReply(x)`).
+    async connect(params: unknown): Promise<RpcReply<ConnectResult>> {
       ctx.connectCalls++;
-      return connectResult;
+      ctx.connectParams = params;
+      return okReply(connectResult);
     },
     activeConnection(): ActiveConnectionInfo {
       return {
@@ -242,6 +250,35 @@ describe("rpc dispatch", () => {
         failure: "auth",
         message: "the database rejected the provided credentials",
       });
+    }
+  });
+
+  test("connect forwards its params VERBATIM to ctx.connect (the Story 10.4 connectionId seam)", async () => {
+    // Mirrors the `table.rows` contract: dispatch does no param validation of its own —
+    // the capability shape-checks the optional `connectionId` and forms its own reply.
+    const ctx = stubCtx();
+    await dispatch({ method: "connect", params: { connectionId: "conn-b" } }, ctx);
+    expect(ctx.connectCalls).toBe(1);
+    expect(ctx.connectParams).toEqual({ connectionId: "conn-b" });
+
+    // A paramless call still reaches the capability (with `undefined`), unchanged.
+    const bare = stubCtx();
+    await dispatch({ method: "connect" }, bare);
+    expect(bare.connectCalls).toBe(1);
+    expect(bare.connectParams).toBeUndefined();
+  });
+
+  test("connect carries the capability's error envelope through (unresolvable/malformed id)", async () => {
+    // The preformed handler is what makes a typed `not_found`/`bad_request` reachable at
+    // all for `connect` — an auto-`okReply` handler could only ever answer OK.
+    for (const code of ["bad_request", "not_found", "internal_error"] as const) {
+      const ctx: RpcContext = {
+        ...stubCtx(),
+        connect: async () => ({ ok: false, error: { code, message: `x ${code}` } }),
+      };
+      const reply = await dispatch({ method: "connect", params: { connectionId: 5 } }, ctx);
+      expect(reply.ok).toBe(false);
+      if (!reply.ok) expect(reply.error.code).toBe(code);
     }
   });
 

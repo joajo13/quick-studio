@@ -393,6 +393,282 @@ function recordingDriver(): { factory: DriverFactory; calls: Array<string | unde
   return { factory: () => driver, calls };
 }
 
+/** The catalog AFTER a DDL ran: the same table plus a new one, so a stale memo is visible. */
+const SAMPLE_SCHEMA_V2: DatabaseSchema = {
+  engine: "postgres",
+  tables: [
+    ...SAMPLE_SCHEMA.tables,
+    {
+      schema: "public",
+      name: "orders",
+      columns: [{ name: "id", dataType: "integer", nullable: false }],
+      primaryKey: ["id"],
+      indexes: [],
+      foreignKeys: [],
+    },
+  ],
+};
+
+/** A THIRD catalog: a table created while a refresh for V2 was already in flight. */
+const SAMPLE_SCHEMA_V3: DatabaseSchema = {
+  engine: "postgres",
+  tables: [
+    ...SAMPLE_SCHEMA_V2.tables,
+    {
+      schema: "public",
+      name: "receipts",
+      columns: [{ name: "id", dataType: "integer", nullable: false }],
+      primaryKey: ["id"],
+      indexes: [],
+      foreignKeys: [],
+    },
+  ],
+};
+
+/**
+ * A fake driver whose `listSchema` reads a MUTABLE schema and counts every call, so a
+ * re-introspection (vs a memo hit) is directly observable. `nextError` makes exactly the
+ * next introspection throw (the refresh-failure path); `gate`, when set, holds every
+ * introspection open so two concurrent readers can be proven to share one call.
+ */
+function refreshableDriver(): {
+  factory: DriverFactory;
+  counts: { listSchema: number };
+  state: { schema: DatabaseSchema; nextError: unknown; gate: Promise<void> | null };
+} {
+  const counts = { listSchema: 0 };
+  const state: { schema: DatabaseSchema; nextError: unknown; gate: Promise<void> | null } = {
+    schema: SAMPLE_SCHEMA,
+    nextError: null,
+    gate: null,
+  };
+  const driver: Driver = {
+    async connect() {},
+    async listSchema() {
+      counts.listSchema++;
+      // Snapshot at CALL time, before the gate: a real introspection answers the catalog as
+      // it was when the query ran, so a DDL committing while the answer is in flight cannot
+      // retroactively appear in it. That is exactly the race the lost-update guard covers.
+      const answer = state.schema;
+      if (state.gate !== null) await state.gate;
+      if (state.nextError !== null) {
+        const err = state.nextError;
+        state.nextError = null;
+        throw err;
+      }
+      return answer;
+    },
+    async query() {
+      return { columns: [], rows: [] };
+    },
+    async queryReadOnly() {
+      return { columns: [], rows: [] };
+    },
+    quoteIdent(ident: string) {
+      return `"${ident}"`;
+    },
+    async close() {},
+  };
+  return { factory: () => driver, counts, state };
+}
+
+/**
+ * DW-45: the schema memo is per-manager and, before this, only `close()` (latched and
+ * permanent) ever cleared it — unusable for the boot manager, which lives for the whole
+ * session. `invalidateSchema()` busts it IN PLACE so the next read re-introspects.
+ */
+describe("connection manager — invalidateSchema (DW-45)", () => {
+  test("getSchema is memoized until invalidateSchema, then re-introspects the NEW catalog", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA);
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA);
+    expect(counts.listSchema).toBe(1); // memo served both reads
+
+    // A DDL ran: the catalog changed under the memo.
+    state.schema = SAMPLE_SCHEMA_V2;
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA); // still stale — nothing busted it
+    mgr.invalidateSchema();
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA_V2);
+    expect(counts.listSchema).toBe(2);
+    // …and the refreshed value is itself memoized (no per-call introspection).
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA_V2);
+    expect(counts.listSchema).toBe(2);
+  });
+
+  test("connect() after invalidateSchema returns a ConnectResult carrying the FRESH schema", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(await mgr.connect()).toEqual({ status: "connected", schema: SAMPLE_SCHEMA });
+    state.schema = SAMPLE_SCHEMA_V2;
+    mgr.invalidateSchema();
+
+    // The idempotent branch must re-read `cached` AFTER the refresh replaced it — a
+    // pre-await binding would hand back the very object that was just busted.
+    expect(await mgr.connect()).toEqual({ status: "connected", schema: SAMPLE_SCHEMA_V2 });
+    expect(counts.listSchema).toBe(2);
+  });
+
+  test("two concurrent getSchema calls after ONE invalidateSchema share a single listSchema", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    await mgr.getSchema();
+    state.schema = SAMPLE_SCHEMA_V2;
+    const gate = deferred();
+    state.gate = gate.promise;
+    mgr.invalidateSchema();
+
+    const a = mgr.getSchema();
+    const b = mgr.getSchema(); // arrives while the refresh is still gated
+    gate.resolve();
+    const [ra, rb] = await Promise.all([a, b]);
+
+    expect(ra).toEqual(SAMPLE_SCHEMA_V2);
+    expect(rb).toEqual(SAMPLE_SCHEMA_V2);
+    expect(counts.listSchema).toBe(2); // the initial open + exactly ONE refresh
+  });
+
+  test("a failing refresh is asymmetric: connect() reports neutral 'failed', getSchema() rejects, both stay retryable", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    await mgr.connect();
+    mgr.invalidateSchema();
+
+    // `connect` is documented never to throw for a classified driver failure.
+    state.nextError = new DriverConnectionError("network", "unreachable");
+    const failed = await mgr.connect();
+    expect(failed.status).toBe("failed");
+    if (failed.status === "failed") {
+      expect(failed.failure).toBe("network");
+      // Neutral: the held url/credentials never ride the message.
+      expect(failed.message).not.toContain("p@h");
+    }
+
+    // The read path's contract is the opposite — an unusable schema read throws.
+    state.nextError = new DriverConnectionError("network", "unreachable");
+    await expect(mgr.getSchema()).rejects.toBeInstanceOf(DriverConnectionError);
+
+    // Neither failure cleared the stale flag, so the next read still retries and lands.
+    state.schema = SAMPLE_SCHEMA_V2;
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA_V2);
+    expect(counts.listSchema).toBe(4); // open + two failed refreshes + the successful one
+  });
+
+  test("an invalidation raised DURING a refresh is NOT swallowed by that refresh's answer", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA); // the memo: [users]
+
+    // `CREATE TABLE orders` commits → a reader starts the refresh the DB will answer with
+    // V2, and that answer is parked in flight.
+    state.schema = SAMPLE_SCHEMA_V2;
+    mgr.invalidateSchema();
+    const gate = deferred();
+    state.gate = gate.promise;
+    const reading = mgr.getSchema();
+    await Promise.resolve(); // the refresh is now inside `listSchema`, holding the gate
+    expect(counts.listSchema).toBe(2);
+
+    // `CREATE TABLE receipts` commits WHILE that answer is still in flight.
+    state.schema = SAMPLE_SCHEMA_V3;
+    mgr.invalidateSchema();
+
+    state.gate = null;
+    gate.resolve();
+    await reading;
+
+    // The landing answer predates `receipts`, so it must not have cleared the stale flag.
+    // Without the generation guard it does: `cached` becomes V2 forever, `receipts` never
+    // appears, and nothing ever re-introspects again (DW-45, silently back).
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA_V3);
+    expect(counts.listSchema).toBe(3); // open + the raced refresh + the one that covers it
+  });
+
+  test("a refresh that lands after close() never resurrects the memo", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(await mgr.connect()).toEqual({ status: "connected", schema: SAMPLE_SCHEMA });
+    state.schema = SAMPLE_SCHEMA_V2;
+    mgr.invalidateSchema();
+
+    const gate = deferred();
+    state.gate = gate.promise;
+    // Starts the refresh, then parks inside `listSchema`. The racing reader's OWN outcome
+    // is irrelevant here (the shutdown may well make it throw), so it is swallowed up front.
+    const reading = mgr.getSchema().catch(() => undefined);
+    await Promise.resolve();
+
+    // Shutdown begins while that refresh is in flight (the same window `core.stop()` and
+    // `connection-targets`' fire-and-forget `evict()` open on a repoint).
+    const closing = mgr.close();
+    state.gate = null;
+    gate.resolve();
+    await expect(closing).resolves.toBeUndefined(); // close awaits it and never throws
+    await reading;
+
+    // The memo must NOT have been rebuilt behind the shutdown: a later connect answers the
+    // documented neutral failure instead of "connected" over a driver already released.
+    expect(await mgr.connect()).toEqual({
+      status: "failed",
+      failure: "network",
+      message: "connection is unavailable",
+    });
+    await expect(mgr.getSchema()).rejects.toThrow();
+    expect(counts.listSchema).toBe(2); // open + the one refresh; nothing re-opened after close
+  });
+
+  test("getEngine does NOT honor the stale flag — N busts cost ONE re-introspection, not N", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(await mgr.getEngine()).toBe("postgres");
+    expect(counts.listSchema).toBe(1); // just the lazy open's own introspection
+
+    // Five confirmed statements, each busting the memo, each starting with a `getEngine`
+    // (`executor.ts`'s raw path does). The engine is fixed by the url scheme, so not one of
+    // them may re-introspect — routing it through `getSchema` cost FIVE `listSchema`s.
+    for (let i = 0; i < 5; i++) {
+      mgr.invalidateSchema();
+      expect(await mgr.getEngine()).toBe("postgres");
+    }
+    expect(counts.listSchema).toBe(1);
+
+    // …and the bust is still pending: the next real catalog read pays exactly ONE refresh.
+    state.schema = SAMPLE_SCHEMA_V2;
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA_V2);
+    expect(counts.listSchema).toBe(2);
+  });
+
+  test("invalidateSchema on a never-connected manager is a harmless no-op", async () => {
+    const { factory, counts } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(() => mgr.invalidateSchema()).not.toThrow();
+    expect(counts.listSchema).toBe(0); // a pure flag set — it opens nothing
+    // The first real read still introspects exactly once.
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA);
+    expect(counts.listSchema).toBe(1);
+  });
+
+  test("invalidateSchema on a CLOSED manager is a harmless no-op (never re-opens a driver)", async () => {
+    const { factory, counts } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    await mgr.connect();
+    await mgr.close();
+    expect(() => mgr.invalidateSchema()).not.toThrow();
+    // The shutdown latch still wins: the read path refuses, and nothing re-introspects.
+    await expect(mgr.getSchema()).rejects.toThrow();
+    expect(counts.listSchema).toBe(1);
+  });
+});
+
 describe("connection manager — pinned schema scope (Story 10.2)", () => {
   test("the configured schema reaches Driver.listSchema", async () => {
     const { factory, calls } = recordingDriver();

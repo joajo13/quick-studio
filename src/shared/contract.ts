@@ -329,6 +329,16 @@ export type ConnectResult =
       readonly message: string;
     };
 
+/**
+ * Params for `connect` (Story 10.4). `connectionId` names a SAVED connection to open +
+ * introspect; absent/`null` ⇒ the boot connection (the byte-identical pre-10.4 call, which
+ * is what every current UI call site still sends). Only the opaque id crosses the loopback
+ * — the url/user/password are resolved in Core (AR-12) and never echoed back.
+ */
+export type ConnectRequest = {
+  readonly connectionId?: string | null;
+};
+
 /* ------------------------------------------------------------------ *
  * Browse-rows contract (Story 3.2) — Core-paginated, read-only SELECT
  * ------------------------------------------------------------------ */
@@ -346,6 +356,14 @@ export type TableRowsRequest = {
   readonly table: string;
   readonly page?: number;
   readonly pageSize?: number;
+  /**
+   * The saved connection to browse (Story 10.4), resolved in Core through the same
+   * per-target pool `execute` uses; absent/`null` ⇒ the boot connection. Only the opaque
+   * id crosses the loopback — never a url or credential (AR-12). Note this is the THIRD
+   * `schema`-adjacent axis in one request: `schema` above qualifies the table NAME within
+   * the target, while `connectionId` selects WHICH database is introspected at all.
+   */
+  readonly connectionId?: string | null;
 };
 
 /**
@@ -382,9 +400,12 @@ export type ConnectionSummary = {
    * Optional pinned introspection scope (Story 10.2): the single schema introspection
    * is restricted to WHEREVER this saved connection is resolved as a target (the
    * per-connection resolver); absent means every non-system schema, the pre-10.2
-   * default. The boot connection — and so the schema tree, table browser, and chat,
-   * which still read through the boot manager — does not consult it yet; generalizing
-   * those read paths to resolve by connection id is Story 10.4. Distinct from the two
+   * default. Since Story 10.4 every read path — `connect`, `table.rows`, and chat —
+   * resolves through that per-connection resolver, so a request carrying this record's
+   * `connectionId` DOES honor the pin. The boot connection (a CLI `--url`, i.e. no saved
+   * record) has no pin to honor and stays the default target for a request that sends no
+   * id — which is still every UI call site today; adopting the id in the tree and the
+   * tabs is Story 10.5 / 10.6. Distinct from the two
    * other `schema` meanings in this file: {@link TableRowsRequest.schema} qualifies a
    * single table name, and {@link ConnectResult.schema} IS the introspected catalog.
    * Additive-optional and credential-free, so a UI that does not know the field still
@@ -553,6 +574,21 @@ export type ChatContextSummary = {
   readonly policy: "schema-only";
   readonly tables: number;
   readonly rowsIncluded: 0;
+};
+
+/**
+ * The documented `POST /chat/stream` request body (Story 5.4; `connectionId` added by
+ * Story 10.4). `provider` selects the configured key, `message` is the user's question,
+ * and `connectionId` names the SAVED connection whose schema is introspected for the
+ * outbound context — absent/`null` ⇒ the boot connection, the byte-identical pre-10.4
+ * call the UI still makes. Targeting changes only WHICH schema is summarized: the payload
+ * stays schema-only (`rowSample: null`, AR-6/R5) and no url/credential ever leaves Core.
+ * Types-only — the Core still narrows the parsed body by hand (there is no validator lib).
+ */
+export type ChatStreamRequest = {
+  readonly provider: ProviderKind;
+  readonly message: string;
+  readonly connectionId?: string | null;
 };
 
 /**

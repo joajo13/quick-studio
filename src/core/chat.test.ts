@@ -75,16 +75,23 @@ function streamOf(...parts: ChatStreamPart[]): GenerateStreamFn {
 
 /** A responder wired with sensible defaults; each test overrides the seams it cares about. */
 function makeResponder(overrides: {
-  getSchema?: () => Promise<DatabaseSchema>;
+  getSchema?: (connectionId?: string | null) => Promise<DatabaseSchema>;
   getKey?: (provider: string) => RegistryResult<string | null>;
   resolveModel?: () => ResolveModelResult;
   generateStream?: GenerateStreamFn;
 }) {
   let streamCalls = 0;
   let seenSystem = "";
+  // Story 10.4: records the target the responder resolved the schema for, so the
+  // request-body `connectionId` can be proven to reach the schema seam untouched.
+  const seenConnectionIds: Array<string | null | undefined> = [];
   const inner = overrides.generateStream ?? streamOf({ type: "text-delta", text: "ok" });
+  const getSchema = overrides.getSchema ?? (async () => SCHEMA);
   const responder = createChatResponder({
-    getSchema: overrides.getSchema ?? (async () => SCHEMA),
+    getSchema: (connectionId) => {
+      seenConnectionIds.push(connectionId);
+      return getSchema(connectionId);
+    },
     getKey: (overrides.getKey ?? (() => ({ ok: true, value: SECRET }))) as never,
     resolveModel: overrides.resolveModel ?? (() => okModel),
     generateStream: (args) => {
@@ -93,7 +100,12 @@ function makeResponder(overrides: {
       return inner(args);
     },
   });
-  return { responder, calls: () => streamCalls, system: () => seenSystem };
+  return {
+    responder,
+    calls: () => streamCalls,
+    system: () => seenSystem,
+    connectionIds: () => seenConnectionIds,
+  };
 }
 
 /** Drain an async generator into an array. */
@@ -360,6 +372,90 @@ describe("createChatResponder — answerStream I/O matrix", () => {
     const chunks = await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
     expect(chunks).toEqual([{ type: "error", code: "bad_request", message: "no active connection" }]);
     expect(JSON.stringify(chunks)).not.toContain(SECRET);
+    expect(calls()).toBe(0);
+  });
+
+  /* ---- Story 10.4: the optional per-request connection target ---------- */
+
+  /** A DIFFERENT database's catalog, so "which schema was summarized" is observable. */
+  const TARGET_SCHEMA: DatabaseSchema = {
+    engine: "postgres",
+    tables: [
+      {
+        schema: "public",
+        name: "invoices",
+        columns: [{ name: "id", dataType: "integer", nullable: false }],
+        primaryKey: ["id"],
+        indexes: [],
+        foreignKeys: [],
+      },
+    ],
+  };
+
+  test("a connectionId is forwarded to getSchema and scopes the context to THAT database", async () => {
+    const { responder, system, connectionIds } = makeResponder({
+      getSchema: async (connectionId) => (connectionId === "conn-b" ? TARGET_SCHEMA : SCHEMA),
+    });
+    const chunks = await collect(
+      responder.answerStream({ provider: "anthropic", message: "hi", connectionId: "conn-b" }),
+    );
+
+    expect(connectionIds()).toEqual(["conn-b"]);
+    // The model saw the TARGET's catalog, not the boot connection's.
+    expect(system()).toContain("table public.invoices");
+    expect(system()).not.toContain("table public.orders");
+    // …and targeting changed only WHICH schema, never the schema-only invariant.
+    const done = chunks.at(-1);
+    expect(done && "context" in done ? done.context : undefined).toEqual({
+      policy: "schema-only",
+      tables: 1,
+      rowsIncluded: 0,
+    });
+  });
+
+  test("an existing paramless call still resolves the default target (getSchema sees undefined)", async () => {
+    const { responder, connectionIds } = makeResponder({});
+    await collect(responder.answerStream({ provider: "anthropic", message: "hi" }));
+    expect(connectionIds()).toEqual([undefined]);
+  });
+
+  test("an explicit connectionId:null is the default target too (never a resolve attempt)", async () => {
+    const { responder, connectionIds } = makeResponder({});
+    await collect(responder.answerStream({ provider: "anthropic", message: "hi", connectionId: null }));
+    expect(connectionIds()).toEqual([null]);
+  });
+
+  test("a malformed connectionId -> error chunk (bad_request), no key lookup, no outbound call", async () => {
+    // A wrong TYPE is a protocol violation, rejected on the same `field=`-detail path as
+    // `provider`/`message` — the `detail` is Core-internal (the wire chunk deliberately
+    // carries only code+message), so the distinguishing evidence here is the message.
+    let keyLookups = 0;
+    const { responder, calls, connectionIds } = makeResponder({
+      getKey: () => {
+        keyLookups += 1;
+        return { ok: true, value: SECRET };
+      },
+    });
+    const chunks = await collect(
+      responder.answerStream({ provider: "anthropic", message: "hi", connectionId: 5 }),
+    );
+    expect(chunks).toEqual([{ type: "error", code: "bad_request", message: "invalid connectionId" }]);
+    expect(keyLookups).toBe(0); // rejected before any key/schema round-trip
+    expect(connectionIds()).toEqual([]);
+    expect(calls()).toBe(0);
+  });
+
+  test("an UNRESOLVABLE connectionId reuses the existing 'no active connection' reply — no new code", async () => {
+    const { responder, calls } = makeResponder({
+      getSchema: async (connectionId) => {
+        if (connectionId === "ghost") throw new Error("no connection target configured");
+        return SCHEMA;
+      },
+    });
+    const chunks = await collect(
+      responder.answerStream({ provider: "anthropic", message: "hi", connectionId: "ghost" }),
+    );
+    expect(chunks).toEqual([{ type: "error", code: "bad_request", message: "no active connection" }]);
     expect(calls()).toBe(0);
   });
 

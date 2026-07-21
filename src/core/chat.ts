@@ -188,8 +188,16 @@ const defaultGenerateStream: GenerateStreamFn = ({
 
 /** Dependencies for {@link createChatResponder}. `generateStream` is the test seam. */
 export type ChatResponderDeps = {
-  /** The single live schema source (memoized `connectionManager.getSchema`). */
-  readonly getSchema: () => Promise<DatabaseSchema>;
+  /**
+   * The live schema source, resolved PER REQUEST (Story 10.4): the optional
+   * `connectionId` off the request body selects which saved connection is introspected;
+   * absent/`null` ⇒ the boot connection, exactly as before. Throwing is how "there is no
+   * usable connection for this id" is signalled — the caller's catch maps it to the
+   * existing neutral "no active connection" reply, so an unresolvable target needs no new
+   * chat error code. Targeting changes only WHICH schema is summarized, never the
+   * schema-only payload invariant.
+   */
+  readonly getSchema: (connectionId?: string | null) => Promise<DatabaseSchema>;
   /** Core-internal raw-key lookup for a kind (null when unconfigured). */
   readonly getKey: (provider: ProviderKind) => RegistryResult<string | null>;
   /** Map a kind + key to a model handle (pure construction, no network). */
@@ -256,6 +264,16 @@ function prepareRequest(
       return badRequest("message required", "field=message");
     }
 
+    // Optional target (Story 10.4): a saved-connection id, or absent/null for the boot
+    // connection. A wrong TYPE is a protocol violation — rejected here with the same
+    // `bad_request` + `field=` convention `provider`/`message` use, before any key lookup
+    // or schema round-trip. An id that is well-formed but UNRESOLVABLE is a different
+    // thing and deliberately lands on the "no active connection" catch below.
+    const connectionId = p?.connectionId;
+    if (connectionId !== undefined && connectionId !== null && typeof connectionId !== "string") {
+      return badRequest("invalid connectionId", "field=connectionId");
+    }
+
     // Resolve the key in Ring 1. A registry failure (store unavailable) propagates
     // its own code; an unconfigured provider (null) is a clean not_found.
     const keyResult = deps.getKey(provider);
@@ -270,12 +288,14 @@ function prepareRequest(
     }
     const apiKey = keyResult.value;
 
-    // Introspect the single live connection's schema. No live connection (or a
-    // connect failure) surfaces here as a throw → a neutral no-connection error
-    // (never a key/secret in the detail).
+    // Introspect the TARGETED connection's schema (the boot one when no id was sent).
+    // No live connection, an unresolvable id, or a connect failure all surface here as a
+    // throw → the same neutral no-connection error (never a key/secret, never the id, in
+    // the detail). Chat therefore cannot distinguish "unknown id" from "store blip" — a
+    // deliberate trade: the RPC callers that need that distinction have it.
     let schema: DatabaseSchema;
     try {
-      schema = await deps.getSchema();
+      schema = await deps.getSchema(connectionId);
     } catch {
       return badRequest("no active connection", "schema=unavailable");
     }

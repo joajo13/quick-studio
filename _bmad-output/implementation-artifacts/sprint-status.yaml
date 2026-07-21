@@ -156,7 +156,7 @@ development_status:
   10-1-no-target-failure-kind: done       # Story 10.1: Classify "no connection target" as its own failure (retire the misleading internal_error)
   10-2-per-connection-schema-scope: done  # Story 10.2: Optional per-connection schema scope (in-query filter)
   10-3-privileged-introspection-align: done # Story 10.3: Align privileged introspection (pg_class/pg_index) with visible tables
-  10-4-core-resolve-by-connection-id: backlog # Story 10.4: Core resolves every read path by connectionId (connect/table.rows/chat)
+  10-4-core-resolve-by-connection-id: done    # Story 10.4: Core resolves every read path by connectionId (connect/table.rows/chat)
   10-5-multi-root-schema-tree: backlog       # Story 10.5: Multi-root schema tree (lazy introspect, per-root state, isolated errors)
   10-6-tabs-carry-connection: backlog        # Story 10.6: Tabs carry connectionId + survive its removal on restore
   epic-10-retrospective: optional

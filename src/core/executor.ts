@@ -26,7 +26,7 @@ import {
   type SchemaTableInfo,
 } from "../shared/contract.ts";
 import { NoConnectionTargetError } from "./connection.ts";
-import type { ConnectionSeams, ResolvedConnection } from "./connection-targets.ts";
+import { targetError, type ConnectionSeams, type ResolvedConnection } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 
@@ -431,13 +431,6 @@ export function createExecutor(deps: ExecutorDeps): Executor {
 
   const bad = (message: string): RpcReply<ExecuteResult> => errorReply("bad_request", message);
 
-  /** Map a failed target resolution to its typed wire reply (never echoes a url). */
-  function targetError(reason: "not-found" | "unavailable"): RpcReply<ExecuteResult> {
-    return reason === "not-found"
-      ? errorReply("not_found", "no connection with that id")
-      : errorReply("internal_error", "credential store is unavailable");
-  }
-
   /** `schema`-qualify + quote a table identifier (`"s"."t"` / `` `s`.`t` ``). */
   function qualified(quoteIdent: ConnectionSeams["quoteIdent"], schema: string | undefined, table: string): string {
     return schema !== undefined
@@ -486,6 +479,19 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       });
     }
     const result = await runQuery(stmt, []);
+    // DW-45: a confirmed raw statement is OPAQUE text — this file classifies it
+    // default-deny precisely because it refuses to guess what the statement does, so
+    // sniffing for a `CREATE`/`DROP`/`ALTER` verb here to decide whether the catalog
+    // changed would re-introduce exactly that guessing. Invalidate unconditionally on
+    // the mutating branch: under-invalidating re-serves a stale schema to the tree and
+    // the AI (the DW-45 bug), while over-invalidating costs ONE extra `listSchema` — five
+    // introspection queries on Postgres — charged to the next reader that actually needs
+    // the catalog, and only once no matter how many statements busted it in between
+    // (`getEngine` deliberately does not honor the stale flag, so consecutive statements
+    // do not each pay a refresh).
+    // Only AFTER a successful run (a throw skips it), and only on the seams we just
+    // mutated — no other target's memo is touched.
+    seams.invalidateSchema();
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 
@@ -638,6 +644,10 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
     const sql = `CREATE TABLE ${qualified(quoteIdent, table.schema, table.table)} (${defs.join(", ")})`;
     const result = await runQuery(sql, []);
+    // DW-45: the ONLY structured op that changes the catalog — the new table must appear
+    // in the next `getSchema` for this target instead of the memo taken at first connect.
+    // `insert`/`update`/`delete` change rows only, so they deliberately do NOT invalidate.
+    seams.invalidateSchema();
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 

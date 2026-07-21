@@ -654,3 +654,341 @@ describe("Live Report serving (Story 6.4)", () => {
     expect(foreign.status).toBe(403);
   });
 });
+
+// Story 10.4: `table.rows` and `connect` accept an optional `connectionId` and resolve it
+// through the SAME per-target pool `execute` uses, so a request can browse a SAVED
+// connection instead of the boot one. Driven end-to-end through the real server + gate
+// with a fake driver that serves a DIFFERENT catalog per url (no live DB), and an
+// Ephemeral (memory-only) credential store so nothing touches disk.
+describe("targeted read RPCs resolve by connectionId (Story 10.4)", () => {
+  const BOOT_URL = "postgres://bootuser:bootpw@boot-host/bootdb";
+  const TARGET_URL = "postgres://targetuser:targetpw@target-host:5432/targetdb";
+  /** A saved connection whose driver refuses the handshake (the classified-failure path). */
+  const FAILING_URL = "postgres://baduser:badpw@fail-host/db";
+
+  /** The boot connection's catalog — `widgets` exists ONLY here. */
+  const BOOT_SCHEMA: DatabaseSchema = {
+    engine: "postgres",
+    tables: [
+      {
+        schema: "public",
+        name: "widgets",
+        columns: [{ name: "id", dataType: "integer", nullable: false }],
+        primaryKey: ["id"],
+        indexes: [],
+        foreignKeys: [],
+      },
+    ],
+  };
+
+  /** The saved target's catalog — `invoices` exists ONLY here, which is what proves routing. */
+  const TARGET_SCHEMA: DatabaseSchema = {
+    engine: "postgres",
+    tables: [
+      {
+        schema: "public",
+        name: "invoices",
+        columns: [{ name: "id", dataType: "integer", nullable: false }],
+        primaryKey: ["id"],
+        indexes: [],
+        foreignKeys: [],
+      },
+    ],
+  };
+
+  async function rpc(target: Core, body: unknown): Promise<Response> {
+    return fetch(`${target.url}/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-qs-token": target.token },
+      body: JSON.stringify(body),
+    });
+  }
+
+  /**
+   * Boot a Core whose fake driver answers per URL, save ONE connection in the registry,
+   * and hand the test both the core and that connection's id. `opened` records every url
+   * a driver actually opened, so "rejected before any round-trip" is directly assertable;
+   * `introspections` counts `listSchema` per url, so a memo hit and a RE-introspection are
+   * distinguishable per target (the DW-45 chain, end to end).
+   *
+   * Each boot gets its OWN mutable catalogs: a `CREATE TABLE` executed through the real
+   * `execute` RPC actually changes what that url's next `listSchema` answers, so the whole
+   * `execute → invalidateSchema → next getSchema re-introspects` chain runs for real
+   * instead of stopping at a fake seam.
+   */
+  async function withTargetedCore(
+    fn: (c: Core, savedId: string, opened: string[], introspections: Record<string, number>) => Promise<void>,
+  ): Promise<void> {
+    const opened: string[] = [];
+    const introspections: Record<string, number> = {};
+    const catalogs = new Map<string, DatabaseSchema>([
+      [BOOT_URL, BOOT_SCHEMA],
+      [TARGET_URL, TARGET_SCHEMA],
+    ]);
+    const factory: DriverFactory = (url: string) => {
+      const catalog = (): DatabaseSchema => catalogs.get(url) ?? BOOT_SCHEMA;
+      return {
+        async connect() {
+          opened.push(url);
+          if (url === FAILING_URL) {
+            throw new DriverConnectionError("auth", "the database rejected the provided credentials");
+          }
+        },
+        async listSchema() {
+          introspections[url] = (introspections[url] ?? 0) + 1;
+          return catalog();
+        },
+        async query(text: string) {
+          // The fake's whole DDL vocabulary: `CREATE TABLE <name>` appends to THIS url's
+          // catalog, so the next introspection of this target (and only this one) differs.
+          const created = /^CREATE TABLE (\w+)/i.exec(text);
+          if (created !== null) {
+            catalogs.set(url, {
+              engine: "postgres",
+              tables: [
+                ...catalog().tables,
+                {
+                  schema: "public",
+                  name: created[1]!,
+                  columns: [{ name: "id", dataType: "integer", nullable: false }],
+                  primaryKey: ["id"],
+                  indexes: [],
+                  foreignKeys: [],
+                },
+              ],
+            });
+            return { columns: [], rows: [], rowsAffected: 0 };
+          }
+          return text.startsWith("SELECT COUNT")
+            ? { columns: [{ name: "total" }], rows: [[1]] }
+            : { columns: catalog().tables[0]!.columns.map((c) => ({ name: c.name })), rows: [[7]] };
+        },
+        async queryReadOnly() {
+          return { columns: [], rows: [] };
+        },
+        quoteIdent(ident: string) {
+          return `"${ident}"`;
+        },
+        async close() {},
+      };
+    };
+    // Ephemeral: the credential store is memory-only, so `connections.add` persists nothing.
+    const c = await startCore(0, { mode: "ephemeral", databaseUrl: BOOT_URL, createDriver: factory });
+    try {
+      const added = await (
+        await rpc(c, { method: "connections.add", params: { name: "target", url: TARGET_URL } })
+      ).json();
+      expect(added.ok).toBe(true);
+      await fn(c, added.result.id as string, opened, introspections);
+    } finally {
+      await c.stop();
+    }
+  }
+
+  test("table.rows with a valid connectionId reads THAT target's catalog, not the boot one", async () => {
+    await withTargetedCore(async (c, savedId, opened) => {
+      const res = await rpc(c, {
+        method: "table.rows",
+        params: { schema: "public", table: "invoices", page: 1, pageSize: 10, connectionId: savedId },
+      });
+      const raw = await res.text();
+      expect(res.status).toBe(200);
+      const reply = JSON.parse(raw);
+      expect(reply.ok).toBe(true);
+      expect(reply.result.data.columns).toEqual([{ name: "id", type: "number" }]);
+      expect(reply.result.total).toBe(1);
+      // The target's driver was opened — and it is the target's URL, resolved in Core.
+      expect(opened).toEqual([TARGET_URL]);
+      // Credential-free bytes: the resolved url never rides back to the caller.
+      expect(raw).not.toContain("targetuser");
+      expect(raw).not.toContain("targetpw");
+      expect(raw).not.toContain("postgres://");
+
+      // The mirror image: the SAME request without the id validates against the BOOT
+      // catalog, where `invoices` does not exist — the byte-identical default path.
+      const bootRes = await rpc(c, {
+        method: "table.rows",
+        params: { schema: "public", table: "invoices", page: 1, pageSize: 10 },
+      });
+      expect(bootRes.status).toBe(404);
+      const bootReply = await bootRes.json();
+      expect(bootReply.error.code).toBe("not_found");
+      expect(opened).toEqual([TARGET_URL, BOOT_URL]);
+    });
+  });
+
+  test("connect with a valid connectionId returns THAT target's schema as a normal OK payload", async () => {
+    await withTargetedCore(async (c, savedId, opened) => {
+      const res = await rpc(c, { method: "connect", params: { connectionId: savedId } });
+      const raw = await res.text();
+      expect(res.status).toBe(200);
+      const reply = JSON.parse(raw);
+      expect(reply.ok).toBe(true);
+      expect(reply.result).toEqual({ status: "connected", schema: TARGET_SCHEMA });
+      expect(opened).toEqual([TARGET_URL]);
+      expect(raw).not.toContain("targetuser");
+      expect(raw).not.toContain("targetpw");
+      expect(raw).not.toContain("postgres://");
+
+      // The paramless call still opens the BOOT connection, unchanged.
+      const bootReply = await (await rpc(c, { method: "connect" })).json();
+      expect(bootReply.result).toEqual({ status: "connected", schema: BOOT_SCHEMA });
+      expect(opened).toEqual([TARGET_URL, BOOT_URL]);
+    });
+  });
+
+  test("an UNKNOWN connectionId → not_found 'no connection with that id' on both RPCs, nothing opened", async () => {
+    await withTargetedCore(async (c, _savedId, opened) => {
+      for (const body of [
+        { method: "table.rows", params: { table: "invoices", connectionId: "ghost" } },
+        { method: "connect", params: { connectionId: "ghost" } },
+      ]) {
+        const res = await rpc(c, body);
+        expect(res.status).toBe(404);
+        const reply = await res.json();
+        expect(reply.ok).toBe(false);
+        expect(reply.error.code).toBe("not_found");
+        expect(reply.error.message).toBe("no connection with that id");
+        // Neutral: an unknown id never leaks a url or a store detail.
+        expect(JSON.stringify(reply.error)).not.toContain("postgres://");
+      }
+      expect(opened).toEqual([]); // no target — and no fallback to the boot connection
+    });
+  });
+
+  test("a MALFORMED connectionId → bad_request before any connection round-trip", async () => {
+    await withTargetedCore(async (c, _savedId, opened) => {
+      for (const body of [
+        { method: "table.rows", params: { table: "invoices", connectionId: 5 } },
+        { method: "connect", params: { connectionId: 5 } },
+      ]) {
+        const res = await rpc(c, body);
+        expect(res.status).toBe(400);
+        const reply = await res.json();
+        expect(reply.ok).toBe(false);
+        expect(reply.error.code).toBe("bad_request");
+        expect(reply.error.message).toContain("'connectionId' must be a string or null");
+      }
+      // The load-bearing half of "shape-check first": no driver was ever opened.
+      expect(opened).toEqual([]);
+    });
+  });
+
+  test("a targeted connect whose driver fails is a DOMAIN payload, never an error envelope", async () => {
+    await withTargetedCore(async (c) => {
+      const added = await (
+        await rpc(c, { method: "connections.add", params: { name: "broken", url: FAILING_URL } })
+      ).json();
+      expect(added.ok).toBe(true);
+
+      const res = await rpc(c, { method: "connect", params: { connectionId: added.result.id } });
+      const raw = await res.text();
+      // A classified driver failure on a RESOLVED target rides inside okReply exactly as
+      // it does for the boot connection — never an `internal_error`, never a 500.
+      expect(res.status).toBe(200);
+      const reply = JSON.parse(raw);
+      expect(reply.ok).toBe(true);
+      expect(reply.result.status).toBe("failed");
+      expect(reply.result.failure).toBe("auth");
+      expect(raw).not.toContain("baduser");
+      expect(raw).not.toContain("badpw");
+    });
+  });
+
+  test("a params that is PRESENT but not an object → bad_request, never a silent boot fallback", async () => {
+    await withTargetedCore(async (c, savedId, opened) => {
+      for (const body of [
+        { method: "connect", params: savedId }, // the id sent in the WRONG place
+        { method: "connect", params: 7 },
+        { method: "connect", params: [savedId] },
+        { method: "table.rows", params: "invoices" },
+      ]) {
+        const res = await rpc(c, body);
+        expect(res.status).toBe(400);
+        const reply = await res.json();
+        expect(reply.ok).toBe(false);
+        expect(reply.error.code).toBe("bad_request");
+        expect(reply.error.message).toContain("requires a params object");
+      }
+      // The bug this locks: a non-object `params` used to read as "no connectionId", so
+      // `{"method":"connect","params":"<id>"}` cheerfully answered ok:true with the BOOT
+      // connection's schema. Nothing may be opened, and nothing may be answered.
+      expect(opened).toEqual([]);
+    });
+  });
+
+  test("connectionId:null is the boot connection — byte-identical to omitting it", async () => {
+    await withTargetedCore(async (c, _savedId, opened) => {
+      const withNull = await (await rpc(c, { method: "connect", params: { connectionId: null } })).json();
+      const bare = await (await rpc(c, { method: "connect" })).json();
+      expect(withNull).toEqual(bare);
+      expect(withNull.result).toEqual({ status: "connected", schema: BOOT_SCHEMA });
+      expect(opened).toEqual([BOOT_URL]); // one boot connection, reused (idempotent)
+    });
+  });
+
+  // DW-45, END TO END. Every other assertion for it stops at a fake boundary (fake seams in
+  // executor.test.ts, a fake driver in connection.test.ts, a fake manager in
+  // connection-targets.test.ts), so the composed chain — `execute` RPC → executor →
+  // `seams.invalidateSchema()` → the resolved manager → the NEXT read re-introspecting — was
+  // never exercised. This block drives it through the real Core.
+  test("a table created through the execute RPC appears on the next read of THAT target only", async () => {
+    await withTargetedCore(async (c, savedId, _opened, introspections) => {
+      const names = (schema: DatabaseSchema): string[] => schema.tables.map((t) => t.name);
+      const connect = async (connectionId: string | null) =>
+        (await (await rpc(c, { method: "connect", params: { connectionId } })).json()).result.schema as DatabaseSchema;
+
+      // Warm both memos, so any later introspection is unambiguously a RE-introspection.
+      expect(names(await connect(savedId))).toEqual(["invoices"]);
+      expect(names(await connect(null))).toEqual(["widgets"]);
+      expect(introspections[TARGET_URL]).toBe(1);
+      expect(introspections[BOOT_URL]).toBe(1);
+
+      const exec = await (
+        await rpc(c, {
+          method: "execute",
+          params: { shape: "raw", sql: "CREATE TABLE receipts (id integer)", confirmed: true, connectionId: savedId },
+        })
+      ).json();
+      expect(exec.ok).toBe(true);
+      expect(exec.result.status).toBe("ok");
+
+      // The memo was busted for real: the next connect re-introspects and sees the DDL.
+      expect(names(await connect(savedId))).toEqual(["invoices", "receipts"]);
+      expect(introspections[TARGET_URL]).toBe(2);
+
+      // …and the bust was SCOPED: the boot catalog served its memo, untouched.
+      expect(names(await connect(null))).toEqual(["widgets"]);
+      expect(introspections[BOOT_URL]).toBe(1);
+
+      // The refreshed catalog is itself memoized — a second read costs nothing.
+      expect(names(await connect(savedId))).toEqual(["invoices", "receipts"]);
+      expect(introspections[TARGET_URL]).toBe(2);
+    });
+  });
+
+  test("N confirmed statements cost ONE re-introspection, not N (the engine is not a catalog read)", async () => {
+    await withTargetedCore(async (c, savedId, _opened, introspections) => {
+      await rpc(c, { method: "connect", params: { connectionId: savedId } });
+      expect(introspections[TARGET_URL]).toBe(1);
+
+      // Five confirmed raw mutations, each busting the target's memo. Every raw execute
+      // opens with a `getEngine()` — routing THAT through the memoized catalog made each
+      // statement pay a full re-introspection (five on Postgres, serialized in front of it).
+      for (let i = 0; i < 5; i++) {
+        const reply = await (
+          await rpc(c, {
+            method: "execute",
+            params: { shape: "raw", sql: "UPDATE invoices SET id = id", confirmed: true, connectionId: savedId },
+          })
+        ).json();
+        expect(reply.ok).toBe(true);
+      }
+      expect(introspections[TARGET_URL]).toBe(1);
+
+      // The busts are real, though: the next actual catalog read pays exactly ONE refresh.
+      await rpc(c, { method: "connect", params: { connectionId: savedId } });
+      expect(introspections[TARGET_URL]).toBe(2);
+    });
+  });
+});

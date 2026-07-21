@@ -12,7 +12,7 @@
  * to the RPC dispatcher. The token — not loopback — is the real gate (AD-12).
  */
 
-import type { ChatStreamChunk, ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
+import type { ChatStreamChunk, ConnectResult, ExposureInfo, RpcReply, TableRowsResult } from "../shared/contract.ts";
 import { errorReply, okReply } from "../shared/contract.ts";
 import { assembleLiveReportHtml } from "../shared/live-report-html.ts";
 import { resolveModel } from "./ai-provider.ts";
@@ -21,7 +21,7 @@ import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
 import { createChatResponder } from "./chat.ts";
 import { createConnectionManager, NoConnectionTargetError } from "./connection.ts";
 import { createConnectionRegistry } from "./connection-registry.ts";
-import { createConnectionTargets } from "./connection-targets.ts";
+import { createConnectionTargets, targetError } from "./connection-targets.ts";
 import type { DriverFactory } from "./driver.ts";
 import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
@@ -291,28 +291,80 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // + session-only — nothing touches disk (Persistent/Ephemeral-agnostic), and it dies with boot.
   const liveReportRegistry = createLiveReportRegistry();
 
+  // Per-target connection resolver (Story 6.2, generalized in Story 10.4): turns an
+  // optional saved-connection id into the seams a read path runs over. The default (id
+  // null/absent) is the boot manager, so the untargeted path is byte-identical. A target
+  // manager is created lazily via the SAME driver factory, cached by id, self-invalidated
+  // against the registry's `getStoredUrl` on every resolve (repoint/re-scope/removal), and
+  // closed on shutdown. Only the id crosses the loopback — the url is resolved in-Core
+  // here, and `execute`, `table.rows`, `connect` and chat all share THIS one pool.
+  const connectionTargets = createConnectionTargets({
+    bootManager: connectionManager,
+    getStoredUrl: (id) => connectionRegistry.getStoredUrl(id),
+    createManager: (url, schema) =>
+      createConnectionManager({ databaseUrl: url, schema, createDriver: options.createDriver }),
+  });
+
   /**
-   * Browse-rows capability (Story 3.2): validate the request against the live
-   * introspected schema, compose the Core-owned read-only SELECT/COUNT (identifiers
-   * schema-validated + `quoteIdent`-quoted, LIMIT/OFFSET integer literals), run both
-   * on the live connection, and map the page to `FrozenData`. A validation failure
-   * is a formed `bad_request`/`not_found` reply. No connection target configured
-   * (`NoConnectionTargetError`) is caught and returned as a neutral `bad_request`
-   * "no active connection" — NOT the generic `internal_error`. Any OTHER
-   * driver/connection throw still propagates → `internal_error` (engine-neutral,
+   * Read an optional `connectionId` off an unvalidated `params`, shape-checked BEFORE any
+   * connection round-trip (mirroring `executor.ts`'s `execute`), so a malformed id is a
+   * `bad_request` that never opens or touches a driver. Absent/`null` ⇒ `null`, which
+   * `connectionTargets.resolve` maps to the boot manager — the byte-identical default.
+   * `method` names the offending RPC in the message, matching the executor's wording.
+   *
+   * A `params` that is PRESENT but not a plain object (a string, number, boolean, array)
+   * is itself a protocol violation and is rejected here, exactly as `executor.ts`'s
+   * `execute` rejects a non-object request. Treating it as "no id" instead — the old
+   * behavior — silently answered `{"method":"connect","params":"conn-b"}` with the BOOT
+   * connection's schema and `ok:true`, i.e. a targeted read served from the wrong
+   * database with no error at all. Absent/`null` `params` is NOT a violation: it is how
+   * the UI's paramless `connect` calls, which must stay byte-identical.
+   */
+  function readConnectionId(
+    params: unknown,
+    method: string,
+  ): { id: string | null } | { error: RpcReply<never> } {
+    if (params !== undefined && params !== null && (typeof params !== "object" || Array.isArray(params))) {
+      return { error: errorReply("bad_request", `${method} requires a params object`) };
+    }
+    const p = (params ?? null) as Record<string, unknown> | null;
+    const raw = p?.connectionId;
+    if (raw !== undefined && raw !== null && typeof raw !== "string") {
+      return { error: errorReply("bad_request", `${method} 'connectionId' must be a string or null`) };
+    }
+    return { id: raw ?? null };
+  }
+
+  /**
+   * Browse-rows capability (Story 3.2; targeted in Story 10.4): resolve the requested
+   * connection (absent/`null` id ⇒ the boot manager), validate the request against THAT
+   * target's live introspected schema, compose the Core-owned read-only SELECT/COUNT
+   * (identifiers schema-validated + `quoteIdent`-quoted, LIMIT/OFFSET integer literals),
+   * run both on it, and map the page to `FrozenData`. A validation failure is a formed
+   * `bad_request`/`not_found` reply — target selection changes WHICH schema is validated
+   * against, never the validation contract. An unresolvable id is the shared
+   * `targetError` mapping (`not_found`/`internal_error`, credential-neutral). No
+   * connection target configured (`NoConnectionTargetError`) is caught and returned as a
+   * neutral `bad_request` "no active connection" — NOT the generic `internal_error`. Any
+   * OTHER driver/connection throw still propagates → `internal_error` (engine-neutral,
    * credentials never echoed).
    */
   async function tableRows(params: unknown): Promise<RpcReply<TableRowsResult>> {
+    const target = readConnectionId(params, "table.rows");
+    if ("error" in target) return target.error;
     try {
-      const schema = await connectionManager.getSchema();
-      const planned = planTableRows(schema, params, (ident) => connectionManager.quoteIdent(ident));
+      const resolved = connectionTargets.resolve(target.id);
+      if (!resolved.ok) return targetError(resolved.reason);
+      const { seams } = resolved;
+      const schema = await seams.getSchema();
+      const planned = planTableRows(schema, params, (ident) => seams.quoteIdent(ident));
       if (!planned.ok) {
         return errorReply(planned.error.code, planned.error.message);
       }
       const { plan } = planned;
-      const countResult = await connectionManager.query(plan.countSql);
+      const countResult = await seams.runQuery(plan.countSql, []);
       const total = readTotal(countResult.rows);
-      const dataResult = await connectionManager.query(plan.selectSql);
+      const dataResult = await seams.runQuery(plan.selectSql, []);
       const data = rowsToFrozenData(
         plan.columns.map((c) => c.name),
         dataResult.rows,
@@ -326,18 +378,20 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
     }
   }
 
-  // Per-target connection resolver (Story 6.2): turns an optional saved-connection id
-  // into the seams the executor runs over. The default (id null/absent) is the boot
-  // manager, so the untargeted path is byte-identical. A target manager is created
-  // lazily via the SAME driver factory, cached by id, self-invalidated against the
-  // registry's `getStoredUrl` on every resolve (repoint/re-scope/removal), and closed on
-  // shutdown. Only the id crosses the loopback — the url is resolved in-Core here.
-  const connectionTargets = createConnectionTargets({
-    bootManager: connectionManager,
-    getStoredUrl: (id) => connectionRegistry.getStoredUrl(id),
-    createManager: (url, schema) =>
-      createConnectionManager({ databaseUrl: url, schema, createDriver: options.createDriver }),
-  });
+  /**
+   * Connect capability (Story 1.3; targeted in Story 10.4): resolve the requested
+   * connection (absent/`null` id ⇒ the boot manager, so the UI's paramless call is
+   * byte-identical) and open+introspect it idempotently. A CLASSIFIED driver failure
+   * rides INSIDE `okReply` as the neutral `{status:"failed"}` domain payload — never an
+   * error envelope; only a malformed id or an unresolvable target produces one.
+   */
+  async function connect(params: unknown): Promise<RpcReply<ConnectResult>> {
+    const target = readConnectionId(params, "connect");
+    if ("error" in target) return target.error;
+    const resolved = connectionTargets.resolve(target.id);
+    if (!resolved.ok) return targetError(resolved.reason);
+    return okReply(await resolved.seams.connect());
+  }
 
   // Guarded SQL executor (Story 3.1): the ONE Core-owned risk classifier. Its single
   // dependency is `resolveConnection` (Story 6.2): resolve the target's seams once per
@@ -351,11 +405,20 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   });
 
   // Chat responder (Story 5.2, streamed in Story 5.4): the SOLE outbound provider
-  // caller. Closes over the single live schema source, the Core-internal `getKey`, and
-  // the unified model resolver; the streaming call defaults to `streamText`, so every
+  // caller. Closes over the live schema source, the Core-internal `getKey`, and the
+  // unified model resolver; the streaming call defaults to `streamText`, so every
   // `ai`/`@ai-sdk/*` touch stays in Ring 1 (chat.ts). Schema-only, zero rows leave.
+  // Story 10.4: the schema source is now per-request — the optional `connectionId` on the
+  // `/chat/stream` body selects WHICH database is introspected (absent/null ⇒ boot). A
+  // resolve miss raises the same typed `NoConnectionTargetError` the read path uses, which
+  // `prepareRequest`'s existing catch turns into the neutral "no active connection"
+  // `bad_request` — no new chat error code, and the id never reaches the provider.
   const chatResponder = createChatResponder({
-    getSchema: () => connectionManager.getSchema(),
+    getSchema: (connectionId) => {
+      const resolved = connectionTargets.resolve(connectionId);
+      if (!resolved.ok) throw new NoConnectionTargetError();
+      return resolved.seams.getSchema();
+    },
     getKey: (provider) => providerRegistry.getKey(provider),
     resolveModel,
   });
@@ -441,8 +504,9 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         // here — it would close the socket carrying this very reply. Deferring
         // to a macrotask lets Bun flush the `/rpc` Response first.
         requestShutdown: () => setTimeout(onShutdownRequested, 0),
-        // Idempotent open+introspect; a live connection is reused across calls.
-        connect: () => connectionManager.connect(),
+        // Idempotent open+introspect of the resolved target; a live connection is reused
+        // across calls (and, for a saved id, across every read path — one shared pool).
+        connect,
         // Read-only descriptor of the in-memory active target + run mode (Story 8.7).
         // Pure: derives from the held url, opens no driver, mutates nothing.
         activeConnection: () => ({ mode, connection: connectionManager.describe() }),

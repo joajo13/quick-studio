@@ -28,21 +28,40 @@
  *    (leaked) target. The boot manager is owned/closed by the caller (`server.ts`).
  */
 
-import type { DatabaseSchema, DbEngine } from "../shared/contract.ts";
+import { errorReply, type ConnectResult, type DatabaseSchema, type DbEngine, type RpcReply } from "../shared/contract.ts";
 import type { ConnectionManager } from "./connection.ts";
 import type { DriverQueryResult } from "./driver.ts";
 
 /**
- * The five side-effecting seams the guarded executor is built over, bound to ONE
- * connection (the boot manager, or a resolved target). Mirrors the executor's former
- * fixed dep set — now produced per-`resolve` so targeting lives in one place.
+ * The side-effecting seams a Core read path is built over, bound to ONE connection (the
+ * boot manager, or a resolved target). Mirrors the executor's former fixed dep set — now
+ * produced per-`resolve` so targeting lives in one place. Story 10.4 widened it past the
+ * executor: `connect` (so `table.rows`/`connect` can open a resolved target) and
+ * `invalidateSchema` (so a mutation can bust exactly the memo it just invalidated).
  */
 export type ConnectionSeams = {
   readonly runQuery: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
   readonly runReadOnly: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
+  /**
+   * The target's engine. Answered from the CONNECTION (its url scheme), never by
+   * re-introspecting the catalog — the engine cannot go stale when a DDL runs, so this
+   * seam is unaffected by `invalidateSchema`.
+   */
   readonly getEngine: () => Promise<DbEngine>;
   readonly getSchema: () => Promise<DatabaseSchema>;
   readonly quoteIdent: (ident: string) => string;
+  /**
+   * Open (once) + introspect THIS target, resolving the same neutral {@link ConnectResult}
+   * the boot manager already returns — a classified driver failure is a `status:"failed"`
+   * payload, never a throw, so no failure-shape logic is duplicated outside `connection.ts`.
+   */
+  readonly connect: () => Promise<ConnectResult>;
+  /**
+   * Mark THIS target's memoized schema stale (DW-45) so its next `getSchema`/`connect`
+   * re-introspects. Scoped by construction: a caller holding one resolve's seams cannot
+   * flush another target's memo (nor the whole pool).
+   */
+  readonly invalidateSchema: () => void;
 };
 
 /**
@@ -94,10 +113,32 @@ function seamsFor(manager: ConnectionManager): ConnectionSeams {
   return {
     runQuery: (sql, params) => manager.query(sql, params),
     runReadOnly: (sql, params) => manager.queryReadOnly(sql, params),
-    getEngine: async () => (await manager.getSchema()).engine,
+    // 1:1, like every other seam — and deliberately NOT `(await manager.getSchema()).engine`:
+    // that routed the engine through the memoized (and now bustable) catalog, so every
+    // statement following a schema-mutating one paid a full re-introspection to learn a value
+    // fixed by the connection's url scheme. `manager.getEngine()` reads it off the connection
+    // without honoring the stale flag.
+    getEngine: () => manager.getEngine(),
     getSchema: () => manager.getSchema(),
     quoteIdent: (ident) => manager.quoteIdent(ident),
+    connect: () => manager.connect(),
+    invalidateSchema: () => manager.invalidateSchema(),
   };
+}
+
+/**
+ * Map a failed {@link ConnectionTargets.resolve} onto its typed wire reply. Lives HERE,
+ * beside the `reason` union it translates, so every targeted RPC (`execute`,
+ * `table.rows`, `connect`, …) shares ONE mapping instead of copy-pasting the
+ * `not-found → not_found` / `unavailable → internal_error` convention until it drifts.
+ * Credential-neutral by construction: neither branch echoes an id, a url, or the store's
+ * own detail. `RpcReply<never>` is assignable into any `RpcReply<T>` position, so callers
+ * need no generic argument.
+ */
+export function targetError(reason: "not-found" | "unavailable"): RpcReply<never> {
+  return reason === "not-found"
+    ? errorReply("not_found", "no connection with that id")
+    : errorReply("internal_error", "credential store is unavailable");
 }
 
 /**

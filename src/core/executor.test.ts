@@ -64,14 +64,20 @@ function makeSeams(opts: {
   schema?: DatabaseSchema;
   queryResult?: DriverQueryResult;
   readOnlyResult?: DriverQueryResult;
+  /** When set, `runQuery` throws it — a failed mutation must NOT bust the memo. */
+  queryThrows?: unknown;
 } = {}) {
   const engine = opts.engine ?? "postgres";
   const schema = opts.schema ?? schemaFor(engine);
   const queryCalls: Capture[] = [];
   const readOnlyCalls: Capture[] = [];
+  // DW-45: counts the schema-memo busts this seam-set received, so the invalidation
+  // matrix (which branches bust, which must not) is directly observable per target.
+  const invalidations = { count: 0 };
   const seams: ConnectionSeams = {
     runQuery: async (sql, params) => {
       queryCalls.push({ sql, params });
+      if (opts.queryThrows) throw opts.queryThrows;
       return opts.queryResult ?? { columns: [], rows: [], rowsAffected: 1 };
     },
     runReadOnly: async (sql, params) => {
@@ -81,8 +87,12 @@ function makeSeams(opts: {
     getEngine: async () => engine,
     getSchema: async () => schema,
     quoteIdent: engine === "postgres" ? pgQuote : myQuote,
+    connect: async () => ({ status: "connected", schema }),
+    invalidateSchema: () => {
+      invalidations.count += 1;
+    },
   };
-  return { seams, queryCalls, readOnlyCalls };
+  return { seams, queryCalls, readOnlyCalls, invalidations };
 }
 
 function makeExecutor(opts: {
@@ -1016,6 +1026,10 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
         throw new NoConnectionTargetError();
       },
       quoteIdent: (ident) => `"${ident}"`,
+      connect: async () => {
+        throw new NoConnectionTargetError();
+      },
+      invalidateSchema: () => {},
     };
     const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: throwing }) });
 
@@ -1053,6 +1067,10 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
         throw new NoConnectionTargetError();
       },
       quoteIdent: (ident) => `"${ident}"`,
+      connect: async () => {
+        throw new NoConnectionTargetError();
+      },
+      invalidateSchema: () => {},
     };
     const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: throwing }) });
 
@@ -1069,5 +1087,115 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
       expect(serialized).not.toContain("postgres://");
       expect(serialized).not.toContain("password");
     }
+  });
+});
+
+/* ---- DW-45: schema-memo invalidation after a schema-mutating execute -- */
+
+/**
+ * The memo `connection.ts` takes at first connect is only correct until something
+ * changes the catalog. The executor is the one place that knows a mutation actually
+ * COMMITTED, so it fires `invalidateSchema()` on the resolved seams — and nowhere else.
+ * This battery pins BOTH halves: every branch that must bust, and every branch that must
+ * not (an over-eager bust would re-introspect on every read; an under-eager one is the
+ * DW-45 bug — a stale "N tables" context served to the tree and the AI).
+ */
+describe("execute invalidates the target's schema memo (DW-45)", () => {
+  /** An executor over ONE captured seam-set, exposing its invalidation counter. */
+  function makeInvalidatingExecutor(opts: { engine?: DbEngine; queryThrows?: unknown } = {}) {
+    const s = makeSeams(opts);
+    const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: s.seams }) });
+    return { exec, ...s };
+  }
+
+  test("a CONFIRMED raw mutation busts the memo exactly once", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "DROP TABLE users", confirmed: true });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(invalidations.count).toBe(1);
+  });
+
+  test("an auto-classified READ never busts the memo", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("an UNCONFIRMED mutation (confirmation_required) never busts the memo — nothing ran", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "DROP TABLE users" });
+    expect(reply.ok && reply.result.status).toBe("confirmation_required");
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("a successful createTable busts the memo (the new table must appear in the next read)", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "notes", columns: [{ name: "id", type: "INTEGER", primaryKey: true }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(invalidations.count).toBe(1);
+  });
+
+  test("a REJECTED createTable (unsupported type on this engine) never busts the memo", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "notes", columns: [{ name: "id", type: "UUID" }] },
+    });
+    expect(reply.ok).toBe(false);
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("insert / update / delete change ROWS, not the catalog — none busts the memo", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const replies = [
+      await exec.execute({
+        shape: "structured",
+        op: { kind: "insert", table: "users", columns: [{ column: "name", value: "ada" }] },
+      }),
+      await exec.execute({
+        shape: "structured",
+        op: { kind: "update", table: "users", set: [{ column: "name", value: "ada" }], pk: { column: "id", value: 1 } },
+      }),
+      await exec.execute({
+        shape: "structured",
+        op: { kind: "delete", table: "users", pk: { column: "id", value: 1 } },
+        confirmed: true,
+      }),
+    ];
+    for (const reply of replies) expect(reply.ok && reply.result.status).toBe("ok");
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("a mutation whose runQuery THROWS never busts the memo (nothing committed)", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor({ queryThrows: new Error("deadlock detected") });
+    await expect(exec.execute({ shape: "raw", sql: "DROP TABLE users", confirmed: true })).rejects.toThrow();
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("a TARGETED mutation busts the target's memo only — the boot memo is untouched", async () => {
+    // The scoping guarantee: the executor holds one resolve's seams, so it structurally
+    // cannot flush another connection's memo (nor the whole pool).
+    const boot = makeSeams();
+    const target = makeSeams();
+    const exec = createExecutor({
+      resolveConnection: (id) =>
+        id === null || id === undefined
+          ? { ok: true, seams: boot.seams }
+          : { ok: true, seams: target.seams },
+    });
+
+    const reply = await exec.execute({
+      shape: "raw",
+      sql: "CREATE TABLE notes (id integer)",
+      confirmed: true,
+      connectionId: "conn-b",
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(target.invalidations.count).toBe(1);
+    expect(boot.invalidations.count).toBe(0);
   });
 });
