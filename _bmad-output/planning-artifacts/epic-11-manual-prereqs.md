@@ -1,53 +1,70 @@
 # Epic 11 — Manual prerequisites (operator, not loop)
 
 Everything in Epic 11's stories is code, workflows, generated manifests, and docs — all
-loop-executable. These are the steps that need credentials, an account, or a decision, and
-therefore cannot be delegated. Nothing in the epic can be *verified end to end* until they
-are done, though every story can be *implemented and unit-tested* without them.
+loop-executable. These are the steps that need credentials, an account, or a browser, and
+therefore cannot be delegated. Every story can be *implemented and unit-tested* without them;
+nothing can be *verified end to end* until they are done.
 
-## Before the loop runs
+## Decided (no longer open)
 
-**1. Decide the platform-package naming.** Blocks Story 11.4 (it is that story's first
-Block-If). Two options:
+**Package naming.** Main package **unscoped `quick-studio`**; per-platform binary packages
+**scoped `@quick-studio/<platform>-<arch>`**. The esbuild layout. The unscoped name is what
+keeps `npx quick-studio <db-url>` a single command; the scope is what reserves the binary
+namespace wholesale.
 
-- **Unscoped** — `quick-studio-linux-x64`, `quick-studio-darwin-arm64`, … Needs nothing but
-  the npm account. This is the spec's default.
-- **Scoped** — `@quick-studio/linux-x64`, … Cleaner and squats less of the unscoped
-  namespace, but requires an npm **organization** named `quick-studio` to exist first.
+**Platform scope.** Windows and Linux are first-class this epic (`win32-x64`, `linux-x64`,
+`linux-arm64`). **macOS is a later phase** — the keyring spike never validated darwin, and a
+published darwin binary would promise a keychain path nobody has proven. Stories 11.2, 11.3
+and 11.4 all consume one shared platform list precisely so that phase is additive.
 
-If the org is wanted, create it before 11.4 runs and say so — it is a one-constant change in
-`scripts/build-npm-packages.ts`, but only if the decision is made up front.
+## Claim the names (do this first — it is the only time-sensitive item)
 
-**2. Claim the npm name.** `quick-studio` was unregistered as of 2026-07-21. It is the
-product's whole distribution identity and it is free right now; publishing a `0.0.1`
-placeholder costs nothing and removes the risk of losing it mid-epic.
+Both were unregistered as of 2026-07-21. Neither is expensive; both are gone the moment
+someone else takes them.
 
-## Before the first release can be verified
+**1. Log in to npm.** Interactive/browser auth, so it has to be you:
 
-**3. Wire the git remote.** `git remote -v` is currently empty. `.github/workflows/release.yml`
-has therefore never run, and the README's Install section links to `../../releases`, which
-resolves to nothing. Add the origin and push the branch.
+```
+! npm login
+```
 
-**4. Add `NPM_TOKEN` to repository secrets.** An npm **automation** token (not a publish token
-tied to 2FA prompts, which cannot work unattended in CI). Story 11.4's `publish.yml` reads it.
-Consider also enabling `id-token: write` if provenance attestation is wanted.
+**2. Create the `quick-studio` organization** at <https://www.npmjs.com/org/create>. Free for
+public packages. There is no CLI for org *creation* (`npm org` only manages members of an org
+that already exists), which is why this step cannot be automated. Creating the org is what
+reserves the **entire** `@quick-studio/*` namespace — you do not need to publish placeholder
+packages for each platform.
 
-**5. Push the first `v*` tag.** This is what triggers both `release.yml` (11.2) and
-`publish.yml` (11.4). Do it only after 11.4 has landed — a tag pushed earlier runs the old
-two-platform release workflow and burns a version number.
+**3. Publish the unscoped placeholder** to hold `quick-studio` itself. A ready-to-publish
+package is prepared (see the session notes / scratchpad `npm-placeholder/`); it is a minimal
+`0.0.1` that states the project is in development and points at the repo. Publishing it is a
+public, effectively irreversible act — npm only allows unpublishing within 72 hours, and the
+name stays blocked afterwards either way — so read the manifest before you push it.
+
+## Before the first real release
+
+**4. Wire the git remote.** `git remote -v` is currently empty, so `.github/workflows/release.yml`
+has never run and the README's `../../releases` links resolve to nothing.
+
+**5. Add `NPM_TOKEN` to GitHub repository secrets.** Use an npm **automation** token — a
+classic publish token tied to interactive 2FA cannot work unattended in CI. Story 11.4's
+`publish.yml` reads it. If provenance attestation is wanted, also grant `id-token: write`.
+
+**6. Push the first `v*` tag — but only after Story 11.4 has landed.** A tag pushed earlier
+triggers the old two-platform `release.yml` and burns a version number for a release you do
+not want.
 
 ## Accepted, deliberately not solved by this epic
 
-- **Code signing / notarization.** An unsigned `.exe` downloaded from GitHub Releases trips
-  Windows SmartScreen; an unsigned Mach-O trips macOS Gatekeeper. Both cost money and identity
-  verification. The epic's answer is to make **npm the primary channel**, which sidesteps both
-  entirely — the standalone binary stays available for people who want it and accept the
-  warning. If signing is wanted later it is its own epic (certificates, secrets, notarization
-  round-trips in CI).
-- **In-place binary self-update.** Story 11.5 deliberately delegates instead of self-replacing.
-  Replacing a running executable on Windows requires a rename-then-replace dance and a restart;
-  npm and npx already solve updating for the primary channel.
-- **Homebrew tap / Scoop bucket / winget manifest.** Straightforward once releases with
-  checksums exist (Story 11.2 produces `SHA256SUMS`, which is what all three want), but each is
-  an external repository with its own review process. Post-epic work.
+- **macOS.** A later phase, by design. Adding it means adding rows to the shared platform
+  list and letting the keyring gate prove the leg — not restructuring anything.
+- **Code signing / notarization.** An unsigned `.exe` from GitHub Releases trips Windows
+  SmartScreen. The epic's answer is that **npm is the primary channel**, which sidesteps it
+  entirely; the standalone binary stays available for people who accept the warning. Signing
+  is its own epic (certificates, secrets, CI round-trips).
+- **In-place binary self-update.** Story 11.5 delegates instead of self-replacing. Replacing a
+  running executable on Windows needs a rename-then-replace dance and a restart, and npm/npx
+  already solve updating for the primary channel.
+- **Homebrew tap / Scoop bucket / winget manifest.** Straightforward once releases carry
+  checksums (11.2 emits `SHA256SUMS`, which is what all three consume), but each is an external
+  repository with its own review process. Post-epic.
 - **Windows-on-ARM.** No runner, no demand signal yet.

@@ -1266,9 +1266,13 @@ So that restoring my session reopens each tab against the right database.
 
 **Hard invariants — must not break.** Default loopback binding, the per-boot session token, the Origin/Host gates, the RPC contract, and the Port-Exposure Warning stay byte-for-byte unchanged — this epic changes *packaging* and *pre-boot CLI decisions*, never the Core's security surface. The Epic 2 promise that **Ephemeral mode never writes to disk** binds every story here: an update check, a version cache, and a setup wizard are all disk writes, and none of them may happen in Ephemeral mode.
 
-**Out of scope:** code signing and notarization (Windows SmartScreen and macOS Gatekeeper friction on the *standalone binary* channel is accepted and documented — npm is the recommended path precisely because it sidesteps both); Homebrew/Scoop/winget manifests; true in-place binary self-replacement (11.5 deliberately delegates instead — see its spec); Windows-on-ARM.
+**Platform scope — Windows and Linux are first-class; macOS is a later phase.** The product must be OS-agnostic, and this epic delivers that for **windows-x64, linux-x64, and linux-arm64**. macOS is deliberately deferred to a follow-up phase rather than half-shipped: the `@napi-rs/keyring` spike records darwin as *pending CI, expected GO* and never actually validated it, so shipping a darwin binary today would mean shipping an unvalidated keychain path. Every seam this epic builds — the platform map in the shim, the release matrix, the packaging script — must therefore be **table-driven, so adding darwin later is adding rows, not restructuring**. `docs/keyring-spike-decision.md` currently claims darwin binaries ship; that claim is false and 11.2 corrects it.
 
-**Manual prerequisites (NOT loop-executable — the operator does these once).** Wiring the git remote, pushing the first `v*` tag, creating the npm access token and adding it to GitHub secrets as `NPM_TOKEN`, and deciding scoped vs unscoped platform-package names. Every story below is scoped to what a loop can actually do: code, workflows, generated manifests, and docs.
+**Package naming — decided.** The main package is **unscoped `quick-studio`** (so the one-command promise stays `npx quick-studio <db-url>`), and the per-platform binary packages live under the **`@quick-studio` scope** (`@quick-studio/linux-x64`, `@quick-studio/win32-x64`, …). This is the esbuild layout (`esbuild` + `@esbuild/linux-x64`) and it means the org owns the whole `@quick-studio/*` namespace while the unscoped name protects the npx invocation.
+
+**Out of scope:** macOS binaries (a later phase — see the platform-scope note above); code signing and notarization (Windows SmartScreen friction on the *standalone binary* channel is accepted and documented — npm is the recommended path precisely because it sidesteps it); Homebrew/Scoop/winget manifests; true in-place binary self-replacement (11.5 deliberately delegates instead — see its spec); Windows-on-ARM.
+
+**Manual prerequisites (NOT loop-executable — the operator does these once).** Creating the `quick-studio` npm organization (which is what actually reserves the `@quick-studio/*` scope), publishing a placeholder to hold the unscoped `quick-studio` name, wiring the git remote, adding an npm automation token to GitHub secrets as `NPM_TOKEN`, and pushing the first `v*` tag. See `epic-11-manual-prereqs.md`. Every story below is scoped to what a loop can actually do: code, workflows, generated manifests, and docs.
 
 ### Story 11.1: CLI surface — `--help`, `--version`, and an explicit `--ephemeral`
 
@@ -1292,15 +1296,19 @@ So that the tool behaves like a real CLI instead of erroring on the first thing 
 
 ### Story 11.2: Release matrix on native runners, with checksums and a keyring gate
 
-As a user on macOS or ARM,
+As a Windows or Linux user on whatever machine I happen to have,
 I want a binary for my platform that actually works,
-So that "download and run" is not a Linux/Windows-x64-only promise.
+So that "download and run" is not an x64-only promise — and so that adding macOS later is a change of data, not of design.
 
 **Acceptance Criteria:**
 
 **Given** a pushed `v*` tag
 **When** `release.yml` runs
-**Then** it produces binaries for linux-x64, linux-arm64, darwin-x64, darwin-arm64, and windows-x64 — each compiled **on its own native runner**, not cross-compiled, because `@napi-rs/keyring` is a native NAPI addon whose platform binding is resolved at build time and cannot be assumed to embed correctly across targets
+**Then** it produces binaries for **windows-x64, linux-x64, and linux-arm64** — each compiled **on its own native runner**, not cross-compiled, because `@napi-rs/keyring` is a native NAPI addon whose platform binding is resolved at build time and cannot be assumed to embed correctly across targets
+
+**Given** the matrix definition
+**When** macOS is added in a later phase
+**Then** it is adding entries to a table, not restructuring the workflow — the matrix, the shim's platform map (11.3), and the packaging script (11.4) are all driven from one platform list, and no darwin binary is published until its keyring leg has actually gone green
 
 **Given** each matrix leg
 **When** the binary is compiled

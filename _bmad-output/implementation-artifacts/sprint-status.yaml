@@ -170,8 +170,15 @@ development_status:
   #   11-6 and 11-7 are CLI-UX stories, independent of the npm chain (only 11-1's flag surface),
   #   but they SHARE src/core/store-presence.ts: 11-6 introduces it, 11-7 consumes it. Whichever
   #   runs first creates it — never two divergent presence checks (see both specs' Block-Ifs).
-  # MANUAL PREREQS (operator, not loop): git remote wired, first v* tag pushed,
-  # NPM_TOKEN in repo secrets, scoped-vs-unscoped platform package naming decided.
+  # PLATFORMS: win32-x64 + linux-x64 + linux-arm64 this epic. macOS is a LATER PHASE
+  # (keyring spike never validated darwin). 11-2/11-3/11-4 consume ONE shared platform
+  # list so adding darwin later is adding rows, not restructuring.
+  # NAMING (decided): main package unscoped `quick-studio`; per-platform binary packages
+  # scoped `@quick-studio/<platform>-<arch>`. esbuild layout — keeps `npx quick-studio` one command.
+  # MANUAL PREREQS (operator, not loop): npm login, create the `quick-studio` npm ORG
+  # (web-only; reserves the whole @quick-studio/* scope), publish the unscoped placeholder,
+  # git remote wired, NPM_TOKEN in repo secrets, first v* tag pushed AFTER 11-4 lands.
+  # See _bmad-output/planning-artifacts/epic-11-manual-prereqs.md.
   # Cross-cutting invariant: Ephemeral mode never writes to disk (Epic 2) — binds 11-5's
   # cache and 11-6's setup. Loopback/token/gates/RPC/exposure warning unchanged throughout.
   epic-11: backlog

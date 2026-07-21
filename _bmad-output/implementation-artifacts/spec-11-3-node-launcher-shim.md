@@ -24,6 +24,7 @@ context:
 - `stdio: "inherit"` is required, not optional: the Core writes its listening URL and the Port-Exposure Warning to stderr, and Story 11.6's passphrase prompt needs a real TTY on stdin. A piped/captured stdio would break both.
 - Signals (`SIGINT`, `SIGTERM`) are forwarded to the child, and the shim exits only **after** the child does, propagating the child's exit code (and, where the platform reports one, a signal death as the conventional `128 + signum`). Ctrl-C through the shim must end the session as cleanly as Ctrl-C does today.
 - A resolution failure produces an actionable message on stderr naming the detected `platform-arch`, the supported list, and the Releases fallback — never a raw `MODULE_NOT_FOUND` stack.
+- The supported-platform set is **windows-x64, linux-x64, linux-arm64** for this epic, and must match Story 11.2's release matrix and Story 11.4's packaging list exactly — one shared platform list, three consumers. macOS is a later phase and the shim must say so by name rather than failing generically.
 
 **Block If:**
 - If `require.resolve` of the platform package cannot work under npm's install layouts that matter here (a global install, an `npx` cache, a hoisted vs nested `node_modules`, a pnpm-style symlinked store), STOP and flag it — the resolution strategy is the load-bearing assumption of both this story and 11.4, and guessing wrong produces a package that works on the author's machine only.
@@ -42,7 +43,7 @@ context:
 | Normal run, no Bun | Node 18+, platform package present, `quick-studio postgres://x` | Binary spawns with `["postgres://x"]`; stderr shows the listening URL; UI opens | none |
 | Exit-code passthrough | binary exits 1 (e.g. invalid `QS_PORT`, `bin/quick-studio.ts:34-35`) | Shim exits 1 | Code mirrored exactly |
 | Ctrl-C | `SIGINT` to the shim | Forwarded to the child; the Core's `ShutdownController` runs; shim exits after the child | Never orphans the child |
-| Unsupported platform | e.g. Windows-on-ARM, or a platform with no published package | stderr: detected `win32-arm64`, supported list, Releases link; exit non-zero | No stack trace |
+| Unsupported platform | e.g. **darwin** (a later phase), or Windows-on-ARM | stderr: detected `darwin-arm64`, the supported list, and the Releases link; exit non-zero | No stack trace. macOS must read as "not yet supported", never as a broken install |
 | Optional dependency skipped | install ran with `--no-optional` or the optional install failed | Same actionable message as above — this is the most likely real-world failure and must read as a fixable install problem | No stack trace |
 | Argument fidelity | `quick-studio --ephemeral "postgres://u:p@h/db?x=1&y=2"` | Child receives both argv entries byte-identical | Never re-quoted or re-parsed |
 | No arguments | `quick-studio` | Child receives an empty argv — bare-command behavior is entirely the binary's business (Story 11.7) | none |
@@ -60,7 +61,7 @@ context:
 
 ## Code Map
 
-- `bin/quick-studio.cjs` (new) — the launcher. Platform map (`linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64`) → package name → `require.resolve` → `spawn` → signal forwarding → exit mirroring.
+- `bin/quick-studio.cjs` (new) — the launcher. Platform map (`win32-x64`, `linux-x64`, `linux-arm64`) → scoped package name (`@quick-studio/<platform>-<arch>`) → `require.resolve` → `spawn` → signal forwarding → exit mirroring. The map is a plain object literal so the later macOS phase adds two entries and nothing else.
 - `package.json` — repoint `bin.quick-studio` to `bin/quick-studio.cjs`. Note the published manifest is **generated** in 11.4, so this edit governs the repo's own metadata; keep the two consistent. `engines` gains a `node` floor; `engines.bun` becomes a development statement only.
 - `bin/quick-studio.ts` — unchanged. Called out explicitly so a reviewer does not "helpfully" unify the two entries.
 - `src/core/…` — untouched. This story adds no product code.
