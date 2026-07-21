@@ -134,6 +134,41 @@ export function pgSchemaScope(sql: postgres.Sql, schema: string | undefined): Pg
 }
 
 /**
+ * The per-column PRIVILEGE predicate for the INDEX query (Story 10.3).
+ *
+ * The index query reads the raw system catalogs (`pg_index`/`pg_class`/`pg_attribute`),
+ * which carry NO privilege filter of their own; the columns query reads
+ * `information_schema.columns`, which does. This fragment is the privilege clause of
+ * that view's OWN `WHERE` — `pg_has_role(relowner, 'USAGE') OR has_column_privilege(oid,
+ * attnum, 'SELECT, INSERT, UPDATE, REFERENCES')` — not an invented approximation, so a
+ * (table, column) pair a restricted role may not read is never FETCHED by the index
+ * query either. In-query on purpose: a post-`assembleSchema` trim would already have
+ * carried the index name, uniqueness flag and out-of-grant column name across the wire.
+ *
+ * It mirrors the PRIVILEGE axis ONLY — not that view's full visibility predicate, which
+ * also applies `NOT a.attisdropped`, `c.relkind IN ('r','v','f','p')` and
+ * `NOT pg_is_other_temp_schema(...)`. Deliberate: a dropped column cannot appear in
+ * `ix.indkey` at all, and a surviving non-table relkind (a matview's index, say) still
+ * cannot spawn a phantom tree node, because `assembleSchema` only decorates tables the
+ * COLUMNS query already produced. Widening past the privilege axis is out of scope here.
+ *
+ * The aliases are the ones the index query ALREADY binds — `pg_class t` (`t.oid`,
+ * `t.relowner`) and `pg_attribute a` (`a.attnum`) — so this needs no extra join and
+ * evaluates against exactly the (table, column) pair its row describes. It references no
+ * version-gated catalog column (unlike `conparentid`/DW-42), so no server-version
+ * branching. Per row it costs a syscache lookup, but `pg_has_role` short-circuits true
+ * for the owner/superuser case, which is the common one.
+ *
+ * `sql` is passed purely as the template TAG (the fragment binds nothing) rather than
+ * closed over, which is what makes the exact predicate text assertable from a
+ * never-connected client — same precedent as {@link pgSchemaScope} and
+ * {@link pgSupportsConparentid}.
+ */
+export function pgIndexColumnVisibility(sql: postgres.Sql): PgFragment {
+  return sql`(pg_has_role(t.relowner, 'USAGE') OR has_column_privilege(t.oid, a.attnum, 'SELECT, INSERT, UPDATE, REFERENCES'))`;
+}
+
+/**
  * Force the EXTENDED/parameterized protocol. postgres.js decides simple vs extended
  * by `'simple' in options ? options.simple : args.length === 0`, so with no bind
  * params it defaults to the SIMPLE protocol (which runs every `;`-command). The
@@ -286,6 +321,13 @@ export function createPostgresDriver(url: string): Driver {
       // with a varlena column; user schemas can never start with `pg_`). Matview indexes
       // that survive this filter still can't spawn a phantom table: `assembleSchema` only
       // attaches indexes to tables already produced by the column query.
+      //
+      // Story 10.3 — the third conjunct. `${idxScope}` answers *which schema*;
+      // `${idxVisibility}` answers *which (table, column) the role may see*, using
+      // `information_schema.columns`'s own privilege clause so this query hides what the
+      // columns query hides. Orthogonal, both required — rationale in
+      // {@link pgIndexColumnVisibility}.
+      const idxVisibility = pgIndexColumnVisibility(sql);
       const indexRows = (await sql`
         SELECT
           n.nspname AS table_schema,
@@ -300,6 +342,7 @@ export function createPostgresDriver(url: string): Driver {
         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
         WHERE ${idxScope}
           AND a.attnum > 0
+          AND ${idxVisibility}
         ORDER BY n.nspname, t.relname, i.relname,
                  array_position(string_to_array(ix.indkey::text, ' ')::int[], a.attnum::int)
       `) as unknown as readonly PgIndexRow[];
@@ -345,6 +388,11 @@ export function createPostgresDriver(url: string): Driver {
       // `conparentid <> 0`; `${partitionFilter}` adds `AND con.conparentid = 0` on PG 11+
       // to keep only the parent-defined constraint (one ERD edge, not one per partition),
       // and degrades to an empty fragment on PG <= 10 where the column does not exist (DW-42).
+      //
+      // KNOWN GAP, deliberate (Story 10.3): unlike the index query above, this one has NO
+      // per-column privilege predicate — it reads `pg_constraint`/`pg_attribute` raw, so a
+      // restricted role can still see FK column names outside its grants. Explicitly out of
+      // 10.3's scope (its AC covers the index queries); tracked in the deferred-work ledger.
       const fkRows = (await sql`
         SELECT
           con_ns.nspname AS table_schema,

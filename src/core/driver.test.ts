@@ -21,7 +21,12 @@ import {
   type IntrospectedIndex,
 } from "./driver.ts";
 import { buildMysqlConfig, createMutex, mysqlSchemaScope } from "./driver-mysql.ts";
-import { mapUnsafeResult, pgSchemaScope, pgSupportsConparentid } from "./driver-postgres.ts";
+import {
+  mapUnsafeResult,
+  pgIndexColumnVisibility,
+  pgSchemaScope,
+  pgSupportsConparentid,
+} from "./driver-postgres.ts";
 
 /** A synthetic engine/OS error carrying the `code`/`errno` tags drivers surface. */
 function fakeErr(tags: { code?: string; errno?: number }): Error {
@@ -578,23 +583,38 @@ describe("mysqlSchemaScope — pinned introspection scope (Story 10.2)", () => {
 // `n.nspname !~ '^pg_'` would silently resurface every `pg_toast` index for every
 // existing connection — and (b) the PINNED arms carry the schema as a bound ARG, never
 // spliced into the query text.
+/**
+ * The literal SQL text of a fragment: its `strings` parts with each bind slot marked.
+ *
+ * `strings`/`args` are postgres.js INTERNALS, not public API — reached through `unknown`
+ * on purpose. If a postgres.js bump ever renamed them these helpers would throw rather
+ * than fail an assertion, and the real damage would be that every predicate lock below
+ * silently stopped meaning anything. Shared by the 10.2 and 10.3 blocks so that coupling
+ * lives in exactly one place.
+ */
+const textOf = (fragment: unknown): string =>
+  (fragment as { strings: readonly string[] }).strings.join("$?");
+/** The values postgres.js will BIND for a fragment (empty ⇒ pure literal predicate). */
+const argsOf = (fragment: unknown): readonly unknown[] =>
+  (fragment as { args: readonly unknown[] }).args;
+
+/**
+ * Run `fn` against a never-connected postgres.js client (non-routable 127.0.0.1:1), then
+ * end it. `fn` may be async — its promise is awaited BEFORE teardown, so a future async
+ * assertion cannot run after the client is gone or be skipped outright.
+ */
+const withSql = async (
+  run: (sql: ReturnType<typeof postgres>) => void | Promise<void>,
+): Promise<void> => {
+  const sql = postgres("postgres://u:p@127.0.0.1:1/db", { max: 1 });
+  try {
+    await run(sql);
+  } finally {
+    await sql.end({ timeout: 1 });
+  }
+};
+
 describe("pgSchemaScope — pinned introspection scope (Story 10.2)", () => {
-  /** The literal SQL text of a fragment: its `strings` parts with each bind slot marked. */
-  const textOf = (fragment: unknown): string =>
-    (fragment as { strings: readonly string[] }).strings.join("$?");
-  /** The values postgres.js will BIND for a fragment (empty ⇒ pure literal predicate). */
-  const argsOf = (fragment: unknown): readonly unknown[] =>
-    (fragment as { args: readonly unknown[] }).args;
-
-  const withSql = async (run: (sql: ReturnType<typeof postgres>) => void): Promise<void> => {
-    const sql = postgres("postgres://u:p@127.0.0.1:1/db", { max: 1 });
-    try {
-      run(sql);
-    } finally {
-      await sql.end({ timeout: 1 });
-    }
-  };
-
   test("UNPINNED: the four predicates are today's, verbatim, with NOTHING bound", async () => {
     await withSql((sql) => {
       const scope = pgSchemaScope(sql, undefined);
@@ -655,6 +675,81 @@ describe("pgSchemaScope — pinned introspection scope (Story 10.2)", () => {
       const scope = pgSchemaScope(sql, "  reporting  ");
       for (const fragment of Object.values(scope)) expect(argsOf(fragment)).toEqual(["reporting"]);
     });
+  });
+});
+
+// Story 10.3 — the index query's per-column PRIVILEGE alignment, locked on two axes.
+//
+// (1) The fragment's text. Ground truth is Postgres's own `information_schema.columns`
+// view — `src/backend/catalog/information_schema.sql` in the server source, whose WHERE
+// ends with `pg_has_role(c.relowner, 'USAGE') OR has_column_privilege(c.oid, a.attnum,
+// 'SELECT, INSERT, UPDATE, REFERENCES')`. `EXPECTED` below is that clause re-aliased to
+// the index query's `t`/`a`. Being a literal copy, this test is a change-DETECTOR: it
+// catches accidental drift, NOT a deliberate edit made in both places at once. Anyone
+// touching it must re-check the predicate against the view definition above, since a
+// silently weaker check would let the index query surface a (table, column) pair the
+// columns query hides. If a future PG release adds a privilege to that list, the two
+// diverge and this test will not notice.
+//
+// (2) The SPLICE. A correct fragment nobody interpolates is worth nothing, and deleting
+// `AND ${idxVisibility}` from the query would still compile and still pass every
+// assertion about the fragment itself. The composed query is only reachable through a
+// live connection, so the splice is asserted against the module's own SOURCE TEXT
+// instead — the one offline way to prove the predicate actually reaches the WHERE.
+describe("pgIndexColumnVisibility — index/columns privilege alignment (Story 10.3)", () => {
+  // Postgres's own `information_schema.columns` privilege check, re-aliased to `t`/`a`.
+  const EXPECTED =
+    "(pg_has_role(t.relowner, 'USAGE') OR has_column_privilege(t.oid, a.attnum, 'SELECT, INSERT, UPDATE, REFERENCES'))";
+
+  test("the predicate is information_schema.columns' own check, character for character", async () => {
+    await withSql((sql) => {
+      expect(textOf(pgIndexColumnVisibility(sql))).toBe(EXPECTED);
+    });
+  });
+
+  test("it binds NOTHING — a pure literal predicate, no parameters", async () => {
+    await withSql((sql) => {
+      expect(argsOf(pgIndexColumnVisibility(sql))).toEqual([]);
+    });
+  });
+
+  // The fragment carries no FROM clause of its own: it is only correct because the index
+  // query already binds `pg_class t` and `pg_attribute a`. It must also be parenthesized
+  // as ONE unit, or `AND ${fragment}` would re-associate with the sibling conjuncts
+  // (`${idxScope}`, `a.attnum > 0`) around its internal `OR` and widen the result set —
+  // so depth must never return to 0 before the final character.
+  test("it is one parenthesized unit over the t./a. aliases the index query binds", async () => {
+    await withSql((sql) => {
+      const text = textOf(pgIndexColumnVisibility(sql));
+      expect(text).toContain("t.relowner");
+      expect(text).toContain("t.oid");
+      expect(text).toContain("a.attnum");
+      let depth = 0;
+      let closedEarly = false;
+      for (const [i, ch] of [...text].entries()) {
+        if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+        if (depth === 0 && i < text.length - 1) closedEarly = true;
+      }
+      expect(closedEarly).toBe(false);
+      expect(depth).toBe(0);
+    });
+  });
+
+  // The splice itself. Reads the adapter's source rather than trusting that the one call
+  // site stays wired — an unused `const idxVisibility` compiles clean, so nothing else in
+  // the suite would notice the privilege filter quietly leaving the query.
+  test("the index query's WHERE actually splices the predicate, beside scope and attnum", async () => {
+    const source = await Bun.file(
+      new URL("./driver-postgres.ts", import.meta.url).pathname,
+    ).text();
+    const where = source.slice(
+      source.indexOf("FROM pg_index ix"),
+      source.indexOf("ORDER BY n.nspname, t.relname, i.relname"),
+    );
+    expect(where).toContain("WHERE ${idxScope}");
+    expect(where).toContain("AND a.attnum > 0");
+    expect(where).toContain("AND ${idxVisibility}");
   });
 });
 
