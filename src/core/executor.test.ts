@@ -77,7 +77,10 @@ function makeSeams(opts: {
   const seams: ConnectionSeams = {
     runQuery: async (sql, params) => {
       queryCalls.push({ sql, params });
-      if (opts.queryThrows) throw opts.queryThrows;
+      // Presence, not truthiness: `queryThrows` is `unknown`, so a falsy sentinel
+      // (`0`, `""`) is a legitimate thing to throw — a truthy check would silently
+      // disable the seam and turn the failed-mutation cases into passing ones.
+      if (opts.queryThrows !== undefined) throw opts.queryThrows;
       return opts.queryResult ?? { columns: [], rows: [], rowsAffected: 1 };
     },
     runReadOnly: async (sql, params) => {

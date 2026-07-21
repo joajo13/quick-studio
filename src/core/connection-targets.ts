@@ -43,9 +43,10 @@ export type ConnectionSeams = {
   readonly runQuery: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
   readonly runReadOnly: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
   /**
-   * The target's engine. Answered from the CONNECTION (its url scheme), never by
-   * re-introspecting the catalog — the engine cannot go stale when a DDL runs, so this
-   * seam is unaffected by `invalidateSchema`.
+   * The target's engine. Read off the memo the connection's first open already populated
+   * and never RE-introspected: the engine is fixed by the connection's url scheme, so it
+   * cannot go stale when a DDL runs and this seam deliberately ignores `invalidateSchema`.
+   * (Opening a cold target still introspects once, as any seam on it would.)
    */
   readonly getEngine: () => Promise<DbEngine>;
   readonly getSchema: () => Promise<DatabaseSchema>;
@@ -116,8 +117,8 @@ function seamsFor(manager: ConnectionManager): ConnectionSeams {
     // 1:1, like every other seam — and deliberately NOT `(await manager.getSchema()).engine`:
     // that routed the engine through the memoized (and now bustable) catalog, so every
     // statement following a schema-mutating one paid a full re-introspection to learn a value
-    // fixed by the connection's url scheme. `manager.getEngine()` reads it off the connection
-    // without honoring the stale flag.
+    // fixed by the connection's url scheme. `manager.getEngine()` reads it off the already-
+    // populated memo without honoring the stale flag, so only the FIRST open pays.
     getEngine: () => manager.getEngine(),
     getSchema: () => manager.getSchema(),
     quoteIdent: (ident) => manager.quoteIdent(ident),

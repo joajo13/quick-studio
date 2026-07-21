@@ -42,7 +42,13 @@ export type ConnectionManager = {
   /**
    * Open (once) and introspect the connection, returning a neutral
    * {@link ConnectResult}. Idempotent: subsequent calls reuse the live connection
-   * and the cached result.
+   * and the cached result — re-introspecting first when {@link
+   * ConnectionManager.invalidateSchema} marked it stale, so the result carries the
+   * current catalog. After {@link ConnectionManager.close} it stops serving the memo
+   * and answers the neutral `{status:"failed", failure:"network"}` "connection is
+   * unavailable" payload instead, so a call that races shutdown never reports a
+   * connection that is already being released. Never throws for a classified driver
+   * failure — that is the payload, not an exception.
    */
   connect(): Promise<ConnectResult>;
   /**
@@ -54,14 +60,17 @@ export type ConnectionManager = {
   getSchema(): Promise<DatabaseSchema>;
   /**
    * The engine of the live connection (`postgres` / `mysql`). Opens the driver
-   * lazily+once, then answers from the connection's own identity — it deliberately does
-   * NOT honor the stale flag, because the engine is a property of the CONNECTION (fixed
-   * by its url scheme), not of the catalog, so it cannot go stale when a DDL runs.
-   * Routing it through {@link ConnectionManager.getSchema} instead would make every
-   * statement after a schema-mutating one pay a FULL re-introspection just to learn a
-   * value that never changes (five introspection queries on Postgres, serialized before
-   * the statement) — N confirmed statements would cost N re-introspections.
-   * Throws if the connection cannot be opened or was closed, exactly like `getSchema`.
+   * lazily+once — which is what populates the memo — and then reads the engine straight
+   * off that memo, deliberately WITHOUT honoring the stale flag: the engine is a property
+   * of the CONNECTION (fixed by its url scheme), not of the catalog, so no DDL can change
+   * it and a stale memo is a perfectly valid source for it. (Opening a cold connection
+   * still introspects once, exactly as `connect`/`getSchema` do; what this seam avoids is
+   * every SUBSEQUENT call.) Routing it through {@link ConnectionManager.getSchema} instead
+   * would make every statement after a schema-mutating one pay a FULL re-introspection
+   * just to learn a value that never changes (five introspection queries on Postgres,
+   * serialized before the statement) — N confirmed statements would cost N
+   * re-introspections. Throws if the connection cannot be opened or was closed, exactly
+   * like `getSchema`.
    */
   getEngine(): Promise<DbEngine>;
   /**
@@ -156,6 +165,19 @@ export function createConnectionManager(
   // that answer is still in flight → the refresh lands, writes `[a,b]` and clears the flag,
   // so `c` never appears and nothing will ever re-introspect again.
   let schemaGeneration = 0;
+  // Ceiling on how many turns ONE `refreshIfStale` call may spend chasing a current answer
+  // before it settles for the memo it has. The loop below only makes progress while
+  // introspection out-runs invalidation; sustained schema-mutating traffic on a target
+  // (every success invalidates) inverts that, and WITHOUT this bound a single
+  // `getSchema()`/`connect()` never resolves — an unbounded hang on the read path, not a
+  // slow read. Measured against a driver that invalidates once per in-flight `listSchema`:
+  // one reader re-introspected indefinitely. On giving up the stale flag stays SET, so this
+  // caller knowingly serves a memo at most a few DDLs behind and the NEXT reader picks the
+  // chase back up — bounded staleness is the cheaper failure than bounded-by-nothing latency.
+  // Three turns covers the real cases: a lone reader commits on turn 1, and a reader that
+  // joins someone else's already-in-flight (therefore possibly stale) answer still gets its
+  // own introspection on turn 2.
+  const MAX_REFRESH_TURNS = 3;
 
   /** Best-effort driver teardown — never throws (shutdown must not be blocked). */
   async function safeClose(d: Driver): Promise<void> {
@@ -224,12 +246,16 @@ export function createConnectionManager(
    * that predate it, so a caller whose invalidation landed while the joined refresh was
    * already in flight is handed a provably-stale answer. Such a caller re-checks the flag
    * and starts its OWN introspection instead of accepting it — otherwise the newest DDL
-   * would be invisible forever (nothing else ever re-arms the flag).
+   * would be invisible forever (nothing else ever re-arms the flag). It is bounded by
+   * {@link MAX_REFRESH_TURNS} so a writer that out-runs introspection can never hang a
+   * reader; see that constant for why bounded staleness is the right side to fail on.
    */
   async function refreshIfStale(d: Driver): Promise<void> {
     // `closed` stops the loop: after shutdown there is nothing left to refresh, and
-    // re-introspecting over a released driver would only resurrect a dead memo.
-    while (schemaStale && !closed) {
+    // re-introspecting over a released driver would only resurrect a dead memo. Joining
+    // someone else's flight counts as a turn too — otherwise a caller could sit in the
+    // join branch forever while other callers keep installing newer flights.
+    for (let turn = 0; schemaStale && !closed && turn < MAX_REFRESH_TURNS; turn++) {
       const pending = refreshing;
       if (pending !== null) {
         // Join the single flight, then re-test the flag: still set ⇒ that answer did not
@@ -290,7 +316,20 @@ export function createConnectionManager(
       }
       // Re-read AFTER the await: a successful refresh REPLACED `cached`, and returning
       // the pre-await binding would hand the caller the stale object it just busted.
-      return cached;
+      //
+      // The re-read can come back NULL, and the compiler will not say so: TypeScript keeps
+      // the narrowing from the `cached !== null` test above across the await, while
+      // `close()` latches `closed`, awaits the in-flight refresh, and only THEN nulls
+      // `cached` — so a `connect` parked on that very refresh resumes into a torn-down
+      // manager. Reproduced: `connect()` resolved `null`, and the RPC layer wraps whatever
+      // it gets (`okReply(await seams.connect())`), shipping `result: null` to a UI that
+      // reads `reply.result.status`. Answer the same neutral shutdown failure the
+      // `closed` guard at the top of this function returns.
+      const fresh = cached;
+      if (fresh === null) {
+        return { status: "failed", failure: "network", message: "connection is unavailable" };
+      }
+      return fresh;
     }
     // A concurrent attempt is already open — join it instead of opening a second.
     if (inflight !== null) return inflight;
@@ -363,11 +402,10 @@ export function createConnectionManager(
       // honoring the stale flag here would charge every statement after a schema-mutating
       // one a full re-introspection (N confirmed statements ⇒ N `listSchema`s) for a value
       // that is already known. A stale memo is a perfectly valid source for it.
-      await ensureDriver();
+      const d = await ensureDriver();
       if (cached !== null && cached.status === "connected") return cached.schema.engine;
       // Defensive: a live driver with no cached schema (shouldn't happen) — introspect
       // under the SAME pinned scope, mirroring `getSchema`'s own fallback.
-      const d = await ensureDriver();
       return (await d.listSchema(pinnedSchema)).engine;
     },
 
@@ -431,9 +469,13 @@ export function createConnectionManager(
       // next `connect()` would answer `{status:"connected"}` over a driver we already
       // closed instead of the documented "connection is unavailable" failure. The commit
       // guard in `refreshIfStale` already refuses to write once `closed` is latched;
-      // waiting here also guarantees the refresh is not still reading the driver we are
-      // about to release. Its failure is swallowed — shutdown must never be blocked by,
-      // or made to throw from, a refresh nobody is waiting on any more.
+      // waiting here drains the flight we can see so it is not still reading the driver we
+      // are about to release. Note what actually makes that total: `closed` is latched
+      // ABOVE, and `refreshIfStale`'s loop tests it, so no NEW flight can start after this
+      // point — the single flight captured here is therefore the last one. Loosen that loop
+      // condition and this await stops being sufficient. Its failure is swallowed —
+      // shutdown must never be blocked by, or made to throw from, a refresh nobody is
+      // waiting on any more.
       const refresh = refreshing;
       if (refresh !== null) {
         try {

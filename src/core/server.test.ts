@@ -665,6 +665,10 @@ describe("targeted read RPCs resolve by connectionId (Story 10.4)", () => {
   const TARGET_URL = "postgres://targetuser:targetpw@target-host:5432/targetdb";
   /** A saved connection whose driver refuses the handshake (the classified-failure path). */
   const FAILING_URL = "postgres://baduser:badpw@fail-host/db";
+  /** A saved connection carrying a PINNED introspection scope (Story 10.2). Its own url,
+   *  so scoping it cannot move any other case in this block. */
+  const PINNED_URL = "postgres://pinuser:pinpw@pin-host/pindb";
+  const PINNED_SCOPE = "reporting";
 
   /** The boot connection's catalog — `widgets` exists ONLY here. */
   const BOOT_SCHEMA: DatabaseSchema = {
@@ -688,6 +692,30 @@ describe("targeted read RPCs resolve by connectionId (Story 10.4)", () => {
       {
         schema: "public",
         name: "invoices",
+        columns: [{ name: "id", dataType: "integer", nullable: false }],
+        primaryKey: ["id"],
+        indexes: [],
+        foreignKeys: [],
+      },
+    ],
+  };
+
+  /** The pinned target's catalog — it SPANS two schemas, so the pin is the only thing
+   *  that can hide `public.orders` from a read that resolves through this connection. */
+  const PINNED_TARGET_SCHEMA: DatabaseSchema = {
+    engine: "postgres",
+    tables: [
+      {
+        schema: "public",
+        name: "orders",
+        columns: [{ name: "id", dataType: "integer", nullable: false }],
+        primaryKey: ["id"],
+        indexes: [],
+        foreignKeys: [],
+      },
+      {
+        schema: PINNED_SCOPE,
+        name: "metrics",
         columns: [{ name: "id", dataType: "integer", nullable: false }],
         primaryKey: ["id"],
         indexes: [],
@@ -724,6 +752,7 @@ describe("targeted read RPCs resolve by connectionId (Story 10.4)", () => {
     const catalogs = new Map<string, DatabaseSchema>([
       [BOOT_URL, BOOT_SCHEMA],
       [TARGET_URL, TARGET_SCHEMA],
+      [PINNED_URL, PINNED_TARGET_SCHEMA],
     ]);
     const factory: DriverFactory = (url: string) => {
       const catalog = (): DatabaseSchema => catalogs.get(url) ?? BOOT_SCHEMA;
@@ -734,9 +763,17 @@ describe("targeted read RPCs resolve by connectionId (Story 10.4)", () => {
             throw new DriverConnectionError("auth", "the database rejected the provided credentials");
           }
         },
-        async listSchema() {
+        async listSchema(pinnedSchema?: string) {
           introspections[url] = (introspections[url] ?? 0) + 1;
-          return catalog();
+          const full = catalog();
+          // Honor the pin the way a real driver does (Story 10.2): the introspection
+          // itself is SCOPED, so an out-of-scope table is simply absent from the catalog
+          // every read path validates against. Discarding the argument — as this fake used
+          // to — made the 10.2 × 10.4 interaction untestable. Unpinned targets (the boot
+          // manager, the `target` connection) are handed `undefined` and see everything,
+          // so every other assertion in this block is unaffected.
+          if (pinnedSchema === undefined) return full;
+          return { ...full, tables: full.tables.filter((t) => t.schema === pinnedSchema) };
         },
         async query(text: string) {
           // The fake's whole DDL vocabulary: `CREATE TABLE <name>` appends to THIS url's
@@ -989,6 +1026,92 @@ describe("targeted read RPCs resolve by connectionId (Story 10.4)", () => {
       // The busts are real, though: the next actual catalog read pays exactly ONE refresh.
       await rpc(c, { method: "connect", params: { connectionId: savedId } });
       expect(introspections[TARGET_URL]).toBe(2);
+    });
+  });
+
+  // Story 10.2 × 10.4. `ConnectionSummary.schema` now CLAIMS that a request carrying a
+  // `connectionId` honors that connection's pinned introspection scope — the claim decides
+  // which catalog a targeted read is validated against, and it held no evidence: the fake
+  // driver above discarded the pin. Asserted end to end here, on its own url so the
+  // unpinned cases stay byte-identical.
+  test("a targeted read honors the saved connection's PINNED schema, per connection", async () => {
+    await withTargetedCore(async (c, unpinnedId) => {
+      const added = await (
+        await rpc(c, {
+          method: "connections.add",
+          params: { name: "pinned", url: PINNED_URL, schema: PINNED_SCOPE },
+        })
+      ).json();
+      expect(added.ok).toBe(true);
+      expect(added.result.schema).toBe(PINNED_SCOPE);
+      const pinnedId = added.result.id as string;
+
+      // `public.orders` exists at that url and is absent from what the target answers —
+      // the pin is what scoped the introspection the resolved manager ran.
+      const reply = await (await rpc(c, { method: "connect", params: { connectionId: pinnedId } })).json();
+      expect(reply.ok).toBe(true);
+      const qualified = (reply.result.schema as DatabaseSchema).tables.map((t) => `${t.schema}.${t.name}`);
+      expect(qualified).toEqual([`${PINNED_SCOPE}.metrics`]);
+
+      // Load-bearing for the read path, not cosmetic: a table outside the pin validates
+      // against the SCOPED catalog and is `not_found` — never quietly read anyway.
+      const outOfScope = await rpc(c, {
+        method: "table.rows",
+        params: { schema: "public", table: "orders", page: 1, pageSize: 10, connectionId: pinnedId },
+      });
+      expect(outOfScope.status).toBe(404);
+      expect((await outOfScope.json()).error.code).toBe("not_found");
+
+      // The scope is PER CONNECTION: the unpinned saved target and the paramless boot call
+      // still see their whole catalogs, unchanged by another connection's pin.
+      const target = await (await rpc(c, { method: "connect", params: { connectionId: unpinnedId } })).json();
+      expect(target.result).toEqual({ status: "connected", schema: TARGET_SCHEMA });
+      const boot = await (await rpc(c, { method: "connect" })).json();
+      expect(boot.result).toEqual({ status: "connected", schema: BOOT_SCHEMA });
+    });
+  });
+
+  // The chat wiring's `getSchema` lambda (`connectionTargets.resolve` → the typed
+  // `NoConnectionTargetError`) lives in `server.ts` and was asserted NOWHERE: `chat.test.ts`
+  // stops at a fake `getSchema` seam, and every case above enters through `/rpc`. Driven here
+  // through the real `/chat/stream` endpoint.
+  //
+  // An UNRESOLVABLE id is the half reachable with no network. `prepareRequest` orders
+  // provider → message → id shape → `getKey` → `getSchema`, and opens the provider stream
+  // only AFTER that: a configured key carries the request past `getKey`, and the resolve miss
+  // ends it before any outbound call. The chunk being the pre-flight `bad_request` — not the
+  // `internal_error` a real call on this bogus key would yield — is itself that proof.
+  test("/chat/stream with an unresolvable connectionId yields the neutral no-connection chunk", async () => {
+    await withTargetedCore(async (c, _savedId, opened) => {
+      const configured = await (
+        await rpc(c, {
+          method: "providers.set",
+          params: { provider: "anthropic", apiKey: "not-a-real-key" },
+        })
+      ).json();
+      expect(configured.ok).toBe(true);
+
+      const res = await fetch(`${c.url}/chat/stream`, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-qs-token": c.token },
+        body: JSON.stringify({ provider: "anthropic", message: "how many invoices?", connectionId: "ghost" }),
+      });
+      // A validation failure always rides INSIDE the stream — the status stays 200.
+      expect(res.status).toBe(200);
+      const raw = await res.text();
+      const chunks = raw
+        .split("\n\n")
+        .filter((frame) => frame.startsWith("data: "))
+        .map((frame) => JSON.parse(frame.slice("data: ".length)));
+
+      // Exactly one terminal error chunk: no delta was committed and no `done` frame closed
+      // it, so nothing was streamed from a provider.
+      expect(chunks).toEqual([{ type: "error", code: "bad_request", message: "no active connection" }]);
+      // Neutral by construction: the unresolvable id never rides back to the caller…
+      expect(raw).not.toContain("ghost");
+      // …and no driver was opened for a target that does not exist — chat does not fall
+      // back to the boot connection when an id was explicitly sent.
+      expect(opened).toEqual([]);
     });
   });
 });

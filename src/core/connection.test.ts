@@ -429,23 +429,34 @@ const SAMPLE_SCHEMA_V3: DatabaseSchema = {
  * A fake driver whose `listSchema` reads a MUTABLE schema and counts every call, so a
  * re-introspection (vs a memo hit) is directly observable. `nextError` makes exactly the
  * next introspection throw (the refresh-failure path); `gate`, when set, holds every
- * introspection open so two concurrent readers can be proven to share one call.
+ * introspection open so two concurrent readers can be proven to share one call;
+ * `onIntrospect`, when set, runs at the start of every introspection — the seam for
+ * simulating a writer that keeps committing DDL while a reader is refreshing.
  */
+type RefreshableState = {
+  schema: DatabaseSchema;
+  nextError: unknown;
+  gate: Promise<void> | null;
+  onIntrospect: (() => void) | null;
+};
+
 function refreshableDriver(): {
   factory: DriverFactory;
   counts: { listSchema: number };
-  state: { schema: DatabaseSchema; nextError: unknown; gate: Promise<void> | null };
+  state: RefreshableState;
 } {
   const counts = { listSchema: 0 };
-  const state: { schema: DatabaseSchema; nextError: unknown; gate: Promise<void> | null } = {
+  const state: RefreshableState = {
     schema: SAMPLE_SCHEMA,
     nextError: null,
     gate: null,
+    onIntrospect: null,
   };
   const driver: Driver = {
     async connect() {},
     async listSchema() {
       counts.listSchema++;
+      state.onIntrospect?.();
       // Snapshot at CALL time, before the gate: a real introspection answers the catalog as
       // it was when the query ran, so a DDL committing while the answer is in flight cannot
       // retroactively appear in it. That is exactly the race the lost-update guard covers.
@@ -643,6 +654,69 @@ describe("connection manager — invalidateSchema (DW-45)", () => {
     state.schema = SAMPLE_SCHEMA_V2;
     expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA_V2);
     expect(counts.listSchema).toBe(2);
+  });
+
+  test("a writer that out-runs introspection cannot hang a reader — the refresh loop is bounded", async () => {
+    const { factory, counts, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA);
+    expect(counts.listSchema).toBe(1);
+
+    // Sustained schema-mutating traffic: every `execute` success invalidates, and here one
+    // lands inside every introspection — so no answer is ever current and the commit guard
+    // rejects each one. The loop that re-arms on a rejected answer then has no exit unless
+    // it is bounded: before the fix this single `getSchema()` re-introspected forever
+    // (measured: 200+ calls and still going), hanging the read path outright.
+    state.onIntrospect = () => mgr.invalidateSchema();
+    mgr.invalidateSchema();
+
+    // Settles — that is the whole point — serving the memo it has rather than chasing a
+    // catalog that keeps moving.
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA);
+    expect(counts.listSchema).toBe(4); // the open + a bounded three turns, not unbounded
+
+    // …and the staleness it accepted is BOUNDED, not lost: the flag stayed set, so the
+    // first read after the write storm ends re-introspects and returns the new catalog.
+    state.onIntrospect = null;
+    state.schema = SAMPLE_SCHEMA_V2;
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA_V2);
+    expect(counts.listSchema).toBe(5);
+  });
+
+  test("a connect() parked on a refresh that close() drains resolves the neutral failure, never null", async () => {
+    const { factory, state } = refreshableDriver();
+    const mgr = createConnectionManager({ databaseUrl: "postgres://u:p@h/db", createDriver: factory });
+
+    expect(await mgr.connect()).toEqual({ status: "connected", schema: SAMPLE_SCHEMA });
+    state.schema = SAMPLE_SCHEMA_V2;
+    mgr.invalidateSchema();
+
+    // A `connect` takes the idempotent branch, honors the pending invalidation, and parks
+    // inside the refresh's `listSchema`.
+    const gate = deferred();
+    state.gate = gate.promise;
+    const connecting = mgr.connect();
+    await Promise.resolve();
+
+    // Shutdown begins in that window — `core.stop()`, or `connection-targets`' fire-and-
+    // forget `evict()` on a repoint. `close()` latches, drains the refresh, and NULLS the
+    // memo the parked `connect` is about to re-read.
+    const closing = mgr.close();
+    state.gate = null;
+    gate.resolve();
+    await closing;
+
+    // The compiler cannot catch this one: TypeScript keeps the narrowing from the
+    // `cached !== null` test across the await, so before the fix this resolved `null` and
+    // the RPC layer shipped `result: null` to a UI that reads `reply.result.status`.
+    const result = await connecting;
+    expect(result).not.toBeNull();
+    expect(result).toEqual({
+      status: "failed",
+      failure: "network",
+      message: "connection is unavailable",
+    });
   });
 
   test("invalidateSchema on a never-connected manager is a harmless no-op", async () => {
