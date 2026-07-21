@@ -115,6 +115,12 @@ AR-12 hard invariant (stated in the mockup): the boot manager stays the DEFAULT 
 - Given any one root's expand/error/retry cycle, when observed, then every other root's state is provably untouched (no shared mutable state crossing roots).
 - Given the full suite, when run, then `bunx tsc --noEmit`, `bun test`, and `bun run build` all pass with new coverage for the multi-root state machine and no weakened existing SchemaTree assertion.
 
+## Folded Deferred-Work
+
+**DW-41 (fold-in): scope optimistic created-tables per connection.** The tree's optimistic `extraTables` (freshly-created tables, Story 3.4) live in `src/ui/App.tsx`'s `createdTables`, which only ever APPENDS — so a table created on connection A would leak into connection B's root, and a stale phantom survives a disconnect/reconnect. In the multi-root world, key the optimistic set by `connectionId` (boot sentinel for the default) and clear a root's optimistic entries when that root re-introspects (expand-after-invalidate, incl. the DW-45 post-DDL bust) or its connection is removed. Mark DW-41 done when landed.
+
+**DW-54 (fold-in): tokenize the shell's error reds for the light theme.** This story already swaps `SchemaTree`'s raw `red-500`/`red-400` for `--err`/`--err-soft`. Extend the SAME swap to the remaining hardcoded dark-tuned reds in the shell — `src/ui/App.tsx` (ConnectionIndicator error dot), `src/ui/workspace/Workspace.tsx` (status-bar Stop, ExposureBanner) — so they flip correctly under `:root[data-theme="light"]`. Reuse the `--err`/`--err-soft` token pair (already in `globals.css`). If any surface is genuinely out of this story's reach, leave DW-54 partially open with the residual listed rather than silently dropping it. Mark DW-54 done when the shell reds are tokenized.
+
 ## Spec Change Log
 
 <!-- Append-only. Populated by step-04 during review loops. Empty until the first bad_spec loopback. -->

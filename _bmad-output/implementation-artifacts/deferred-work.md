@@ -315,7 +315,8 @@ status: open
 origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
 location: `src/ui/App.tsx` (`createdTables`)
 reason: `src/ui/App.tsx` only ever appends to `createdTables` (never clears it), so after a reconnect a created table appears in both `schemaTables` and `createdTables`, and after connecting to a different database a stale phantom table survives. Pre-existing Epic-3 lifecycle behavior masked by SchemaTree's dedup; the ERD's new dedup patch prevents the duplicate-id crash but the stale phantom node remains until this root cause is fixed.
-status: open
+folded: Epic 10 / Story 10.5 (multi-root tree keys optimistic `extraTables` per connectionId + clears on re-introspect/removal) — 2026-07-21
+status: folded into Epic 10 (10.5)
 
 ### DW-42: Exclude inherited partition FK constraints (`pg_constraint.conparentid <> 0`) from the Postgres FK introspection so partitioned schemas don't render N+1 redundant edges
 
@@ -346,7 +347,8 @@ origin: migrated from legacy ledger (code review of spec-5-2-chat-qa-schema-only
 location: `src/core/connection.ts` (`getSchema`)
 severity: medium
 reason: `src/core/connection.ts` returns `cached.schema` fixed at first connect; Story 3.4/3.x DDL mutates the live DB but no re-introspection path exists. Surfaced by 5.2 which now feeds that cached schema to the AI provider.
-status: open
+folded: Epic 10 / Story 10.4 (extend `connectionTargets` invalidation to bust the resolved target's memoized schema after a schema-mutating `execute`, so the next getSchema/connect re-introspects) — 2026-07-21
+status: folded into Epic 10 (10.4)
 
 ### DW-46: Provider-key redaction in the chat error path is exact-substring only (`rawCause.split(apiKey).join("***")`), so a key echoed in a non-literal form (URL-encoded, base64, truncated, or nested in a structured error object) would still reach stderr
 
@@ -425,7 +427,8 @@ source_spec: `spec-7-1-redesign-shell-neutral.md`
 location: `src/ui/App.tsx` (ConnectionIndicator error dot), `src/ui/schema/SchemaTree.tsx` (`role="alert"` error text + conn-row error dot), `src/ui/workspace/Workspace.tsx` (status-bar Stop, ExposureBanner)
 severity: low
 reason: The neutral shell keeps the pre-existing Tailwind `red-400`/`red-500` scale for functional destructive/error color (spec-sanctioned: "the Tailwind red-* scale used elsewhere in the UI"), and the new `:root[data-theme="light"]` block added in this story flips surfaces/ink/type-colors but NOT these reds. On light surfaces a dark-theme-tuned `red-400` foreground reads at reduced contrast. Latent today: light theme has no toggle UI and is an explicitly-incomplete, mid-Epic-7 surface (documented residual risk in this spec's Verification). The durable fix is a themed destructive/err token pair swapped in for the hardcoded classes, done as part of completing the light theme across the remaining Epic 7 surfaces — out of scope for a presentation-only shell pass.
-status: open
+folded: Epic 10 / Story 10.5 (10.5 already tokenizes SchemaTree's reds → --err/--err-soft; extends the same swap to the remaining shell reds in App.tsx/Workspace.tsx). If any surface is out of 10.5's reach, leave DW-54 partially open with the residual listed. — 2026-07-21
+status: folded into Epic 10 (10.5)
 
 ### DW-55: The new client-side CSV Export does not guard against CSV/formula injection — a string cell beginning with `=`, `+`, `-`, or `@` is written verbatim and executes as a formula when the exported file is opened in Excel/Sheets
 

@@ -88,6 +88,10 @@ The untargeted path (`connectionId` omitted or `null`) must stay byte-identical:
 - [ ] `src/core/chat.ts` -- widen `getSchema` to accept an optional `connectionId`; reuse the existing "no active connection" catch for a resolve failure -- no new chat error code.
 - [ ] Extend `connection-targets.test.ts`, `server`/`rpc` tests, `chat.test.ts` -- cover targeted success, unknown id, malformed id, and the untargeted path staying unchanged -- proves the default path is byte-identical.
 
+## Folded Deferred-Work
+
+**DW-45 (fold-in): re-introspect after DDL — bust the memoized schema.** `src/core/connection.ts`'s `getSchema()` memoizes the schema at first connect and never re-introspects, so the tree/chat "N tables" context goes stale after a `create`/`drop table`. Because this story already routes reads through `connectionTargets.resolve(id)` — whose pool already invalidates a target's cached manager when the connection is repointed against the registry — extend that same invalidation to also fire after a successful schema-mutating `execute` (createTable / drop) on a target, so the NEXT `getSchema`/`connect` for that `connectionId` (or the boot default) re-introspects instead of serving the stale memo. Keep it SCOPED to the affected target — do not flush every target's cache. Mark DW-45 done in `deferred-work.md` when landed. (Ordering note: this pairs with Story 10.5's per-root refresh — the UI trigger — but the memo-bust itself is a Core concern and belongs here.)
+
 ## Spec Change Log
 
 <!-- populated by later revisions -->
