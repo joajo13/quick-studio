@@ -1,0 +1,568 @@
+<title>Epic 10 — Multi-connection schema tree</title>
+<style>
+  /* ── Tokens: mirror src/ui/styles/globals.css (neutral theme). Dark is the app
+     default; light overrides follow. The loop must reuse these exact values. ── */
+  :root {
+    --background: hsl(224 14% 8%);
+    --foreground: hsl(210 14% 92%);
+    --card: hsl(224 13% 11%);
+    --border: hsl(220 10% 20%);
+    --muted: hsl(223 12% 15%);
+    --muted-foreground: hsl(215 12% 60%);
+    --accent: hsl(223 14% 18%);
+    --radius: 0.5rem;
+    --ink: #ececec;
+    --ink-ink: #0b0d11;
+    --ink-soft: rgba(255, 255, 255, 0.10);
+    --ink-line: rgba(255, 255, 255, 0.28);
+    --t-int: #6ba5ff;
+    --t-time: #b18cff;
+    --t-bool: #e0a458;
+    --t-json: #3ec6b6;
+    --t-text: #98a1b0;
+    --t-key: #ececec;
+    --ok: #3fbf7f;
+    --ok-soft: rgba(63, 191, 127, 0.12);
+    --err: #f0616d;
+    --err-soft: rgba(240, 97, 109, 0.12);
+    --note-bg: hsl(224 13% 10%);
+    --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", "Roboto Mono", monospace;
+    --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --label-size: 10.5px;
+    color-scheme: dark;
+  }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) {
+      --background: hsl(0 0% 100%);
+      --foreground: hsl(224 14% 9%);
+      --card: hsl(0 0% 97%);
+      --border: hsl(220 13% 90%);
+      --muted: hsl(220 10% 94%);
+      --muted-foreground: hsl(215 12% 40%);
+      --accent: hsl(223 10% 92%);
+      --ink: #0d0d0d;
+      --ink-ink: #ffffff;
+      --ink-soft: rgba(0, 0, 0, 0.06);
+      --ink-line: rgba(0, 0, 0, 0.22);
+      --t-int: #2f6fd6;
+      --t-time: #7d54cf;
+      --t-bool: #b3781f;
+      --t-json: #1a9b8c;
+      --t-text: #5b6472;
+      --t-key: #0d0d0d;
+      --ok: #1a8a55;
+      --ok-soft: rgba(26, 138, 85, 0.10);
+      --err: #cf3947;
+      --err-soft: rgba(207, 57, 71, 0.10);
+      --note-bg: hsl(0 0% 98%);
+      color-scheme: light;
+    }
+  }
+  :root[data-theme="light"] {
+    --background: hsl(0 0% 100%);
+    --foreground: hsl(224 14% 9%);
+    --card: hsl(0 0% 97%);
+    --border: hsl(220 13% 90%);
+    --muted: hsl(220 10% 94%);
+    --muted-foreground: hsl(215 12% 40%);
+    --accent: hsl(223 10% 92%);
+    --ink: #0d0d0d;
+    --ink-ink: #ffffff;
+    --ink-soft: rgba(0, 0, 0, 0.06);
+    --ink-line: rgba(0, 0, 0, 0.22);
+    --t-int: #2f6fd6;
+    --t-time: #7d54cf;
+    --t-bool: #b3781f;
+    --t-json: #1a9b8c;
+    --t-text: #5b6472;
+    --t-key: #0d0d0d;
+    --ok: #1a8a55;
+    --ok-soft: rgba(26, 138, 85, 0.10);
+    --err: #cf3947;
+    --err-soft: rgba(207, 57, 71, 0.10);
+    --note-bg: hsl(0 0% 98%);
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 32px 24px 64px;
+  }
+  header.head { margin-bottom: 24px; }
+  .eyebrow {
+    font-size: var(--label-size);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+    margin: 0 0 8px;
+  }
+  h1 {
+    font-size: 24px;
+    line-height: 1.2;
+    margin: 0 0 8px;
+    text-wrap: balance;
+    font-weight: 650;
+  }
+  .lede {
+    margin: 0;
+    max-width: 68ch;
+    color: var(--muted-foreground);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  .lede code {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--foreground);
+    background: var(--muted);
+    padding: 1px 5px;
+    border-radius: 4px;
+  }
+
+  /* Scenario switcher */
+  .tabs {
+    display: flex;
+    gap: 6px;
+    margin: 22px 0 18px;
+    flex-wrap: wrap;
+  }
+  .tabs button {
+    font-family: var(--font-sans);
+    font-size: 12.5px;
+    font-weight: 550;
+    color: var(--muted-foreground);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: color .15s, background .15s, border-color .15s;
+  }
+  .tabs button:hover { color: var(--foreground); }
+  .tabs button[aria-selected="true"] {
+    color: var(--ink-ink);
+    background: var(--ink);
+    border-color: var(--ink);
+  }
+  .tabs button:focus-visible { outline: 2px solid var(--ink-line); outline-offset: 2px; }
+
+  /* Stage: faux-app sidebar (left) + annotations (right) */
+  .stage {
+    display: grid;
+    grid-template-columns: 288px 1fr;
+    gap: 28px;
+    align-items: start;
+  }
+  @media (max-width: 760px) { .stage { grid-template-columns: 1fr; } }
+
+  .frame {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    overflow: hidden;
+    box-shadow: 0 1px 0 rgba(0,0,0,.2), 0 12px 40px -24px rgba(0,0,0,.6);
+  }
+  .frame-cap {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: var(--label-size);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  .frame-cap .dots { display: flex; gap: 5px; margin-right: 4px; }
+  .frame-cap .dots i { width: 8px; height: 8px; border-radius: 999px; background: var(--muted); display: block; }
+
+  /* ── The tree itself (mirrors SchemaTree.tsx classes/spacing) ── */
+  .tree { font-family: var(--font-mono); padding: 6px 0; min-height: 340px; }
+
+  .root { }
+  .root-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 8px 10px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 12.5px;
+    color: var(--foreground);
+  }
+  .root-head:hover { background: var(--muted); }
+  .root-head:focus-visible { outline: 2px solid var(--ink-line); outline-offset: -2px; }
+  .chev {
+    width: 11px; height: 11px; flex: none;
+    color: var(--muted-foreground);
+    transition: transform .15s;
+  }
+  .chev.open { transform: rotate(90deg); }
+  .status-dot { width: 7px; height: 7px; border-radius: 999px; flex: none; background: var(--muted-foreground); }
+  .status-dot.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+  .status-dot.err { background: var(--err); box-shadow: 0 0 0 3px var(--err-soft); }
+  .status-dot.loading { background: var(--muted-foreground); animation: pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:1} }
+  @media (prefers-reduced-motion: reduce) { .status-dot.loading { animation: none; } .chev { transition: none; } }
+  .root-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .engine-badge {
+    font-size: 9px;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 4px;
+    flex: none;
+  }
+  .root-host { margin-left: auto; font-size: 10px; color: var(--muted-foreground); opacity: .8; white-space: nowrap; }
+
+  .root-body { padding-left: 4px; }
+  .schema-cap {
+    padding: 6px 12px 4px 26px;
+    font-size: var(--label-size);
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 10px 6px 26px;
+    font-size: 12.5px;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    border-radius: var(--radius);
+    margin: 1px 6px;
+  }
+  .row:hover { background: var(--muted); color: var(--foreground); }
+  .row.on { background: var(--ink-soft); color: var(--ink); }
+  .row .tbl-ico { width: 14px; height: 14px; flex: none; color: currentColor; }
+  .row .tname { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row .ccount { margin-left: auto; font-size: 10px; opacity: .7; }
+
+  .cols { padding: 2px 6px 4px 44px; }
+  .col {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    font-size: 11.5px;
+    color: var(--muted-foreground);
+    border-radius: 4px;
+  }
+  .col:hover { background: var(--muted); }
+  .dot { width: 6px; height: 6px; border-radius: 1px; flex: none; }
+  .col .cname { color: var(--foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .col.pk .cname { color: var(--t-key); }
+  .col .ctype { margin-left: auto; font-size: 9.5px; letter-spacing: .02em; color: var(--muted-foreground); }
+
+  .inline-msg { padding: 8px 12px 8px 26px; font-size: 11px; color: var(--muted-foreground); }
+  .inline-msg.err { color: var(--err); }
+  .retry {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    margin-left: 26px;
+    margin-bottom: 6px;
+    color: var(--foreground);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+  .retry:hover { background: var(--muted); }
+
+  /* Empty / no-connection state (matches the live SchemaTree fix) */
+  .empty {
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    gap: 10px; padding: 48px 22px 0;
+  }
+  .empty svg { width: 28px; height: 28px; color: color-mix(in oklab, var(--muted-foreground) 60%, transparent); }
+  .empty .t { font-size: 12.5px; font-weight: 550; color: var(--foreground); }
+  .empty .s { font-size: 11.5px; line-height: 1.5; color: var(--muted-foreground); max-width: 30ch; }
+  .empty .add {
+    margin-top: 4px; font-family: var(--font-sans); font-size: 12px; font-weight: 550;
+    color: var(--ink-ink); background: var(--ink); border: none; border-radius: 999px;
+    padding: 6px 16px; cursor: pointer;
+  }
+
+  /* Annotation column */
+  .notes { display: flex; flex-direction: column; gap: 14px; }
+  .note {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--note-bg);
+    padding: 14px 16px;
+  }
+  .note h3 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .note h3 .story {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-ink);
+    background: var(--ink);
+    border-radius: 4px;
+    padding: 1px 6px;
+    letter-spacing: .03em;
+  }
+  .note p { margin: 0; font-size: 12.5px; line-height: 1.55; color: var(--muted-foreground); }
+  .note p + p { margin-top: 6px; }
+  .note code { font-family: var(--font-mono); font-size: 11.5px; color: var(--foreground); }
+  .note .hint { font-size: 11px; color: var(--muted-foreground); opacity: .85; margin-top: 8px; font-style: italic; }
+
+  .invariant {
+    margin-top: 26px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    padding: 14px 18px;
+    font-size: 12px;
+    color: var(--muted-foreground);
+    line-height: 1.6;
+  }
+  .invariant b { color: var(--foreground); font-weight: 600; }
+  .invariant code { font-family: var(--font-mono); font-size: 11.5px; color: var(--foreground); }
+</style>
+
+<div class="wrap">
+  <header class="head">
+    <p class="eyebrow">quick-studio · Epic 10 · spec preview</p>
+    <h1>Multi-connection schema tree</h1>
+    <p class="lede">
+      Today quick-studio is single-connection: the boot manager is captured once and never
+      swapped, so in persistent mode you can <em>save</em> connections but not <em>browse</em>
+      them — the tree dies with <code>unsupported_scheme: no connection target configured</code>.
+      This is the target: a DBeaver-style multi-root tree, one collapsible root per saved
+      connection, each introspected <b>lazily on expand</b>. Click the roots and tables below —
+      it behaves like the real thing. The right column maps each behavior to its story.
+    </p>
+  </header>
+
+  <div class="tabs" role="tablist" aria-label="Scenarios">
+    <button role="tab" aria-selected="true" data-scn="populated">Populated tree</button>
+    <button role="tab" aria-selected="false" data-scn="empty">No connections</button>
+    <button role="tab" aria-selected="false" data-scn="restore">Tab → missing connection</button>
+  </div>
+
+  <div class="stage">
+    <div class="frame">
+      <div class="frame-cap"><span class="dots"><i></i><i></i><i></i></span> schema</div>
+      <div class="tree" id="tree"></div>
+    </div>
+
+    <div class="notes" id="notes"></div>
+  </div>
+
+  <div class="invariant">
+    <b>Hard invariant (AR-12) — do not break it.</b> Only the opaque <code>connectionId</code>
+    crosses the loopback RPC. The URL, user, and password stay in Ring 1 (Core) and are
+    resolved there via <code>connectionTargets.resolve(id)</code>. The boot manager stays the
+    default target (<code>id = null</code>), so ephemeral mode is byte-for-byte unchanged.
+    <b>Out of scope:</b> cross-connection joins — each tab runs against exactly one connection.
+  </div>
+</div>
+
+<script>
+(() => {
+  // ── Model ─────────────────────────────────────────────────────────────────
+  const T = (name, type, pk = false) => ({ name, type, pk });
+  const COLS = {
+    customers: [T("id","int4",true),T("email","text"),T("country","text"),T("created_at","timestamptz")],
+    orders: [T("id","int8",true),T("customer_id","int4"),T("total","numeric"),T("paid","bool"),T("placed_at","timestamptz")],
+    products: [T("id","int4",true),T("sku","text"),T("price","numeric"),T("meta","jsonb")],
+    order_items: [T("order_id","int8",true),T("product_id","int4",true),T("qty","int4")],
+    events: [T("id","int8",true),T("kind","text"),T("payload","jsonb"),T("ts","timestamptz")],
+    sessions: [T("id","uuid",true),T("user_id","int4"),T("expires","timestamp")],
+  };
+  const conns = [
+    { id:"c1", name:"demo-postgres", engine:"pg", host:"127.0.0.1:5433", status:"connected",
+      schemas:[{ name:"public", tables:["customers","orders","products","order_items"] }] },
+    { id:"c2", name:"analytics", engine:"pg", host:"warehouse:5432", status:"idle",
+      schemas:[{ name:"public", tables:["events","sessions"] }] },
+    { id:"c3", name:"legacy-mysql", engine:"mysql", host:"10.0.4.7:3306", status:"error",
+      error:"auth: password authentication failed for user \"report\"" },
+  ];
+
+  const state = new Map();           // id -> {open, loaded, loading}
+  conns.forEach(c => state.set(c.id, { open:false, loaded:false, loading:false }));
+  let active = null;                 // "id/schema/table"
+  const openTables = new Set();
+  let scenario = "populated";
+
+  const typeClass = (t) => {
+    t = t.toLowerCase();
+    if (/bool/.test(t)) return "var(--t-bool)";
+    if (/time|date|interval/.test(t)) return "var(--t-time)";
+    if (/int|serial/.test(t)) return "var(--t-int)";
+    if (/numeric|decimal|float|double|real|json|money/.test(t)) return "var(--t-json)";
+    return "var(--t-text)";
+  };
+  const chevSvg = (open) =>
+    `<svg class="chev ${open?"open":""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 6l6 6-6 6"/></svg>`;
+  const tblSvg =
+    `<svg class="tbl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="1.5"/><path d="M3 9h18M9 9v11"/></svg>`;
+
+  const tree = document.getElementById("tree");
+
+  function render() {
+    if (scenario === "empty") { tree.innerHTML = emptyState(); wireEmpty(); return; }
+    tree.innerHTML = conns.map(rootHtml).join("");
+    if (scenario === "restore") {
+      // A restored tab points at a connection that no longer exists.
+      tree.insertAdjacentHTML("afterbegin",
+        `<div class="inline-msg err" style="padding-left:12px">tab "orders" — conexión no disponible (fue eliminada)</div>
+         <button class="retry" style="margin-left:12px" data-reattach>Reasignar conexión…</button>`);
+    }
+    wire();
+  }
+
+  function rootHtml(c) {
+    const st = state.get(c.id);
+    const dotClass = st.loading ? "loading" : c.status === "connected" ? "ok" : c.status === "error" ? "err" : "";
+    let body = "";
+    if (st.open) {
+      if (c.status === "error") {
+        body = `<div class="root-body">
+          <div class="inline-msg err">${c.error}</div>
+          <button class="retry" data-retry="${c.id}">Reintentar</button>
+        </div>`;
+      } else if (st.loading) {
+        body = `<div class="root-body"><div class="inline-msg">introspecting…</div></div>`;
+      } else if (st.loaded) {
+        body = `<div class="root-body">` + c.schemas.map(s =>
+          `<div class="schema-cap">${s.name} · ${s.tables.length} tables</div>` +
+          s.tables.map(t => tableHtml(c.id, s.name, t)).join("")
+        ).join("") + `</div>`;
+      }
+    }
+    return `<div class="root">
+      <div class="root-head" role="button" tabindex="0" data-root="${c.id}" aria-expanded="${st.open}">
+        ${chevSvg(st.open)}
+        <span class="status-dot ${dotClass}"></span>
+        <span class="root-name">${c.name}</span>
+        <span class="engine-badge">${c.engine}</span>
+        <span class="root-host">${c.host}</span>
+      </div>
+      ${body}
+    </div>`;
+  }
+
+  function tableHtml(cid, schema, t) {
+    const key = `${cid}/${schema}/${t}`;
+    const on = active === key;
+    const open = openTables.has(key);
+    const cols = COLS[t] || [];
+    const colsHtml = open ? `<div class="cols">` + cols.map(col =>
+      `<div class="col ${col.pk?"pk":""}">
+        <span class="dot" style="background:${col.pk?"var(--t-key)":typeClass(col.type)}"></span>
+        <span class="cname">${col.name}</span>
+        <span class="ctype">${col.type}</span>
+      </div>`).join("") + `</div>` : "";
+    return `<div class="row ${on?"on":""}" role="button" tabindex="0" data-table="${key}">
+        ${tblSvg}<span class="tname">${t}</span><span class="ccount">${cols.length}</span>
+      </div>${colsHtml}`;
+  }
+
+  function emptyState() {
+    return `<div class="empty">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+        <ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/>
+        <path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg>
+      <div class="t">Sin conexión activa</div>
+      <div class="s">Agregá una conexión en Ajustes para explorar tablas.</div>
+      <button class="add" data-add>+ Nueva conexión</button>
+    </div>`;
+  }
+
+  // ── Interactions ────────────────────────────────────────────────────────────
+  function wire() {
+    tree.querySelectorAll("[data-root]").forEach(el => {
+      const cid = el.dataset.root;
+      const toggle = () => toggleRoot(cid);
+      el.addEventListener("click", toggle);
+      el.addEventListener("keydown", e => { if (e.key==="Enter"||e.key===" "){e.preventDefault();toggle();} });
+    });
+    tree.querySelectorAll("[data-table]").forEach(el => {
+      const key = el.dataset.table;
+      const act = () => { active = key; if(openTables.has(key))openTables.delete(key); else openTables.add(key); render(); };
+      el.addEventListener("click", act);
+      el.addEventListener("keydown", e => { if (e.key==="Enter"||e.key===" "){e.preventDefault();act();} });
+    });
+    tree.querySelectorAll("[data-retry]").forEach(el =>
+      el.addEventListener("click", () => { const c=conns.find(x=>x.id===el.dataset.retry); c.status="connected"; const st=state.get(c.id); st.loaded=false; loadRoot(c.id); }));
+    const reattach = tree.querySelector("[data-reattach]");
+    if (reattach) reattach.addEventListener("click", () => setScenario("populated"));
+  }
+  function wireEmpty() {
+    const add = tree.querySelector("[data-add]");
+    if (add) add.addEventListener("click", () => setScenario("populated"));
+  }
+
+  function toggleRoot(cid) {
+    const st = state.get(cid);
+    st.open = !st.open;
+    if (st.open && !st.loaded && conns.find(c=>c.id===cid).status!=="error") loadRoot(cid);
+    else render();
+  }
+  function loadRoot(cid) {
+    const st = state.get(cid);
+    st.open = true; st.loading = true; st.loaded = false;
+    render();
+    // Lazy introspect — simulated latency. A real root hits the DB only here, on
+    // first expand, NEVER at boot (20 conns must not = 20 handshakes at startup).
+    setTimeout(() => { st.loading = false; st.loaded = true; render(); }, 620);
+  }
+
+  function setScenario(scn) {
+    scenario = scn;
+    document.querySelectorAll(".tabs button").forEach(b =>
+      b.setAttribute("aria-selected", String(b.dataset.scn === scn)));
+    renderNotes();
+    render();
+  }
+
+  // ── Annotations (mapped to stories) ──────────────────────────────────────────
+  const NOTES = {
+    populated: [
+      ["10.5","Multi-root tree","One collapsible root per saved connection. Roots render instantly at boot; a root introspects <b>only on first expand</b> (watch the <code>introspecting…</code> flash). Try it: expand <b>demo-postgres</b>, then a table to reveal columns with type-dots + PK in <code>--t-key</code>."],
+      ["10.5","Per-root state, isolated","Each root is <code>idle · loading · ready · error</code> on its own. Expand <b>legacy-mysql</b> — its <code>auth</code> error shows inline with a Reintentar, and the other roots keep working. One bad connection can never tank the whole tree."],
+      ["10.1","Honest status dot","Green + halo = connected, red = classified error, muted = idle, pulsing = introspecting. No root ever shows the raw <code>unsupported_scheme</code> bucket anymore."],
+      ["10.4","id-only resolution","Expanding a root calls <code>connect{connectionId}</code>; opening a table calls <code>table.rows{connectionId}</code>. The Core resolves the id → live manager. The URL never leaves Ring 1."],
+      ["10.2 / 10.3","Schema scope & privileges","A connection may pin an optional <code>schema</code> — introspection filters <b>in-query</b>, not post-fetch. Restricted creds see fewer tables, and the <code>pg_class/pg_index</code> queries must align with <code>information_schema</code> visibility so no phantom tables appear."],
+    ],
+    empty: [
+      ["10.1","No-connection is not an error","Persistent boot starts with no target. That is a calm empty-state — <b>Sin conexión activa</b> — never the red <code>connection error</code> alert. (Already shipped live in <code>SchemaTree.tsx</code> as the interim fix; 10.1 makes it a real <code>no-target</code> failure kind so the string-match hack retires.)"],
+      ["10.1","Kills the misleading RPC error","Running a query with no connection currently throws <code>connection unavailable</code> → wrapped as the generic <code>internal_error: RPC handler failed</code>. 10.1 returns a typed <code>no-target</code> outcome so the console shows “sin conexión”, not a scary internal error."],
+    ],
+    restore: [
+      ["10.6","Tabs carry their connection","<code>TableRef</code> gains <code>connectionId</code>, persisted in the <code>WorkspaceSnapshot</code>. On restore, each tab reopens against the connection it was bound to."],
+      ["10.6","Missing connection ≠ crash","If the referenced connection was deleted, the restored tab lands in a <b>conexión no disponible</b> state with a reassign affordance — it must never crash the workspace restore."],
+    ],
+  };
+  function renderNotes() {
+    document.getElementById("notes").innerHTML = NOTES[scenario].map(([s,h,p]) =>
+      `<div class="note"><h3><span class="story">${s}</span>${h}</h3><p>${p}</p></div>`).join("");
+  }
+
+  // init
+  document.querySelectorAll(".tabs button").forEach(b =>
+    b.addEventListener("click", () => setScenario(b.dataset.scn)));
+  renderNotes();
+  render();
+})();
+</script>

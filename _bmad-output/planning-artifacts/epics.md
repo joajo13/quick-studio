@@ -1141,3 +1141,115 @@ So that I can go from a question to an editable report without hand-assembling b
 **Given** the chat cannot produce a valid report (provider error, empty result, malformed spec)
 **When** it fails
 **Then** it degrades with a clear message and opens nothing half-built — never a partial or broken Report tab
+
+---
+
+## Epic 10: Multi-Connection Workspace (DBeaver-style multi-root tree)
+
+**Goal.** Make quick-studio genuinely multi-connection. Today the app is single-connection: the boot connection manager is created once in `startCore` and its URL is a closure-captured `const` (`src/core/connection.ts`), immutable for the whole session — no RPC swaps it. In persistent mode (which boots with no URL) you can *save* connections but not *browse* them: the tree dies with `unsupported_scheme: no connection target configured`. The multi-target pool already exists (`src/core/connection-targets.ts` — a lazy, cached, registry-invalidated manager per id) but only Reports consumes it via `connectionId`; everything else (tableRows, chat, the schema tree) is clamped to the boot manager. This epic propagates `connectionId` from the UI down to the seams that already exist, and turns the schema sidebar into a DBeaver-style multi-root tree (one collapsible root per saved connection, introspected lazily on expand).
+
+**Visual/interaction source of truth:** `_bmad-output/planning-artifacts/epic-10-multi-connection-tree.mockup.html` (interactive — hand-tuned and approved). The mock is authoritative for the tree's states (idle / loading / ready / error per root), the lazy-introspect-on-expand behavior, the "Sin conexión activa" empty-state, and the "conexión no disponible" restored-tab state.
+
+**Hard invariant (AR-12) — must not break.** Only the opaque `connectionId` crosses the loopback RPC. The URL, user, and password stay in Ring 1 (Core) and are resolved there via `connectionTargets.resolve(id)`. The boot manager stays the default target (`id = null`), so ephemeral mode is byte-for-byte unchanged.
+
+**Out of scope:** cross-connection joins/queries — each tab runs against exactly one connection.
+
+### Story 10.1: Classify "no connection target" as its own failure (retire the misleading error)
+
+As a user,
+I want the app to tell me plainly that there is no connection yet (and not throw a scary internal error when I try to use it),
+So that an empty persistent-mode boot reads as "add a connection", not "something broke".
+
+**Acceptance Criteria:**
+
+**Given** a persistent-mode boot with no connection target configured
+**When** the schema tree loads
+**Then** it shows a calm empty-state ("Sin conexión activa" + a hint to add one in Settings), driven by a dedicated `no-target` `ConnectionFailureKind` — NOT the `unsupported_scheme` bucket (whose message wrongly points at the URL scheme) and NOT the red `connection error` alert. The interim message-string match in `SchemaTree.tsx` (shipped live) is replaced by this typed kind.
+
+**Given** no connection target is configured
+**When** an RPC that needs a live connection runs (`execute`, `table.rows`, schema fetch)
+**Then** it returns a typed, neutral "no connection" outcome the UI can render as "sin conexión" — instead of throwing `connection unavailable` and being wrapped as the generic `internal_error: RPC handler failed`. Credential neutrality is preserved (no URL/creds in any message).
+
+### Story 10.2: Optional per-connection schema scope
+
+As a user,
+I want to pin a connection to a specific schema,
+So that a database with thousands of tables only introspects the schema I care about.
+
+**Acceptance Criteria:**
+
+**Given** the saved-connection record and the Settings connection form
+**When** I add or edit a connection
+**Then** I can optionally set a `schema` (a new optional `schema?: string` field on `ConnectionSummary` + the store + the form); omitting it keeps today's behavior (all non-system-catalog tables)
+
+**Given** a connection with a pinned `schema`
+**When** it is introspected
+**Then** `listSchema()` applies the filter IN-QUERY across all four Postgres introspection queries (columns, PKs, indexes, FKs — `driver-postgres.ts`) and their MySQL equivalents (`driver-mysql.ts`), so metadata for thousands of out-of-scope tables is never fetched (no post-fetch trim)
+
+### Story 10.3: Align privileged introspection with visible tables
+
+As a user connecting with a restricted database role,
+I want the tree to show only the tables I can actually read,
+So that I never see phantom tables I have no access to.
+
+**Acceptance Criteria:**
+
+**Given** a Postgres connection whose credentials have limited privileges
+**When** the schema is introspected
+**Then** the index queries (which today hit `pg_class`/`pg_index`, `driver-postgres.ts`) are aligned with `information_schema`'s privilege-filtered visibility, so a restricted user never sees index/table metadata for tables their `information_schema` view already hides — no phantom tables
+
+**Given** credentials insufficient to introspect at all, or a requested schema that does not exist / is not visible
+**When** the connection's root is expanded
+**Then** that root shows the classified error inline (see 10.5) and the failure is engine-neutral (no raw driver text) — the other roots keep working
+
+### Story 10.4: Core resolves every read path by connectionId
+
+As the system,
+I want every read path (schema, table rows, chat) to resolve its target by `connectionId`,
+So that the workspace can browse any saved connection, not just the boot one.
+
+**Acceptance Criteria:**
+
+**Given** the read RPCs `connect` and `table.rows`
+**When** they are called with an optional `connectionId`
+**Then** the Core resolves the live manager via `connectionTargets.resolve(connectionId)` (instead of touching the boot `connectionManager` directly) for `tableRows`, `connect`/`getSchema`, and the chat responder; only the opaque id crosses the loopback (AR-12), the URL is resolved in Core
+
+**Given** an RPC with no `connectionId` (or `connectionId = null`)
+**When** it resolves
+**Then** it falls back to the boot manager as the default target, so ephemeral mode (positional URL) is completely unchanged and every existing test stays green
+
+### Story 10.5: Multi-root schema tree
+
+As a user with several saved connections,
+I want a collapsible tree with one root per connection,
+So that I can browse them all from one sidebar, like DBeaver.
+
+**Acceptance Criteria:**
+
+**Given** N saved connections
+**When** the workspace opens
+**Then** the schema sidebar renders N collapsible root nodes (one per connection, with name + engine + host + a status dot), and roots render immediately WITHOUT introspecting — no boot-time handshake storm (20 connections must not mean 20 handshakes at startup)
+
+**Given** a collapsed connection root
+**When** I expand it
+**Then** it introspects LAZILY at that moment (via 10.4's `connectionId` RPCs), showing an `idle → loading → ready` progression; expanded, it lists tables grouped by schema, and tables expand to columns with type-dots + PK exactly as the single-root tree does today
+
+**Given** one connection fails to introspect (bad creds, unreachable, missing schema)
+**When** its root is expanded
+**Then** that root shows the classified error inline with a retry affordance, and every OTHER root stays fully usable — a single failing connection can never tank the whole tree
+
+### Story 10.6: Tabs carry their connection (and survive its removal)
+
+As a user,
+I want each tab to remember which connection it belongs to,
+So that restoring my session reopens each tab against the right database.
+
+**Acceptance Criteria:**
+
+**Given** a table/query tab opened from a connection root
+**When** it is created and the workspace is persisted
+**Then** its `TableRef` carries a `connectionId` (added to `workspace-state.ts`) and that id is persisted in the `WorkspaceSnapshot`, so on restore each tab knows which connection to reopen against
+
+**Given** a restored tab whose connection no longer exists (it was removed)
+**When** the session is restored
+**Then** the tab lands in a "conexión no disponible" state with a reassign affordance — it must NEVER crash the workspace restore or tank the other tabs
