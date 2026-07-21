@@ -150,7 +150,8 @@ development_status:
   # Ordered easy→hard; 10-5 depends on 10-4; 10-6 depends on 10-4 + 10-5.
   # Folded deferred-work (same code Epic 10 rewrites): DW-45→10.4 (re-introspect after DDL),
   # DW-41→10.5 (per-connection optimistic tables), DW-54→10.5 (tokenize shell error reds).
-  # The other ~15 actionable DW items go to a post-epic sweep; ~17 'decides' need human triage first.
+  # Post-epic sweep (RUN 2): 18 triaged 'decides' (see deferred-work-decisions.md + the
+  # decision: lines in deferred-work.md) + ~10 mechanical DW items. All decisions made 2026-07-21.
   epic-10: backlog
   10-1-no-target-failure-kind: backlog       # Story 10.1: Classify "no connection target" as its own failure (retire the misleading internal_error)
   10-2-per-connection-schema-scope: backlog  # Story 10.2: Optional per-connection schema scope (in-query filter)

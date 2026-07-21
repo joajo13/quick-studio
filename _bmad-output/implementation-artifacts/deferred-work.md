@@ -7,6 +7,7 @@ origin: review-budget-followup
 source_spec: `spec-4-2-persist-erd-layout.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260710-224752-6cf5; this entry preserves the lingering follow-up recommendation for a deliberate later review.
+decision: [2026-07-21, user] Do a single focused follow-up review of story 4-2 during the post-epic sweep (cheap; closes the lingering budget-exhaustion recommendation).
 status: open
 
 ### DW-2: Harden the per-boot token against same-machine processes and add a Content-Security-Policy (with a nonce for the inline token script) once stories render database content
@@ -14,6 +15,7 @@ status: open
 origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
 location: `src/core/server.ts` (GET / token handoff, `window.__QS_TOKEN__`)
 reason: The token is served in cleartext at the ungated `GET /` (the spec's chosen browser handoff), so any local process can scrape it; and `window.__QS_TOKEN__` is script-readable, so a future stored-XSS in rendered DB data could exfiltrate it. Both matter only once data rendering (Epic 3/5) exists; the walking skeleton renders no untrusted data.
+decision: [2026-07-21, user] Add a strict Content-Security-Policy NOW (default-src 'self', connect-src 'self', a nonce for the inline token script, no inline eval). Same-machine token hardening is a SEPARATE, lower-priority concern — not part of this item.
 status: open
 
 ### DW-3: When data-carrying RPCs arrive, have the server map `decode()` failures on untrusted peer FrozenData to a typed `bad_request` (400) instead of letting them throw into the catch-all `internal_error` (500)
@@ -45,6 +47,7 @@ resolution: already resolved: The UI is pre-bundled at build time into src/core/
 origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md), 2026-07-12
 location: `ISO_UTC_RE` / `assertIsoUtc` (frozen-date utilities)
 reason: `ISO_UTC_RE` allows only 1–3 fractional digits and `assertIsoUtc` re-serializes through a JS `Date` (millisecond resolution), so Postgres/MySQL microsecond timestamps (`.123456Z`) would throw. No timestamps flow until Epic 1 story 1.3 / Epic 3, and fixing it correctly is a precision-policy decision, not a one-line regex widen.
+decision: [2026-07-21, user] Truncate sub-second to milliseconds explicitly and DOCUMENT the policy (ms is sufficient for a browse/inspection tool; keeps the frozen-date model simple).
 status: open
 
 ### DW-7: Optionally add a max request-body guard (Content-Length limit) on `POST /rpc`
@@ -76,6 +79,7 @@ resolution: already resolved: src/core/binding.ts:90-107 deriveOpenUrl maps wild
 origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 2026-07-12
 location: `isNotFoundError` (keyring spike wrapper)
 reason: Both review layers flagged the substring match as locale-fragile and as the linchpin of the passphrase-fallback decision — on backends that throw NoEntry (e.g. Windows Credential Manager) rather than returning null, a genuine miss or a localized/reworded error could be misclassified. It currently fails safe (unknown → `unavailable`), and the tested Linux path returns null (never hits the throw branch), so the robust fix genuinely needs Windows-observed error data the local spike could not gather. Story 2.2 must not commit Windows to the keychain path until confirmed.
+decision: [2026-07-21, user] Replace the English-substring heuristic with typed error codes/kinds from @napi-rs/keyring — observe the real per-platform error shapes in CI and map them (robust, locale-proof).
 status: open
 
 ### DW-11: Validate the macOS keychain path for `@napi-rs/keyring` under Bun (a `macos-latest` CI leg + a decision-record row) before the product ships a signed macOS build that relies on the keychain key-management path
@@ -91,6 +95,7 @@ resolution: resolved by sweep bundle dw-keychain-ci-platform-validation
 origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 2026-07-12
 location: `getSecret` (keyring spike wrapper)
 reason: `getSecret` only maps `null`/`undefined` to `not-found`, so a stored empty string surfaces as a legitimate `found` result. That is faithful for a generic wrapper, but an empty AES-256 key is never valid; the guard belongs in Story 2.2's key validation, not in the spike wrapper (patching it here would risk masking a legitimately-stored empty value). Latent until the real store loads keys.
+decision: [2026-07-21, user] Treat a keychain entry that round-trips as "" as effectively not-found (reject it; fall back to re-create/passphrase). An empty encryption key is never legitimate.
 status: open
 
 ### DW-13: In Story 2.2's durable keychain API, distinguish an invalid-argument error (e.g. empty/blank `service` or `account` making `new Entry()` throw) from a genuine backend-unavailable condition, rather than letting the wrapper's catch-all classify every non-not-found throw as `unavailable`
@@ -234,6 +239,7 @@ resolution: resolved by sweep bundle dw-postgres-positional-row-mapping
 origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
 location: `naturalKind` (`frozen-map.ts`); `DataGrid.tsx`
 reason: postgres.js returns `numeric`/`decimal`/`int8` and mysql2 returns `DECIMAL`/`BIGINT` as JS strings (and `bigint` is deliberately forced to string for precision), so `naturalKind` in `frozen-map.ts` classifies them `string`; `DataGrid.tsx` then labels them `TEXT`, left-aligns, and drops `tabular-nums`. Values are correct — only the header type/alignment is wrong. The spec deliberately colors by neutral kind (and already defers `t-json` for the same reason); fixing both needs the SQL `dataType` carried alongside the result columns, a contract/plumbing decision beyond this story.
+decision: [2026-07-21, user] Plumb each column's SQL dataType into the result contract and classify numeric/decimal/bigint -> number (right-align + number color), decoupled from the FrozenCell kind. (This resolves the previously-stuck "datatype-result-contract".)
 status: open
 
 ### DW-31: Report a composite `SchemaTableInfo.primaryKey` in the key's own ordinal order (`ORDER BY ordinal_position` in both PK introspection queries) rather than in table-column order
@@ -249,6 +255,7 @@ resolution: resolved by sweep bundle dw-introspection-query-fidelity
 origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
 location: `tableRows` (`server.ts`)
 reason: `server.ts` `tableRows` issues `connectionManager.query(countSql)` then `query(selectSql)` with no shared snapshot/transaction; a concurrent insert/delete between them (or before the offset) makes `total` inconsistent with the returned page and shifts OFFSET-based pages. This is inherent to OFFSET pagination rather than a defect in the composition, and this is a read-only browse of a live DB (staleness is expected), so it is a known-limitation note rather than a Story 3.2 bug; keyset (seek) pagination on the PK is the durable fix if it becomes user-visible.
+decision: [2026-07-21, user] Accept for now — DOCUMENT that total/page are a best-effort snapshot (local single-user browse tool); revisit with keyset pagination only if it bites. (No code fix beyond documentation.)
 status: open
 
 ### DW-33: Make the keyless-table (no-PK) browse ordering robust — the static `UNORDERABLE_TYPE_PREFIXES` heuristic in `table-rows.ts` can both silently omit `ORDER BY` (rows overlap/skip across pages) and emit an `ORDER BY` the engine rejects (hard `internal_error`, blank grid), depending on the table's column types
@@ -256,6 +263,7 @@ status: open
 origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
 location: `isOrderable` / `UNORDERABLE_TYPE_PREFIXES` (`src/core/table-rows.ts`)
 reason: `isOrderable` classifies orderability by a hardcoded type-prefix denylist. For a PK-less table it either (a) filters out every column and omits `ORDER BY` entirely — so two separate page requests can return rows in different physical orders (overlap/skip, silent corrupt paging even with no concurrent writes) — or (b) passes a column that *looks* orderable but has no default ordering operator (Postgres `USER-DEFINED`/composite/`record`/`tsvector`/`pg_lsn`, `ARRAY`, or MySQL variants the prefix list misses such as `mediumblob`), so the composed `ORDER BY` throws at the DB and the whole page collapses to `internal_error` instead of degrading. Only affects keyless tables with exotic column types (PK tables order by the PK and are unaffected); the robust fix is a design decision — engine-aware orderability (which would leak ordering semantics into the driver seam), catch-and-degrade, or keyset pagination — not a mechanical widening of the prefix list. Distinct from the non-atomic COUNT/SELECT drift entry (that is concurrent-write staleness; this is a non-total page order / hard failure under zero writes).
+decision: [2026-07-21, user] Use a physical row locator when the engine has one (Postgres `ctid`) for keyless-table ordering; otherwise order by the full set of orderable columns, and NEVER emit an ORDER BY the engine will reject (pre-validate by column type).
 status: open
 
 ### DW-34: Decide how a `timestamp without time zone` value should be represented in the neutral FrozenCell model — `rowsToFrozenData` stamps a UTC `Z` ISO string on every JS `Date`, so a tz-less wall-clock timestamp is displayed as though it were UTC
@@ -263,6 +271,7 @@ status: open
 origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
 location: `rowsToFrozenData` / `toIsoUtc` (`frozen-map.ts`)
 reason: `frozen-map.ts` routes any `Date` through `toIsoUtc`, which serializes with a `Z`/UTC suffix. A Postgres `timestamp without time zone` (and MySQL `DATETIME`) carries no timezone, but postgres.js/mysql2 hand it back as a JS `Date`; tagging it UTC asserts a timezone the column does not have, shifting displayed times for any non-UTC-intending data. Genuine `timestamptz` round-trips correctly; the gap is representational and only visible for naive-timestamp columns. Correcting it needs a contract decision (carry a naive-vs-aware distinction, or the SQL `dataType`) rather than a one-line mapper tweak — adjacent to the deferred SQL-`dataType`-aware typing item.
+decision: [2026-07-21, user] Represent a `timestamp without time zone` as its literal wall-clock value (no `Z`, no UTC shift) — distinct from tz-aware timestamps.
 status: open
 
 ### DW-35: Preserve MySQL `BIGINT` precision in the browse read path — the mysql2 connection uses default numeric handling, so a `BIGINT` above 2^53 comes back as a precision-lossy JS number and is displayed rounded
@@ -270,6 +279,7 @@ status: open
 origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-pagination.md), 2026-07-12
 location: `driver-mysql.ts`; `naturalKind` (`frozen-map.ts`)
 reason: `driver-mysql.ts` opens the connection without `supportBigNumbers`/`bigNumberStrings`, so mysql2 decodes `BIGINT` columns to JS `number`; `frozen-map.ts` `naturalKind` then classifies the finite number as `"number"` and emits it verbatim, so a value like `9007199254740993` renders as `…992`. The mapper's bigint→string safety net only fires when the driver returns an actual `bigint`, which this config never produces for `BIGINT`. Rare (values beyond 2^53) and a driver-config/typing decision (enable big-number strings, or carry the SQL `dataType`) rather than a browse-composition bug; postgres.js already returns `int8` as a string and is unaffected.
+decision: [2026-07-21, user] Carry large integers (bigint/int8/numeric above 2^53) as exact STRINGS end-to-end — read AND write AND PK addressing — so nothing is silently truncated. (Shared resolution with DW-40.)
 status: open
 
 ### DW-36: Bound the FETCH (not just the display slice) for auto-classified raw reads — push a `LIMIT MAX_RESULT_ROWS + 1` or use a server cursor so a `SELECT * FROM huge_table` cannot materialize the whole result set into Core memory before the 1000-row cap applies
@@ -301,6 +311,7 @@ resolution: resolved by sweep bundle dw-postgres-positional-row-mapping
 origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-executor.md), 2026-07-12
 location: `executor.ts` (raw-SQL splitter)
 reason: Reviewer severity: low. `executor.ts` splitter activates backslash-escaping only for mysql strings and postgres `E'…'` strings. Under postgres `standard_conforming_strings=off`, plain `'…'` strings become backslash-active → splitter over-counts (valid statement falsely rejected — fail-safe). Under MySQL `NO_BACKSLASH_ESCAPES`, `'\''` is `\` + close-quote → splitter could under-count, but this is backstopped by the now-unconditional `multipleStatements:false`. All divergences are either over-reject (safe) or backstopped, and require a non-default server session config; the durable options are to read the session settings or document the assumption. No live exploit at default configs.
+decision: [2026-07-21, user] Detect the session's actual SQL modes and adapt the raw-SQL splitter's string/identifier parsing accordingly (the most-correct option; over document-and-force).
 status: open
 
 ### DW-40: Bind bigint/int8/numeric columns without JS `Number` precision loss on both the write value and the PK address — a value beyond `Number.MAX_SAFE_INTEGER` is silently truncated on edit/insert, and a lossy PK read makes `WHERE pk = <lossy>` address the wrong row (or none) on update/delete
@@ -308,6 +319,7 @@ status: open
 origin: migrated from legacy ledger (code review of spec-3-3-edit-insert-delete-rows.md), 2026-07-12
 location: `coerceValue` / `pkForRow` / `cellToValue` (`row-mutations.ts`)
 reason: Reviewer severity: high (two independent review passes flagged it as the highest-consequence item in the diff). `row-mutations.ts` `coerceValue("number")` uses `Number(raw)` and `pkForRow`/`cellToValue` read the PK from `FrozenCell` as a JS `number` (`cell.value`). The precision loss originates upstream in Story 3.2's `FrozenCell` number representation (bigint already arrives as a lossy JS number from the browse read); Story 3.3 is the first to WRITE with it, exposing a silent wrong-value / wrong-row data-corruption path with no error surfaced. Story 3.3 explicitly scopes DB-type-aware editors via `SchemaColumnInfo` out (deferred) and documents the kind-inference limitation, so the durable fix (thread column types + carry wide integers as strings/bigint across the wire) belongs with that deferred type-threading work, not the 3.3 UI.
+decision: [2026-07-21, user] SAME as DW-35 — exact-string end-to-end for large integers on both the write value and the PK address (WHERE pk = <exact string>), so update/delete can never address the wrong row via a lossy Number.
 status: open
 
 ### DW-41: Reset `createdTables` on connect/disconnect so optimistically-created tables don't accumulate across reconnects and shadow the re-introspected schema
@@ -339,6 +351,7 @@ resolution: already resolved: src/ui/workspace/ErdTabView.tsx:293-296 applyLayou
 origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 2026-07-12
 location: `schemaToGraph` (ERD graph builder)
 reason: When a MySQL connection names a database, columns are scoped to that schema but a FK may reference a table in another database; `schemaToGraph` then drops the edge as an "absent table" with no user indication a real relationship was omitted. Defensible for v1 but an explicit product decision (dangling-edge affordance vs. note vs. silent) is preferable.
+decision: [2026-07-21, user] Draw the cross-database MySQL FK as a DISTINCT edge (dashed / labeled with the target database) to an external node or annotation, marked as cross-database — do not silently drop it.
 status: open
 
 ### DW-45: `connectionManager.getSchema()` memoizes the schema at connect and never re-introspects, so chat context (and the "N tables" badge) goes stale after DDL runs (create/drop table)
@@ -365,6 +378,7 @@ origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sand
 location: sandbox `pushData` / CSP (spec-5-5 crossorigin JS sandbox)
 severity: high
 reason: CSP fetch directives (`connect-src`, `img-src`) do not govern top-level/self navigation, and `sandbox="allow-scripts"` without `allow-top-navigation` still permits a frame to navigate ITSELF. The pushed `FrozenData` is the user's real query output, not public data. Closing this is a genuine architectural/security decision (e.g. gating `pushData` on a confirmed handshake so data never lands in a navigated-away frame, and/or a documented residual) rather than a trivial patch — the `pushData(frame, "*")` target-origin is deliberately `"*"` against the guest's opaque origin.
+decision: [2026-07-21, user] ACCEPT the risk (guest-visible data is already the user's own) — document as out-of-scope, mirroring the DW-36 Option-A posture. RESIDUAL to record explicitly: a hostile/shared report could still exfiltrate FrozenData via scripted same-frame navigation; revisit if untrusted/shared reports are ever introduced. (User chose accept over the recommended sandbox-navigation block.)
 status: open
 
 ### DW-48: In exposed mode (`QS_HOST=0.0.0.0`) the sandbox server binds the same wildcard host as Core (LAN-exposing the tokenless guest) while the injected `__QS_SANDBOX_ORIGIN__` is normalized to `127.0.0.1:<port>`, which is unreachable for a remote browser — the sandbox silently fails to load off-host
@@ -373,6 +387,7 @@ origin: migrated from legacy ledger (code review of spec-5-5-crossorigin-js-sand
 location: `startCore` (sandbox `Bun.serve`, `bindHost`); `deriveOpenUrl`
 severity: medium
 reason: `startCore` passes `bindHost` straight into the sandbox `Bun.serve`, and `deriveOpenUrl` rewrites the injected origin to loopback. The intent-contract Block-If explicitly reserves the exposure model as a human security decision, so the correct exposed-mode posture (loopback-only sandbox + documented "visualization unavailable when exposed", or a reachable remote origin) is a deliberate call, not an unattended patch.
+decision: [2026-07-21, user] Keep the sandbox bound to LOOPBACK even when the Core is exposed (QS_HOST=0.0.0.0) — never LAN-expose the tokenless guest — and document that report visualizations only render on the host machine in exposed mode. (Closes problem (a); avoids the false-success of (b).)
 status: open
 
 ### DW-49: The guest→host signal stream (`height`/`error`/`datum-clicked`) is unbounded in rate/count, so a hostile guest can flood `onSignal` — and via `SandboxFrame`'s `setHeight` a React re-render — thrashing the Ring 2 main thread
@@ -437,6 +452,7 @@ source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
 location: `src/ui/data/grid-view.ts` (`csvField`/`rowsToCsv`)
 severity: medium
 reason: `rowsToCsv`'s `csvField` quotes only fields containing `,`/`"`/newline (exactly the escaping the spec prescribed) — it does not neutralize leading formula sigils. Because a DB browser exports arbitrary row content, a cell like `=SUM(A1)`/`+cmd`/`-2+3`/`@foo` becomes a live formula in a spreadsheet app. This is a genuine (well-known) export vulnerability, but the fix is a policy decision the presentation-only spec deliberately did not scope: the common mitigation (prefixing a `'` or tab) MUTATES exported data and many DB tools intentionally preserve fidelity instead. Worth a focused decision + follow-up rather than silently altering export output in an unattended pass.
+decision: [2026-07-21, user] Prefix-guard the CSV export — prepend a `'` to any cell starting with `= + - @` (and tab/CR) — the standard OWASP formula-injection mitigation.
 status: open
 
 ### DW-56: Clicking the result-bar Add-Row ("row") button opens the in-grid insert draft at the bottom of the scrollable table body with no scroll-into-view, so on a full/scrolled page the click appears to do nothing
@@ -464,6 +480,7 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (`footerButtons`, the `bg-[var(--err)] text-white` Confirm button)
 severity: medium
 reason: The white-on-`--err` fill is a faithful port of `confirm-destructive.html` (`.dx-btn-danger { background: var(--err); color: #fff }`), which the spec designates the visual source of truth — so following the contract produced it. The fix (darken `--err`, or the label) is an epic-wide `--err` design-token decision touching every destructive surface, not an isolated component tweak, and it slightly deviates from the prototype the spec mandates. Deferred to a focused a11y/contrast pass over the Epic 7 `--err`/`--warn` palette rather than a unilateral change in a presentation-only story.
+decision: [2026-07-21, user] Darken the `--err` fill (or the on-err text) so the Confirm button label reaches >=4.5:1 WCAG AA — a small token tweak, no design-language change.
 status: open
 
 ### DW-59: `ConfirmRun` declares `role="alertdialog"` + `aria-modal="true"` but does not enforce modality — no focus trap, no scrim-click dismiss, and background content stays tabbable
@@ -527,6 +544,7 @@ source_spec: `spec-7-4-redesign-erd-neutral.md`
 location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` marker ternary `c.isPrimaryKey ? key : c.isForeignKey ? link : spacer`)
 severity: low
 reason: Join/junction tables commonly have columns that are simultaneously PK and FK (an identifying relationship). The single 13px badge slot renders PK-first, so such a column shows the ink key and no blue link — the column-level FK cue is lost. It is NOT invisible overall: `schemaToGraph` still emits the FK edge, so the relationship is drawn on the canvas and lights up on hover; only the per-column glyph is missing. The prototype's card is a one-badge-per-row layout, so surfacing both would need a combined/dual-badge design decision (out of scope for a presentation-only port). Cosmetic; deferred for a badge-layout decision.
+decision: [2026-07-21, user] Show BOTH markers on an ERD column that is PK and FK — the PK key badge PLUS a distinct FK link marker (blue-link glyph) — so a composite PK+FK column reads as both.
 status: open
 
 ### DW-66: `hoveredNodeId` is never reconciled against the live node set — if the hovered table is removed (and its `tableId` later reused) while the pointer is over it and `onNodeMouseLeave` never fires, a stale id can spuriously highlight a different table's edges
@@ -545,6 +563,7 @@ source_spec: `spec-7-4-redesign-erd-neutral.md`
 location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` type label; `ErdLegend`)
 severity: low
 reason: The tiny muted type labels and legend faithfully reproduce `design-artifacts/erd.html` (the visual source of truth), but sub-11px muted foreground on a tonal `--card`/`--background` surface is a real WCAG legibility risk, and nothing in the tests checks contrast in light or dark. This is an epic-wide neutral-redesign concern (cf. DW-58, the Epic 7 light-theme/contrast work), not specific to the ERD — folded here so the ERD's small-text surfaces are covered when the epic does a contrast/a11y pass.
+decision: [2026-07-21, user] Adjust the ERD muted type-label + legend text to a token/size that verifies >=AA contrast in BOTH dark and light themes (minimal change to --t-text/size), checked with a measurement.
 status: open
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-5-redesign-chat-neutral.md`
   summary: The assistant action row renders open-in-editor / thumbs / share / regenerate / more as focusable buttons with action `aria-label`s but no behavior — they announce functionality they don't perform (an a11y/UX smell), an epic-wide decision to either wire them in a later behavioral story or mark them disabled.
