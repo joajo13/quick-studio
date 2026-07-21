@@ -19,6 +19,7 @@ import {
   applyAdded,
   applyEdited,
   applyRemoved,
+  editConnectionParams,
   emptyConnections,
   emptyDraft,
   loadConnections,
@@ -95,7 +96,13 @@ function EditRow({
   onCancel: () => void;
   busy: boolean;
 }): React.JSX.Element {
-  const [draft, setDraft] = useState<Draft>({ name: summary.name, url: "" });
+  // `schema` IS carried on the summary (unlike the url), so the field is pre-filled —
+  // which is what makes blanking it an unambiguous "clear the pin" on save.
+  const [draft, setDraft] = useState<Draft>({
+    name: summary.name,
+    url: "",
+    schema: summary.schema ?? "",
+  });
   const validation = validateDraft(draft, "edit");
   const nameInvalid = !validation.ok && validation.field === "name";
   const urlInvalid = !validation.ok && validation.field === "url";
@@ -115,6 +122,13 @@ function EditRow({
         value={draft.url}
         onChange={(url) => setDraft((d) => ({ ...d, url }))}
         invalid={urlInvalid}
+      />
+      <Field
+        label="schema (optional, blank to clear)"
+        placeholder="public"
+        value={draft.schema}
+        onChange={(schema) => setDraft((d) => ({ ...d, schema }))}
+        invalid={false}
       />
       {!validation.ok ? <ErrorLine text={validation.message} /> : null}
       <div className="flex gap-2">
@@ -266,27 +280,32 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
     // on `listLoaded`: if that list errored, adding would fork a duplicate store.
     if (!addValidation.ok || busy || loading || !listLoaded) return;
     setBusy(true);
-    void rpc<ConnectionSummary>("connections.add", { name: addDraft.name.trim(), url: addDraft.url.trim() }).then(
-      (reply) => {
-        if (reply.ok) {
-          setState((s) => applyAdded(s, reply.result));
-          setAddDraft(emptyDraft());
-          setError(null);
-        } else {
-          setError(envelopeText(reply.error));
-        }
-        setBusy(false);
-      },
-    );
+    // `schema` is sent ONLY when non-blank so an unpinned add stays byte-identical to
+    // the pre-10.2 request (nothing to clear on a connection that does not exist yet).
+    const addSchema = addDraft.schema.trim();
+    void rpc<ConnectionSummary>("connections.add", {
+      name: addDraft.name.trim(),
+      url: addDraft.url.trim(),
+      ...(addSchema.length > 0 ? { schema: addSchema } : {}),
+    }).then((reply) => {
+      if (reply.ok) {
+        setState((s) => applyAdded(s, reply.result));
+        setAddDraft(emptyDraft());
+        setError(null);
+      } else {
+        setError(envelopeText(reply.error));
+      }
+      setBusy(false);
+    });
   };
 
-  const onSaveEdit = (id: string, draft: Draft): void => {
+  const onSaveEdit = (id: string, draft: Draft, storedSchema: string | undefined): void => {
     if (busy || loading || !listLoaded) return;
     setBusy(true);
-    // Rename-only sends name; a non-empty url repoints. The UI never held the
-    // stored url, so a blank url means "keep it" — we simply omit it.
-    const url = draft.url.trim();
-    const params = url.length > 0 ? { id, name: draft.name.trim(), url } : { id, name: draft.name.trim() };
+    // Which keys the partial patch actually carries — url omitted when blank, schema
+    // omitted unless it differs from the pin the row was rendered from. Pure and
+    // unit-tested in `connections-model.ts`; see `editConnectionParams`.
+    const params = editConnectionParams(id, draft, storedSchema);
     void rpc<ConnectionSummary>("connections.edit", params).then((reply) => {
       if (reply.ok) {
         setState((s) => applyEdited(s, reply.result));
@@ -402,7 +421,18 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
             onChange={(url) => setAddDraft((d) => ({ ...d, url }))}
             invalid={addUrlInvalid}
           />
-          {!addValidation.ok && (addDraft.name.length > 0 || addDraft.url.length > 0) ? (
+          <Field
+            label="schema (optional)"
+            placeholder="public"
+            value={addDraft.schema}
+            onChange={(schema) => setAddDraft((d) => ({ ...d, schema }))}
+            invalid={false}
+          />
+          {/* Stay silent on a pristine form, but speak up as soon as ANY field has been
+              typed into — including `schema`, which alone leaves the Add button disabled
+              (name + url are still required) and would otherwise explain nothing. */}
+          {!addValidation.ok &&
+          (addDraft.name.length > 0 || addDraft.url.length > 0 || addDraft.schema.length > 0) ? (
             <ErrorLine text={addValidation.message} />
           ) : null}
           <div>
@@ -430,7 +460,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
                   key={summary.id}
                   summary={summary}
                   busy={busy}
-                  onSave={(draft) => onSaveEdit(summary.id, draft)}
+                  onSave={(draft) => onSaveEdit(summary.id, draft, summary.schema)}
                   onCancel={() => setEditingId(null)}
                 />
               ) : (

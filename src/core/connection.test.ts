@@ -366,3 +366,57 @@ describe("connection manager", () => {
     expect(counts.factory).toBe(0);
   });
 });
+
+/**
+ * A fake driver + factory that RECORDS every `listSchema` argument, so the pinned
+ * scope's thread from `ConnectionManagerDeps` to the driver is directly observable.
+ */
+function recordingDriver(): { factory: DriverFactory; calls: Array<string | undefined> } {
+  const calls: Array<string | undefined> = [];
+  const driver: Driver = {
+    async connect() {},
+    async listSchema(schema?: string) {
+      calls.push(schema);
+      return SAMPLE_SCHEMA;
+    },
+    async query() {
+      return { columns: [], rows: [] };
+    },
+    async queryReadOnly() {
+      return { columns: [], rows: [] };
+    },
+    quoteIdent(ident: string) {
+      return `"${ident}"`;
+    },
+    async close() {},
+  };
+  return { factory: () => driver, calls };
+}
+
+describe("connection manager — pinned schema scope (Story 10.2)", () => {
+  test("the configured schema reaches Driver.listSchema", async () => {
+    const { factory, calls } = recordingDriver();
+    const mgr = createConnectionManager({
+      databaseUrl: "postgres://u:p@h/db",
+      schema: "reporting",
+      createDriver: factory,
+    });
+
+    await mgr.connect();
+    expect(calls).toEqual(["reporting"]);
+  });
+
+  test("omitting the schema passes `undefined` — the engine-default scope, unchanged", async () => {
+    const { factory, calls } = recordingDriver();
+    const mgr = createConnectionManager({
+      databaseUrl: "postgres://u:p@h/db",
+      createDriver: factory,
+    });
+
+    await mgr.connect();
+    expect(calls).toEqual([undefined]);
+    // The memoized read never re-introspects, so the scope cannot drift.
+    expect(await mgr.getSchema()).toEqual(SAMPLE_SCHEMA);
+    expect(calls).toEqual([undefined]);
+  });
+});

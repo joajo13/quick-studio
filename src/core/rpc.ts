@@ -167,7 +167,18 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     if (p === null || typeof p.name !== "string" || typeof p.url !== "string") {
       return preformed(errorReply("bad_request", "connections.add requires { name, url }"));
     }
-    return preformed(toReply(ctx.connections.add({ name: p.name, url: p.url })));
+    if (p.schema !== undefined && typeof p.schema !== "string") {
+      return preformed(errorReply("bad_request", "connections.add schema must be a string"));
+    }
+    return preformed(
+      toReply(
+        ctx.connections.add({
+          name: p.name,
+          url: p.url,
+          ...(p.schema === undefined ? {} : { schema: p.schema }),
+        }),
+      ),
+    );
   },
   "connections.edit": (params, ctx): Preformed => {
     const p = asParamsObject(params);
@@ -180,12 +191,19 @@ const HANDLERS: Readonly<Record<string, Handler>> = {
     if (p.url !== undefined && typeof p.url !== "string") {
       return preformed(errorReply("bad_request", "connections.edit url must be a string"));
     }
+    if (p.schema !== undefined && typeof p.schema !== "string") {
+      return preformed(errorReply("bad_request", "connections.edit schema must be a string"));
+    }
     return preformed(
       toReply(
         ctx.connections.edit({
           id: p.id,
           ...(p.name === undefined ? {} : { name: p.name }),
           ...(p.url === undefined ? {} : { url: p.url }),
+          // Forwarded verbatim (Story 10.2): a BLANK `schema` is meaningful here — the
+          // registry reads it as "clear the pin" — so it must not be dropped like a
+          // blank url. Only an absent key means "keep".
+          ...(p.schema === undefined ? {} : { schema: p.schema }),
         }),
       ),
     );

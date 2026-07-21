@@ -330,13 +330,13 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // into the seams the executor runs over. The default (id null/absent) is the boot
   // manager, so the untargeted path is byte-identical. A target manager is created
   // lazily via the SAME driver factory, cached by id, self-invalidated against the
-  // registry's `getStoredUrl` on every resolve (repoint/removal), and closed on
+  // registry's `getStoredUrl` on every resolve (repoint/re-scope/removal), and closed on
   // shutdown. Only the id crosses the loopback — the url is resolved in-Core here.
   const connectionTargets = createConnectionTargets({
     bootManager: connectionManager,
     getStoredUrl: (id) => connectionRegistry.getStoredUrl(id),
-    createManager: (url) =>
-      createConnectionManager({ databaseUrl: url, createDriver: options.createDriver }),
+    createManager: (url, schema) =>
+      createConnectionManager({ databaseUrl: url, schema, createDriver: options.createDriver }),
   });
 
   // Guarded SQL executor (Story 3.1): the ONE Core-owned risk classifier. Its single

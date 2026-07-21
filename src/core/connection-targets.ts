@@ -12,9 +12,10 @@
  *  - **Lazy + cached by id:** a target manager is created on first `resolve(id)` and
  *    memoized, so N re-runs of the same Report reuse ONE live connection.
  *  - **Cache self-invalidation (revocation-correct):** every `resolve` of a cached id
- *    re-reads `getStoredUrl(id)`. If the stored url now DIFFERS (the connection was
- *    repointed in Settings) the stale manager is closed+evicted and re-opened at the
- *    new url; if it is now absent (the connection was removed) the manager is
+ *    re-reads `getStoredUrl(id)`. If the stored url OR pinned schema now DIFFERS (the
+ *    connection was repointed or re-scoped in Settings) the stale manager is
+ *    closed+evicted and re-opened at the new url/scope; if it is now absent (the
+ *    connection was removed) the manager is
  *    closed+evicted and `not-found` is returned. The registry is the single source of
  *    truth — a cached manager can never keep serving a revoked/edited connection for
  *    the rest of the session.
@@ -50,7 +51,12 @@ export type ConnectionSeams = {
  * valid target during a transient store failure is not misreported as unknown.
  */
 export type StoredUrlLookup =
-  | { readonly kind: "found"; readonly url: string }
+  | {
+      readonly kind: "found";
+      readonly url: string;
+      /** The record's pinned introspection scope (Story 10.2), absent when unpinned. */
+      readonly schema?: string;
+    }
   | { readonly kind: "not-found" }
   | { readonly kind: "unavailable"; readonly detail: string };
 
@@ -65,8 +71,11 @@ export type ConnectionTargetsDeps = {
   readonly bootManager: ConnectionManager;
   /** Core-internal id→url resolution (backed by the same credential store the registry uses). */
   readonly getStoredUrl: (id: string) => StoredUrlLookup;
-  /** Lazily construct a connection manager for a target url (driver opens on first use). */
-  readonly createManager: (url: string) => ConnectionManager;
+  /**
+   * Lazily construct a connection manager for a target url (driver opens on first
+   * use), scoped to the record's pinned `schema` when it has one (Story 10.2).
+   */
+  readonly createManager: (url: string, schema?: string) => ConnectionManager;
 };
 
 /** The live resolver handle returned by {@link createConnectionTargets}. */
@@ -99,8 +108,16 @@ function seamsFor(manager: ConnectionManager): ConnectionSeams {
 export function createConnectionTargets(deps: ConnectionTargetsDeps): ConnectionTargets {
   const { bootManager, getStoredUrl, createManager } = deps;
 
-  /** A cached target manager + the url it was opened with (for self-invalidation). */
-  type Cached = { readonly manager: ConnectionManager; readonly url: string };
+  /**
+   * A cached target manager + the url AND pinned schema it was opened with (for
+   * self-invalidation). The schema is part of the identity because a manager memoizes
+   * its introspected schema at the scope it was built with (Story 10.2).
+   */
+  type Cached = {
+    readonly manager: ConnectionManager;
+    readonly url: string;
+    readonly schema: string | undefined;
+  };
   const cache = new Map<string, Cached>();
   // Latched by `closeAll()`: after shutdown begins, no target is opened or served.
   let closed = false;
@@ -137,16 +154,19 @@ export function createConnectionTargets(deps: ConnectionTargetsDeps): Connection
 
       const existing = cache.get(connectionId);
       if (existing !== undefined) {
-        if (existing.url === lookup.url) {
-          // Cache hit, url unchanged — reuse the live manager.
+        if (existing.url === lookup.url && existing.schema === lookup.schema) {
+          // Cache hit, url AND pinned scope unchanged — reuse the live manager.
           return { ok: true, seams: seamsFor(existing.manager) };
         }
-        // Repointed in Settings: close+evict the stale manager, re-open at the new url.
+        // Repointed OR re-scoped in Settings: close+evict the stale manager and re-open
+        // at the new url/scope. The schema comparison is REQUIRED — a manager memoizes
+        // its introspected schema, so url-only equality would keep serving the old scope
+        // for the rest of the session after a Settings schema edit (Story 10.2).
         evict(connectionId, existing);
       }
 
-      const manager = createManager(lookup.url);
-      cache.set(connectionId, { manager, url: lookup.url });
+      const manager = createManager(lookup.url, lookup.schema);
+      cache.set(connectionId, { manager, url: lookup.url, schema: lookup.schema });
       return { ok: true, seams: seamsFor(manager) };
     },
 

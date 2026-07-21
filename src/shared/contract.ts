@@ -378,6 +378,19 @@ export type ConnectionSummary = {
   readonly name: string;
   readonly host: string;
   readonly engine: string;
+  /**
+   * Optional pinned introspection scope (Story 10.2): the single schema introspection
+   * is restricted to WHEREVER this saved connection is resolved as a target (the
+   * per-connection resolver); absent means every non-system schema, the pre-10.2
+   * default. The boot connection — and so the schema tree, table browser, and chat,
+   * which still read through the boot manager — does not consult it yet; generalizing
+   * those read paths to resolve by connection id is Story 10.4. Distinct from the two
+   * other `schema` meanings in this file: {@link TableRowsRequest.schema} qualifies a
+   * single table name, and {@link ConnectResult.schema} IS the introspected catalog.
+   * Additive-optional and credential-free, so a UI that does not know the field still
+   * round-trips.
+   */
+  readonly schema?: string;
 };
 
 /**
@@ -411,6 +424,8 @@ export type ActiveConnectionInfo = {
 export type AddConnectionParams = {
   readonly name: string;
   readonly url: string;
+  /** Optional pinned introspection scope (Story 10.2). Blank/absent ⇒ unpinned. */
+  readonly schema?: string;
 };
 
 /**
@@ -421,6 +436,13 @@ export type EditConnectionParams = {
   readonly id: string;
   readonly name?: string;
   readonly url?: string;
+  /**
+   * Optional pinned introspection scope (Story 10.2). Unlike `name`/`url`, a BLANK
+   * value is meaningful: it CLEARS the pin. `schema` rides on {@link ConnectionSummary},
+   * so the edit form pre-fills it and an emptied field is unambiguous user intent —
+   * whereas the credential-bearing url the UI never held stays "absent ⇒ keep".
+   */
+  readonly schema?: string;
 };
 
 /** Params for `connections.remove`. */

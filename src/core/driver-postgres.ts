@@ -74,6 +74,66 @@ export function pgSupportsConparentid(serverVersionNum: number): boolean {
 }
 
 /**
+ * A postgres.js template FRAGMENT — the value `sql`…`` produces and re-accepts when
+ * interpolated into an outer template. Its `strings`/`args` are the query text parts
+ * and the values postgres.js will bind, which is what makes {@link pgSchemaScope}
+ * assertable without a live server.
+ */
+type PgFragment = postgres.PendingQuery<ReadonlyArray<never>>;
+
+/** The four scope predicates the introspection queries splice into their WHERE clauses. */
+export type PgScopeFragments = {
+  /** `information_schema.columns` — unqualified `table_schema`. */
+  readonly colScope: PgFragment;
+  /** `information_schema.table_constraints` — aliased `tc.table_schema`. */
+  readonly pkScope: PgFragment;
+  /** `pg_index` → `pg_namespace` — the OWNING relation's `n.nspname`. */
+  readonly idxScope: PgFragment;
+  /** `pg_constraint` → `pg_namespace` — the OWNING relation's `con_ns.nspname`. */
+  readonly fkScope: PgFragment;
+};
+
+/**
+ * Build the four introspection scope predicates for an optional pinned schema
+ * (Story 10.2). Mirrors the `partitionFilter` idiom below: a conditional `sql`
+ * FRAGMENT interpolated into the query text, never a concatenated string.
+ *
+ * The UNPINNED arms reproduce the pre-10.2 predicates VERBATIM — that is the
+ * regression-critical back-compat contract, and a one-character drift (dropping the
+ * `!~ '^pg_'` that hides `pg_toast`/`pg_temp_*` indexes, say) would silently change
+ * every existing connection's introspection. The PINNED arms bind `${pin}` as a real
+ * parameter: this is a VALUE comparison against a catalog column, so `quoteIdent` is
+ * deliberately not involved. A blank/whitespace pin counts as unset at the driver
+ * boundary (defensive; the registry already trims), and a pin that survives is used
+ * TRIMMED — binding the raw `"  reporting  "` would match zero tables.
+ *
+ * Exported pure (it takes the `sql` tag rather than closing over one) so both arms are
+ * unit-testable against a never-connected client, same precedent as
+ * {@link pgSupportsConparentid} and driver-mysql's `mysqlSchemaScope`.
+ */
+export function pgSchemaScope(sql: postgres.Sql, schema: string | undefined): PgScopeFragments {
+  const pin = schema === undefined || schema.trim().length === 0 ? undefined : schema.trim();
+  return {
+    colScope:
+      pin === undefined
+        ? sql`table_schema NOT IN ('pg_catalog', 'information_schema')`
+        : sql`table_schema = ${pin}`,
+    pkScope:
+      pin === undefined
+        ? sql`tc.table_schema NOT IN ('pg_catalog', 'information_schema')`
+        : sql`tc.table_schema = ${pin}`,
+    idxScope:
+      pin === undefined
+        ? sql`n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'`
+        : sql`n.nspname = ${pin}`,
+    fkScope:
+      pin === undefined
+        ? sql`con_ns.nspname !~ '^pg_' AND con_ns.nspname <> 'information_schema'`
+        : sql`con_ns.nspname = ${pin}`,
+  };
+}
+
+/**
  * Force the EXTENDED/parameterized protocol. postgres.js decides simple vs extended
  * by `'simple' in options ? options.simple : args.length === 0`, so with no bind
  * params it defaults to the SIMPLE protocol (which runs every `;`-command). The
@@ -170,17 +230,24 @@ export function createPostgresDriver(url: string): Driver {
       }
     },
 
-    async listSchema(): Promise<DatabaseSchema> {
+    async listSchema(schema?: string): Promise<DatabaseSchema> {
       // The 5 introspection queries (columns, PK, index, server-version probe, FK) +
       // fold, extracted so `withTimeout` can bound the whole thing (DW-20) and the catch
       // below can classify any failure (DW-19).
       const introspect = async (): Promise<DatabaseSchema> => {
-      // Exclude the two system schemas; order by schema/table/ordinal so the
-      // neutral shape mirrors the live database's own column order.
+      // Story 10.2 — the optional pinned scope, as four conditional `sql` FRAGMENTS
+      // (see {@link pgSchemaScope}: unpinned reproduces today's predicates verbatim,
+      // pinned binds the trimmed value as a real parameter). Built once, spliced into
+      // the four WHERE clauses below exactly like `partitionFilter`.
+      const { colScope, pkScope, idxScope, fkScope } = pgSchemaScope(sql, schema);
+
+      // Exclude the two system schemas (or narrow to the pinned one); order by
+      // schema/table/ordinal so the neutral shape mirrors the live database's own
+      // column order.
       const rows = (await sql`
         SELECT table_schema, table_name, column_name, data_type, is_nullable
         FROM information_schema.columns
-        WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+        WHERE ${colScope}
         ORDER BY table_schema, table_name, ordinal_position
       `) as unknown as readonly PgColumnRow[];
 
@@ -198,7 +265,7 @@ export function createPostgresDriver(url: string): Driver {
          AND tc.table_schema = kcu.table_schema
          AND tc.table_name = kcu.table_name
         WHERE tc.constraint_type = 'PRIMARY KEY'
-          AND tc.table_schema NOT IN ('pg_catalog', 'information_schema')
+          AND ${pkScope}
         ORDER BY tc.table_schema, tc.table_name, kcu.ordinal_position
       `) as unknown as readonly PgPkRow[];
       const primaryKeys: IntrospectedPrimaryKey[] = pkRows.map((r) => ({
@@ -213,12 +280,12 @@ export function createPostgresDriver(url: string): Driver {
       // and `pg_attribute`; `indisunique` gives uniqueness. Expression-index columns
       // (`attnum = 0`) are out of scope, excluded by `a.attnum > 0`. The PK-backing
       // index (`<table>_pkey`) is intentionally NOT filtered out. This query reads the
-      // system catalogs (not information_schema), so it must exclude EVERY `pg_*` system
-      // schema — `n.nspname !~ '^pg_'` drops `pg_catalog`, `pg_toast`, and `pg_temp_*`
-      // (a `pg_toast` toast index exists for every table with a varlena column; user
-      // schemas can never start with `pg_`). Matview indexes that survive this filter
-      // still can't spawn a phantom table: `assembleSchema` only attaches indexes to
-      // tables already produced by the column query.
+      // system catalogs (not information_schema), so its UNPINNED scope must exclude
+      // EVERY `pg_*` system schema — `n.nspname !~ '^pg_'` drops `pg_catalog`,
+      // `pg_toast`, and `pg_temp_*` (a `pg_toast` toast index exists for every table
+      // with a varlena column; user schemas can never start with `pg_`). Matview indexes
+      // that survive this filter still can't spawn a phantom table: `assembleSchema` only
+      // attaches indexes to tables already produced by the column query.
       const indexRows = (await sql`
         SELECT
           n.nspname AS table_schema,
@@ -231,7 +298,7 @@ export function createPostgresDriver(url: string): Driver {
         JOIN pg_class t ON t.oid = ix.indrelid
         JOIN pg_namespace n ON n.oid = t.relnamespace
         JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
-        WHERE n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+        WHERE ${idxScope}
           AND a.attnum > 0
         ORDER BY n.nspname, t.relname, i.relname,
                  array_position(string_to_array(ix.indkey::text, ' ')::int[], a.attnum::int)
@@ -266,10 +333,14 @@ export function createPostgresDriver(url: string): Driver {
       // referenced attnum arrays IN LOCKSTEP so a COMPOSITE FK's local and referenced
       // columns stay position-aligned (a `key_column_usage`⋈`constraint_column_usage`
       // join would instead cross-product them and misalign composites). `ORDER BY … k.ord`
-      // preserves key-column order. Same `!~ '^pg_'` system-schema exclusion as the index
-      // query; the referenced side may live in another user schema (self-references simply
-      // name the same table). `assembleSchema` drops any FK whose owning table the column
-      // query never listed, so no phantom table is materialized. On a PARTITIONED parent,
+      // preserves key-column order. Same OWNING-side scope as the index query
+      // (`${fkScope}`); the REFERENCED side (`ref_ns.nspname`) stays deliberately
+      // unfiltered so an FK pointing OUT of the pinned schema is still reported as
+      // metadata on its owning table (the ERD then drops that edge, because the
+      // referenced table is not in scope and so was never materialized — only the
+      // column query can materialize a table). `assembleSchema` likewise drops any FK
+      // whose OWNING table the column query never listed, so no phantom table is
+      // materialized from either side. On a PARTITIONED parent,
       // every partition inherits a near-identical copy of the parent's FK carrying
       // `conparentid <> 0`; `${partitionFilter}` adds `AND con.conparentid = 0` on PG 11+
       // to keep only the parent-defined constraint (one ERD edge, not one per partition),
@@ -292,7 +363,7 @@ export function createPostgresDriver(url: string): Driver {
         JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = k.attnum
         JOIN pg_attribute ref_att ON ref_att.attrelid = con.confrelid AND ref_att.attnum = k.refattnum
         WHERE con.contype = 'f' ${partitionFilter}
-          AND con_ns.nspname !~ '^pg_' AND con_ns.nspname <> 'information_schema'
+          AND ${fkScope}
         ORDER BY con_ns.nspname, con_rel.relname, con.conname, k.ord
       `) as unknown as readonly PgFkRow[];
 

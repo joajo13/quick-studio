@@ -34,8 +34,16 @@ import { createPostgresDriver } from "./driver-postgres.ts";
 export type Driver = {
   /** Open and liveness-verify the connection. Rejects with {@link DriverConnectionError}. */
   connect(): Promise<void>;
-  /** Introspect the live connection into the neutral schema shape. */
-  listSchema(): Promise<DatabaseSchema>;
+  /**
+   * Introspect the live connection into the neutral schema shape. `schema` (Story
+   * 10.2) optionally PINS the introspection to a single server-side schema: each
+   * adapter narrows the scope predicate of every introspection query to it, bound as
+   * a query parameter (never spliced into the SQL text), so no metadata is fetched
+   * for out-of-scope tables. OMITTING it preserves the pre-10.2 engine default —
+   * Postgres every non-`pg_*`/`information_schema` schema, MySQL the URL's own
+   * database when it has one, else every non-system schema.
+   */
+  listSchema(schema?: string): Promise<DatabaseSchema>;
   /**
    * Run a row-returning query and yield its rows as ordered arrays plus the
    * ordered column descriptors — the one engine-neutral read seam (Story 3.2).

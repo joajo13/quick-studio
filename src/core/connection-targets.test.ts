@@ -17,8 +17,8 @@ import { createConnectionTargets, type StoredUrlLookup } from "./connection-targ
 
 const SCHEMA: DatabaseSchema = { engine: "postgres", tables: [] };
 
-/** A fake connection manager tagged with its url; records `query` + `close`. */
-function fakeManager(url: string) {
+/** A fake connection manager tagged with its url + pinned schema; records `query` + `close`. */
+function fakeManager(url: string, schema?: string) {
   let closed = false;
   const queries: string[] = [];
   const manager: ConnectionManager = {
@@ -42,27 +42,35 @@ function fakeManager(url: string) {
       closed = true;
     },
   };
-  return { url, manager, isClosed: () => closed, queries };
+  return { url, schema, manager, isClosed: () => closed, queries };
 }
 
-/** A harness: a mutable id→url store + a manager factory recording every manager built. */
+/**
+ * A harness: a mutable id→url store (plus the optional id→pinned-schema map of Story
+ * 10.2) + a manager factory recording every manager built, with the url AND schema it
+ * was built at.
+ */
 function harness(initial: Record<string, string> = {}) {
   const urls = new Map<string, string>(Object.entries(initial));
+  const schemas = new Map<string, string>();
   const created: Array<ReturnType<typeof fakeManager>> = [];
   const boot = fakeManager("boot://db");
 
   const getStoredUrl = (id: string): StoredUrlLookup => {
     const url = urls.get(id);
-    return url === undefined ? { kind: "not-found" } : { kind: "found", url };
+    if (url === undefined) return { kind: "not-found" };
+    const schema = schemas.get(id);
+    // Conditional, exactly like the registry's: an unpinned record carries no key.
+    return { kind: "found", url, ...(schema === undefined ? {} : { schema }) };
   };
-  const createManager = (url: string): ConnectionManager => {
-    const m = fakeManager(url);
+  const createManager = (url: string, schema?: string): ConnectionManager => {
+    const m = fakeManager(url, schema);
     created.push(m);
     return m.manager;
   };
 
   const targets = createConnectionTargets({ bootManager: boot.manager, getStoredUrl, createManager });
-  return { targets, urls, created, boot };
+  return { targets, urls, schemas, created, boot };
 }
 
 describe("createConnectionTargets — default + basic resolution", () => {
@@ -145,6 +153,55 @@ describe("createConnectionTargets — cache self-invalidation", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("not-found");
     expect(created[0]!.isClosed()).toBe(true); // the stale live connection is closed
+  });
+});
+
+describe("createConnectionTargets — pinned schema scope (Story 10.2)", () => {
+  test("the record's pinned schema reaches the manager factory; unpinned passes undefined", () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a", b: "postgres://b" });
+    schemas.set("a", "reporting");
+
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(targets.resolve("b").ok).toBe(true);
+    expect(created[0]!.schema).toBe("reporting");
+    expect(created[1]!.schema).toBeUndefined();
+  });
+
+  test("a schema-ONLY edit evicts+closes the stale manager and re-creates it at the new scope", async () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a" });
+    const r1 = targets.resolve("a");
+    expect(r1.ok).toBe(true);
+    expect(created[0]!.schema).toBeUndefined();
+
+    schemas.set("a", "reporting"); // pinned in Settings — the url did NOT change
+    const r2 = targets.resolve("a");
+    expect(r2.ok).toBe(true);
+    if (r2.ok) await r2.seams.runQuery("SELECT scoped", []);
+
+    // Url-only equality would have kept serving the old (unscoped) introspection.
+    expect(created.length).toBe(2);
+    expect(created[0]!.isClosed()).toBe(true);
+    expect(created[1]!.schema).toBe("reporting");
+    expect(created[1]!.queries).toEqual(["SELECT scoped"]);
+  });
+
+  test("clearing the pin likewise re-creates the manager (unscoped again, same session)", () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a" });
+    schemas.set("a", "reporting");
+    expect(targets.resolve("a").ok).toBe(true);
+
+    schemas.delete("a"); // blanked in Settings
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(created.length).toBe(2);
+    expect(created[1]!.schema).toBeUndefined();
+  });
+
+  test("an unchanged pin is still a cache HIT (no needless re-open)", () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a" });
+    schemas.set("a", "reporting");
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(created.length).toBe(1);
   });
 });
 

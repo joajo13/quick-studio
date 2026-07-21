@@ -10,7 +10,7 @@
  * total classifier. No I/O, no React, no `window`.
  */
 
-import type { ConnectionSummary } from "../../shared/contract.ts";
+import type { ConnectionSummary, EditConnectionParams } from "../../shared/contract.ts";
 
 /** The list state the Settings panel renders. Immutable — reducers return new values. */
 export type ConnectionsState = {
@@ -30,11 +30,20 @@ export function emptyConnections(): ConnectionsState {
 export type Draft = {
   readonly name: string;
   readonly url: string;
+  /**
+   * The optional pinned introspection scope (Story 10.2). Free text — a schema name
+   * is an opaque server-side identifier, so it has no shape validation here (or in
+   * Core). Blank means unpinned on an add; on an edit, blanking a PRE-FILLED value
+   * clears the pin — unlike the url, this field IS seeded from the summary, so emptying
+   * it is deliberate. Which keys a save actually patches lives in
+   * {@link editConnectionParams}.
+   */
+  readonly schema: string;
 };
 
-/** An empty draft (both fields blank). */
+/** An empty draft (all fields blank). */
 export function emptyDraft(): Draft {
-  return { name: "", url: "" };
+  return { name: "", url: "", schema: "" };
 }
 
 /** Which flow a draft is validated for: an add requires a url; an edit may omit it. */
@@ -90,6 +99,42 @@ export function validateDraft(draft: Draft, kind: DraftKind): DraftValidation {
     }
   }
   return { ok: true };
+}
+
+/**
+ * Build the `connections.edit` patch from a submitted {@link Draft} (Story 10.2).
+ * Both optional fields are OMITTED unless they carry intent, because `edit` is a
+ * partial patch and an absent key means "keep":
+ *
+ * - `url` — omitted when blank. The UI never held the stored (credential-bearing) url,
+ *   so a blank input is "keep the stored one", never "clear it".
+ * - `schema` — omitted unless it DIFFERS from the pin the row was rendered from
+ *   (`storedSchema`). The field IS pre-filled from {@link ConnectionSummary}, so a
+ *   changed value is deliberate: blanking a pre-filled pin sends `""` (Core's clear
+ *   signal, R1), setting/changing sends the new value, and an untouched field — pinned
+ *   or not — sends nothing. Sending it unconditionally would let a draft snapshotted
+ *   before another window re-pinned the connection silently overwrite that newer pin:
+ *   the panel lists once on mount, so `storedSchema` is exactly the value the field was
+ *   seeded from, and an untouched field therefore compares equal and stays out of the
+ *   patch. (This does NOT reach the registry's empty-patch fast path — `name` is always
+ *   sent, so a save always writes; the win is confined to not clobbering the pin.)
+ *
+ * `name` is always sent (trimmed) — `validateDraft` guarantees it is non-empty.
+ * Pure and total, so both patch rules are unit-testable with no DOM and no RPC.
+ */
+export function editConnectionParams(
+  id: string,
+  draft: Draft,
+  storedSchema: string | undefined,
+): EditConnectionParams {
+  const url = draft.url.trim();
+  const schema = draft.schema.trim();
+  return {
+    id,
+    name: draft.name.trim(),
+    ...(url.length > 0 ? { url } : {}),
+    ...(schema !== (storedSchema ?? "") ? { schema } : {}),
+  };
 }
 
 /* ------------------------------------------------------------------ *

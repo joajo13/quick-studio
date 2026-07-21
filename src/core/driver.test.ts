@@ -20,8 +20,8 @@ import {
   type IntrospectedForeignKey,
   type IntrospectedIndex,
 } from "./driver.ts";
-import { buildMysqlConfig, createMutex } from "./driver-mysql.ts";
-import { mapUnsafeResult, pgSupportsConparentid } from "./driver-postgres.ts";
+import { buildMysqlConfig, createMutex, mysqlSchemaScope } from "./driver-mysql.ts";
+import { mapUnsafeResult, pgSchemaScope, pgSupportsConparentid } from "./driver-postgres.ts";
 
 /** A synthetic engine/OS error carrying the `code`/`errno` tags drivers surface. */
 function fakeErr(tags: { code?: string; errno?: number }): Error {
@@ -495,6 +495,166 @@ describe("pgSupportsConparentid — PG 11 version boundary (DW-42)", () => {
     expect(pgSupportsConparentid(100000)).toBe(false);
     expect(pgSupportsConparentid(110000)).toBe(true);
     expect(pgSupportsConparentid(160001)).toBe(true);
+  });
+});
+
+// Story 10.2 — the pinned-schema scope predicate shared by the four mysql
+// introspection queries. Pure, so the precedence rule (R2: the pin wins over the
+// URL's own database) and the untouched no-pin path are provable without a live mysql.
+describe("mysqlSchemaScope — pinned introspection scope (Story 10.2)", () => {
+  const SYSTEM = ["information_schema", "performance_schema", "mysql", "sys"];
+
+  test("pinned + URL database: the PIN wins (R2)", () => {
+    expect(mysqlSchemaScope("reporting", "appdb")).toEqual({
+      where: "table_schema = ?",
+      params: ["reporting"],
+    });
+  });
+
+  test("pinned only (URL has no database path): scoped to the pin", () => {
+    expect(mysqlSchemaScope("reporting", null)).toEqual({
+      where: "table_schema = ?",
+      params: ["reporting"],
+    });
+  });
+
+  test("no pin + URL database: today's behavior, scoped to the URL's database", () => {
+    expect(mysqlSchemaScope(undefined, "appdb")).toEqual({
+      where: "table_schema = ?",
+      params: ["appdb"],
+    });
+  });
+
+  test("neither: today's behavior, the system schemas excluded by placeholder", () => {
+    expect(mysqlSchemaScope(undefined, null)).toEqual({
+      where: "table_schema NOT IN (?, ?, ?, ?)",
+      params: SYSTEM,
+    });
+  });
+
+  test("a blank/whitespace pin counts as UNSET at the driver boundary", () => {
+    for (const blank of ["", "   ", "\t\n"]) {
+      expect(mysqlSchemaScope(blank, "appdb")).toEqual({
+        where: "table_schema = ?",
+        params: ["appdb"],
+      });
+      expect(mysqlSchemaScope(blank, null)).toEqual({
+        where: "table_schema NOT IN (?, ?, ?, ?)",
+        params: SYSTEM,
+      });
+    }
+  });
+
+  test("the schema name is a bound VALUE, never spliced into the predicate text", () => {
+    const scope = mysqlSchemaScope("evil'; DROP TABLE t; --", null);
+    expect(scope.where).toBe("table_schema = ?");
+    expect(scope.params).toEqual(["evil'; DROP TABLE t; --"]);
+  });
+
+  test("returns FRESH arrays per call (mysql2 consumes them positionally)", () => {
+    expect(mysqlSchemaScope(undefined, null).params).not.toBe(
+      mysqlSchemaScope(undefined, null).params,
+    );
+  });
+
+  // The TRIMMED pin is what gets bound, not the raw stored string: `"  reporting  "`
+  // would match zero tables as a value comparison against `table_schema`.
+  test("a padded pin is bound TRIMMED, not raw", () => {
+    expect(mysqlSchemaScope("  reporting  ", "appdb")).toEqual({
+      where: "table_schema = ?",
+      params: ["reporting"],
+    });
+  });
+});
+
+// Story 10.2 — the postgres counterpart. No live DB: postgres.js builds a `sql`…``
+// fragment LAZILY, exposing the literal text parts as `strings` and the values it will
+// BIND as `args`, so both arms are fully provable against a never-connected client
+// (same trick as the extended-protocol backstop below, which never opens a socket
+// against the non-routable 127.0.0.1:1).
+//
+// This locks the two properties nothing else in the suite can: (a) the UNPINNED arms
+// reproduce the pre-10.2 predicates VERBATIM — a one-character drift in
+// `n.nspname !~ '^pg_'` would silently resurface every `pg_toast` index for every
+// existing connection — and (b) the PINNED arms carry the schema as a bound ARG, never
+// spliced into the query text.
+describe("pgSchemaScope — pinned introspection scope (Story 10.2)", () => {
+  /** The literal SQL text of a fragment: its `strings` parts with each bind slot marked. */
+  const textOf = (fragment: unknown): string =>
+    (fragment as { strings: readonly string[] }).strings.join("$?");
+  /** The values postgres.js will BIND for a fragment (empty ⇒ pure literal predicate). */
+  const argsOf = (fragment: unknown): readonly unknown[] =>
+    (fragment as { args: readonly unknown[] }).args;
+
+  const withSql = async (run: (sql: ReturnType<typeof postgres>) => void): Promise<void> => {
+    const sql = postgres("postgres://u:p@127.0.0.1:1/db", { max: 1 });
+    try {
+      run(sql);
+    } finally {
+      await sql.end({ timeout: 1 });
+    }
+  };
+
+  test("UNPINNED: the four predicates are today's, verbatim, with NOTHING bound", async () => {
+    await withSql((sql) => {
+      const scope = pgSchemaScope(sql, undefined);
+      expect(textOf(scope.colScope)).toBe(
+        "table_schema NOT IN ('pg_catalog', 'information_schema')",
+      );
+      expect(textOf(scope.pkScope)).toBe(
+        "tc.table_schema NOT IN ('pg_catalog', 'information_schema')",
+      );
+      expect(textOf(scope.idxScope)).toBe(
+        "n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'",
+      );
+      expect(textOf(scope.fkScope)).toBe(
+        "con_ns.nspname !~ '^pg_' AND con_ns.nspname <> 'information_schema'",
+      );
+      for (const fragment of Object.values(scope)) expect(argsOf(fragment)).toEqual([]);
+    });
+  });
+
+  test("PINNED: each predicate is an equality whose value is a BOUND arg, never text", async () => {
+    await withSql((sql) => {
+      const scope = pgSchemaScope(sql, "reporting");
+      expect(textOf(scope.colScope)).toBe("table_schema = $?");
+      expect(textOf(scope.pkScope)).toBe("tc.table_schema = $?");
+      expect(textOf(scope.idxScope)).toBe("n.nspname = $?");
+      expect(textOf(scope.fkScope)).toBe("con_ns.nspname = $?");
+      for (const fragment of Object.values(scope)) {
+        expect(argsOf(fragment)).toEqual(["reporting"]);
+        // The name lives ONLY in the bind slot — no fragment's text mentions it.
+        expect(textOf(fragment)).not.toContain("reporting");
+      }
+    });
+  });
+
+  test("a hostile schema name stays a bound VALUE (no splice, no injection)", async () => {
+    await withSql((sql) => {
+      const evil = "public'; DROP TABLE t; --";
+      const scope = pgSchemaScope(sql, evil);
+      expect(textOf(scope.colScope)).toBe("table_schema = $?");
+      expect(argsOf(scope.colScope)).toEqual([evil]);
+    });
+  });
+
+  test("a blank/whitespace pin falls back to the UNPINNED arms (driver-boundary defense)", async () => {
+    await withSql((sql) => {
+      for (const blank of ["", "   ", "\t\n"]) {
+        const scope = pgSchemaScope(sql, blank);
+        expect(textOf(scope.colScope)).toBe(
+          "table_schema NOT IN ('pg_catalog', 'information_schema')",
+        );
+        expect(argsOf(scope.colScope)).toEqual([]);
+      }
+    });
+  });
+
+  test("a padded pin is bound TRIMMED, not raw", async () => {
+    await withSql((sql) => {
+      const scope = pgSchemaScope(sql, "  reporting  ");
+      for (const fragment of Object.values(scope)) expect(argsOf(fragment)).toEqual(["reporting"]);
+    });
   });
 });
 

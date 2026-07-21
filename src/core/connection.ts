@@ -86,6 +86,12 @@ export type ConnectionManager = {
 export type ConnectionManagerDeps = {
   /** The in-memory Ephemeral URL, or `null`/`undefined` when no target is configured. */
   readonly databaseUrl?: string | null | undefined;
+  /**
+   * The saved connection's pinned introspection scope (Story 10.2), forwarded to
+   * `Driver.listSchema`. `undefined` (the boot manager's case — a CLI `--url` has no
+   * saved record) keeps the pre-10.2 engine-default scope.
+   */
+  readonly schema?: string | undefined;
   /** Driver factory. Defaults to the real scheme-selecting {@link realCreateDriver}. */
   readonly createDriver?: DriverFactory;
 };
@@ -100,6 +106,7 @@ export function createConnectionManager(
   deps: ConnectionManagerDeps,
 ): ConnectionManager {
   const databaseUrl = deps.databaseUrl ?? null;
+  const pinnedSchema = deps.schema;
   const createDriver = deps.createDriver ?? realCreateDriver;
 
   let driver: Driver | null = null;
@@ -138,7 +145,7 @@ export function createConnectionManager(
     }
     try {
       await d.connect();
-      const schema = await d.listSchema();
+      const schema = await d.listSchema(pinnedSchema);
       driver = d;
       cached = { status: "connected", schema };
       return cached;
@@ -216,8 +223,9 @@ export function createConnectionManager(
       // `ensureDriver`→`doConnect` populates `cached` with the introspected schema
       // on success, so this is a memoized read (no re-introspection per call).
       if (cached !== null && cached.status === "connected") return cached.schema;
-      // Defensive: a live driver with no cached schema (shouldn't happen) — introspect.
-      return ensureDriver().then((d) => d.listSchema());
+      // Defensive: a live driver with no cached schema (shouldn't happen) — introspect
+      // under the SAME pinned scope, so the fallback can never widen it.
+      return ensureDriver().then((d) => d.listSchema(pinnedSchema));
     },
 
     async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {

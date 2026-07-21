@@ -467,6 +467,60 @@ describe("credential-store — typed failure arms via injected deps", () => {
     const open = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
     expect(open.outcome).toBe("schema-unknown");
   });
+
+  test("a LEGACY record with no `schema` still loads (additive-optional, no version bump) — Story 10.2", () => {
+    const dir = makeTempDir();
+    // A store written before 10.2: same STORE_SCHEMA_VERSION, records with no
+    // `schema` key. It must open cleanly (never `schema-unknown`/`corrupt`) and
+    // read back with `schema === undefined`.
+    const enc = encryptJson(FIXED_KEY, {
+      schemaVersion: STORE_SCHEMA_VERSION,
+      connections: [{ id: "c1", name: "legacy", url: "postgres://u:p@h/db" }],
+    });
+    if (enc.outcome !== "encrypted") throw new Error("expected encrypted");
+    writeFileSync(join(dir, STORE_FILE_NAME), JSON.stringify(enc.envelope));
+
+    const open = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    expect(open.outcome).toBe("opened");
+    if (open.outcome !== "opened") return;
+    expect(open.store.getConnection("c1")?.schema).toBeUndefined();
+  });
+
+  test("a non-string `schema` on a record → typed corrupt (the guard rejects it) — Story 10.2", () => {
+    const dir = makeTempDir();
+    // A hand-edited/corrupt store must never bind a non-string into introspection SQL.
+    const enc = encryptJson(FIXED_KEY, {
+      schemaVersion: STORE_SCHEMA_VERSION,
+      connections: [{ id: "c1", name: "n", url: "postgres://u:p@h/db", schema: 7 }],
+    });
+    if (enc.outcome !== "encrypted") throw new Error("expected encrypted");
+    writeFileSync(join(dir, STORE_FILE_NAME), JSON.stringify(enc.envelope));
+
+    const open = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    expect(open.outcome).toBe("corrupt");
+  });
+});
+
+describe("credential-store — optional pinned schema round-trip (Story 10.2)", () => {
+  test("a record WITH a schema survives a relaunch, and one without stays key-free", () => {
+    const dir = makeTempDir();
+    const open1 = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    if (open1.outcome !== "opened") throw new Error("expected opened");
+    open1.store.saveConnection({
+      id: "pinned",
+      name: "a",
+      url: "postgres://u:p@h/a",
+      schema: "reporting",
+    });
+    open1.store.saveConnection(rec("plain", "b", "postgres://u:p@h/b"));
+
+    const open2 = openCredentialStore({ mode: "persistent", dir, loadStoreKey: fixedKeyProvider });
+    if (open2.outcome !== "opened") throw new Error("expected opened");
+    expect(open2.store.getConnection("pinned")?.schema).toBe("reporting");
+    const plain = open2.store.getConnection("plain");
+    expect(plain).toBeDefined();
+    expect(Object.keys(plain!).sort()).toEqual(["id", "name", "url"]);
+  });
 });
 
 describe("credential-store — passphrase fallback (keychain unavailable)", () => {

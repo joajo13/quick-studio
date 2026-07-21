@@ -59,7 +59,12 @@ export type RegistryResult<T> =
  * a valid target during a transient store failure is never mislabeled "unknown".
  */
 export type StoredUrlLookup =
-  | { readonly kind: "found"; readonly url: string }
+  | {
+      readonly kind: "found";
+      readonly url: string;
+      /** The record's pinned introspection scope (Story 10.2), absent when unpinned. */
+      readonly schema?: string;
+    }
   | { readonly kind: "not-found" }
   | { readonly kind: "unavailable"; readonly detail: string };
 
@@ -121,6 +126,23 @@ function checkName(name: unknown): FieldCheck {
   return { ok: true, value: trimmed };
 }
 
+/**
+ * schema (Story 10.2): an OPTIONAL pinned introspection scope. Mirrors `checkName`'s
+ * trim discipline but is never required — a trimmed-empty value is a legitimate
+ * "unset/clear" (R1), not a `bad_request`. The value stays opaque: a schema name is a
+ * server-side identifier this story deliberately does NOT validate against the live
+ * database (it is bound as a query parameter, never spliced into SQL).
+ */
+function checkSchema(
+  schema: unknown,
+): { readonly ok: true; readonly value: string | undefined } | Extract<FieldCheck, { ok: false }> {
+  if (typeof schema !== "string") {
+    return { ok: false, field: "schema", reason: "schema must be a string" };
+  }
+  const trimmed = schema.trim();
+  return { ok: true, value: trimmed.length === 0 ? undefined : trimmed };
+}
+
 /** url: a `new URL()`-parseable string WITH a host (shape only — scheme is NOT validated here). */
 function checkUrl(url: unknown): FieldCheck {
   if (typeof url !== "string" || url.trim().length === 0) {
@@ -156,6 +178,9 @@ function toSummary(record: StoredConnection): ConnectionSummary {
     name: record.name,
     host: parsed.host,
     engine: parsed.protocol.replace(/:$/, ""),
+    // CONDITIONAL, not `schema: undefined`: an unpinned connection's summary must
+    // carry no `schema` KEY at all, so its shape stays byte-identical to pre-10.2.
+    ...(record.schema === undefined ? {} : { schema: record.schema }),
   };
 }
 
@@ -173,7 +198,13 @@ function safeSummary(record: StoredConnection): ConnectionSummary {
   try {
     return toSummary(record);
   } catch {
-    return { id: record.id, name: record.name, host: "", engine: "" };
+    return {
+      id: record.id,
+      name: record.name,
+      host: "",
+      engine: "",
+      ...(record.schema === undefined ? {} : { schema: record.schema }),
+    };
   }
 }
 
@@ -260,6 +291,10 @@ export function createConnectionRegistry(
       if (!name.ok) return badRequest(name);
       const url = checkUrl(params?.url);
       if (!url.ok) return badRequest(url);
+      // Optional (Story 10.2): absent OR blank ⇒ unpinned, so the key is simply
+      // never written and the record stays byte-identical to a pre-10.2 one.
+      const schema = params?.schema === undefined ? undefined : checkSchema(params.schema);
+      if (schema !== undefined && !schema.ok) return badRequest(schema);
 
       const store = obtain();
       if (!store.ok) return store;
@@ -269,6 +304,7 @@ export function createConnectionRegistry(
         id: randomUUID(),
         name: name.value,
         url: url.value,
+        ...(schema === undefined || schema.value === undefined ? {} : { schema: schema.value }),
       };
       const mutation = store.value.saveConnection(record);
       if (mutation.outcome !== "ok") return writeFailed();
@@ -294,10 +330,19 @@ export function createConnectionRegistry(
         };
       }
 
-      // Nothing to change (neither name nor url supplied): return the unchanged
-      // summary WITHOUT a save — avoid a needless re-encrypt + disk flush. Ordered
-      // AFTER the not_found check so an unknown id still errors.
-      if (params.name === undefined && params.url === undefined) {
+      // Nothing to change (neither name, url, nor schema supplied): return the
+      // unchanged summary WITHOUT a save — avoid a needless re-encrypt + disk flush.
+      // Ordered AFTER the not_found check so an unknown id still errors. `schema` MUST
+      // be part of this test — otherwise a schema-only edit silently no-ops. A BLANK
+      // schema against an already-unpinned record is likewise nothing to change: R1
+      // makes it a clear, and clearing an absent pin rebuilds a byte-identical record.
+      // Non-strings still fall through, so `checkSchema` can reject them.
+      const schemaIsNoOp =
+        params.schema === undefined ||
+        (existing.schema === undefined &&
+          typeof params.schema === "string" &&
+          params.schema.trim().length === 0);
+      if (params.name === undefined && params.url === undefined && schemaIsNoOp) {
         return { ok: true, value: safeSummary(existing) };
       }
 
@@ -314,8 +359,24 @@ export function createConnectionRegistry(
         if (!url.ok) return badRequest(url);
         nextUrl = url.value;
       }
+      // R1: for `schema` — and ONLY for `schema` — a blank value CLEARS the pin (an
+      // absent key still means "keep"). Safe here because `schema` rides on the
+      // summary, so the edit form pre-fills it and an emptied field is unambiguous;
+      // the credential-bearing url the UI never held keeps its "absent ⇒ keep" rule.
+      let nextSchema = existing.schema;
+      if (params.schema !== undefined) {
+        const schema = checkSchema(params.schema);
+        if (!schema.ok) return badRequest(schema);
+        nextSchema = schema.value;
+      }
 
-      const record: StoredConnection = { id, name: nextName, url: nextUrl };
+      const record: StoredConnection = {
+        id,
+        name: nextName,
+        url: nextUrl,
+        // A cleared schema drops the key entirely rather than storing `undefined`.
+        ...(nextSchema === undefined ? {} : { schema: nextSchema }),
+      };
       const mutation = store.value.saveConnection(record);
       if (mutation.outcome !== "ok") return writeFailed();
       // `safeSummary`, not `toSummary`: a rename-only edit keeps a possibly-malformed
@@ -353,7 +414,13 @@ export function createConnectionRegistry(
       }
       const record = store.value.getConnection(id);
       if (record === undefined) return { kind: "not-found" };
-      return { kind: "found", url: record.url };
+      // The pinned schema rides along (Story 10.2) so the per-target resolver can key
+      // its cache on it and hand it to `listSchema` — still credential-free.
+      return {
+        kind: "found",
+        url: record.url,
+        ...(record.schema === undefined ? {} : { schema: record.schema }),
+      };
     },
 
     close() {
