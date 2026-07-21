@@ -302,6 +302,9 @@ export type DatabaseSchema = {
  *  - `malformed-url` — a supported-scheme URL that `new URL()` cannot parse (a
  *    bad/out-of-range port or unparseable authority) — structurally rejected by
  *    {@link createDriver} before any socket opens; distinct from an unsupported scheme.
+ *  - `no-target` — no connection target is configured at all (`databaseUrl === null`).
+ *    The normal shape of a Persistent boot before any connection is saved — NOT a URL
+ *    problem, and distinct from `unsupported_scheme` (which is a genuinely bad scheme).
  */
 export type ConnectionFailureKind =
   | "host"
@@ -309,7 +312,8 @@ export type ConnectionFailureKind =
   | "network"
   | "unsupported_scheme"
   | "database-does-not-exist"
-  | "malformed-url";
+  | "malformed-url"
+  | "no-target";
 
 /**
  * The outcome of a `connect` RPC. This is a DOMAIN result carried inside a

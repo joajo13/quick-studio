@@ -22,6 +22,21 @@ import {
   type DriverQueryResult,
 } from "./driver.ts";
 
+/**
+ * Thrown by the read path (`getSchema`/`query`/`queryReadOnly` via `ensureDriver`)
+ * when there is NO connection target configured at all (`databaseUrl === null`) — the
+ * normal shape of a Persistent boot before any connection is saved. A TYPE (not a
+ * message string) so read-path callers can `instanceof`-branch it into a neutral
+ * `bad_request` "no active connection" reply instead of letting it degrade into the
+ * generic `internal_error` catch-all. The message stays credential-free.
+ */
+export class NoConnectionTargetError extends Error {
+  constructor() {
+    super("no connection target configured");
+    this.name = "NoConnectionTargetError";
+  }
+}
+
 /** The live connection manager handle returned by {@link createConnectionManager}. */
 export type ConnectionManager = {
   /**
@@ -151,12 +166,12 @@ export function createConnectionManager(
     if (inflight !== null) return inflight;
 
     // No target configured (e.g. a Persistent boot with no URL). This is a
-    // domain failure, handled — never a throw. `unsupported_scheme` is the
-    // closest neutral bucket for "there is nothing to connect to".
+    // domain failure, handled — never a throw. Its own `no-target` kind (not
+    // `unsupported_scheme`) says "there is nothing to connect to", not "bad URL".
     if (databaseUrl === null) {
       return {
         status: "failed",
-        failure: "unsupported_scheme",
+        failure: "no-target",
         message: "no connection target configured",
       };
     }
@@ -181,6 +196,11 @@ export function createConnectionManager(
     if (driver !== null) return driver;
     const result = await doConnect();
     if (result.status === "connected" && driver !== null) return driver;
+    // "No target configured" gets a TYPED throw so read-path callers can translate it
+    // into a neutral `bad_request` "no active connection" instead of `internal_error`.
+    if (result.status === "failed" && result.failure === "no-target") {
+      throw new NoConnectionTargetError();
+    }
     throw new Error(
       result.status === "failed"
         ? `connection unavailable (${result.failure})`

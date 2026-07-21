@@ -35,21 +35,10 @@ type LoadState =
   // "empty" = no connection target configured (the persistent-mode boot with no
   // URL). It is NOT an error — the app is fine, there is just nothing to browse
   // yet. Distinct phase so it renders a calm call-to-action, never the red alert.
-  // (Epic 10 replaces the message-string match below with a dedicated `no-target`
-  //  ConnectionFailureKind + a real multi-root tree.)
+  // Discriminated by the typed `no-target` ConnectionFailureKind (Epic 10), not a
+  // message-string match.
   | { readonly phase: "empty" }
   | { readonly phase: "error"; readonly text: string };
-
-/**
- * Is this failure the "there is no connection to browse" case (Persistent boot with
- * no URL), as opposed to a genuine connect error? Matched on the neutral message the
- * Core emits in `connection.ts` (`doConnect`), which is the only signal we have client-
- * side today. Epic 10 will give it its own `ConnectionFailureKind` so this string
- * match can go away.
- */
-function isNoConnectionTarget(failure: string, message: string): boolean {
-  return failure === "unsupported_scheme" && message === "no connection target configured";
-}
 
 /**
  * Merge the introspected tables with the optimistically-created ones, deduped by
@@ -153,7 +142,7 @@ export function SchemaTree({
       }
       if (reply.result.status === "failed") {
         setLoad(
-          isNoConnectionTarget(reply.result.failure, reply.result.message)
+          reply.result.failure === "no-target"
             ? { phase: "empty" }
             : { phase: "error", text: `${reply.result.failure}: ${reply.result.message}` },
         );

@@ -138,6 +138,30 @@ describe("max request-body guard (DW-7)", () => {
   });
 });
 
+// Story 10.1: the shared Core boots with NO databaseUrl (null target), so the read
+// paths hit the typed `NoConnectionTargetError` seam. `table.rows` must translate it
+// into a neutral `bad_request` "no active connection" — never the generic
+// `internal_error: RPC handler failed` regression, and never a credential in the envelope.
+describe("table.rows with no connection target configured (Story 10.1)", () => {
+  test("returns bad_request 'no active connection', never internal_error, no credential leak", async () => {
+    const res = await callRpc(core.token, {
+      method: "table.rows",
+      params: { schema: "public", table: "users", page: 1, pageSize: 10 },
+    });
+    // A `bad_request` envelope rides HTTP 400 (never a 500/internal_error).
+    expect(res.status).toBe(400);
+    const reply = await res.json();
+    expect(reply.ok).toBe(false);
+    expect(reply.error.code).toBe("bad_request");
+    expect(reply.error.code).not.toBe("internal_error");
+    expect(reply.error.message).toContain("no active connection");
+    // Credential-free by construction: no URL/host/user/password anywhere in the envelope.
+    const serialized = JSON.stringify(reply.error);
+    expect(serialized).not.toContain("postgres://");
+    expect(serialized).not.toContain("password");
+  });
+});
+
 // DW-7 (predicate unit tests): `overBodyLimit` reads only the `content-length`
 // header, so a minimal header stub exercises every boundary without allocating a
 // real body — including the >8 MiB / Infinity-overflow inputs that Bun's `fetch`

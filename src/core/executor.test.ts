@@ -11,6 +11,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { DatabaseSchema, DbEngine } from "../shared/contract.ts";
+import { NoConnectionTargetError } from "./connection.ts";
 import type { ConnectionSeams } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import {
@@ -995,5 +996,78 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
     const reply = await exec.execute({ shape: "raw", sql: "SELECT 1", connectionId: "conn-b" });
     expect(reply.ok).toBe(false);
     if (!reply.ok) expect(reply.error.code).toBe("internal_error");
+  });
+
+  test("no connection target (seams throw NoConnectionTargetError) → bad_request 'no active connection', never internal_error", async () => {
+    // Mirror the real read-path seams over a null-url manager: every driver seam throws
+    // the typed NoConnectionTargetError. The executor must translate it into a neutral
+    // bad_request — NOT let it degrade into dispatch's internal_error catch-all.
+    const throwing: ConnectionSeams = {
+      runQuery: async () => {
+        throw new NoConnectionTargetError();
+      },
+      runReadOnly: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getEngine: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getSchema: async () => {
+        throw new NoConnectionTargetError();
+      },
+      quoteIdent: (ident) => `"${ident}"`,
+    };
+    const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: throwing }) });
+
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT 1" });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) {
+      expect(reply.error.code).toBe("bad_request");
+      expect(reply.error.code).not.toBe("internal_error");
+      expect(reply.error.message).toContain("no active connection");
+      // Neutral, credential-free envelope — no URL/host/user/password ever crosses.
+      const serialized = JSON.stringify(reply.error);
+      expect(serialized).not.toContain("postgres://");
+      expect(serialized).not.toContain("password");
+    }
+  });
+
+  test("no connection target on the STRUCTURED path too → bad_request 'no active connection', never internal_error", async () => {
+    // The structured path resolves the engine/schema seam (getEngine / getSchema via
+    // resolveSinglePkTable) BEFORE any quoteIdent — so the typed NoConnectionTargetError
+    // fires first and must be translated to bad_request, exactly like the raw path.
+    // This guards the load-bearing seam ORDER: if a future refactor moved quoteIdent
+    // (a generic Error) ahead of the async seam, the null-url case would regress to
+    // internal_error. This test locks that ordering in.
+    const throwing: ConnectionSeams = {
+      runQuery: async () => {
+        throw new NoConnectionTargetError();
+      },
+      runReadOnly: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getEngine: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getSchema: async () => {
+        throw new NoConnectionTargetError();
+      },
+      quoteIdent: (ident) => `"${ident}"`,
+    };
+    const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: throwing }) });
+
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "insert", table: "users", columns: [{ column: "name", value: "ada" }] },
+    });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) {
+      expect(reply.error.code).toBe("bad_request");
+      expect(reply.error.code).not.toBe("internal_error");
+      expect(reply.error.message).toContain("no active connection");
+      const serialized = JSON.stringify(reply.error);
+      expect(serialized).not.toContain("postgres://");
+      expect(serialized).not.toContain("password");
+    }
   });
 });

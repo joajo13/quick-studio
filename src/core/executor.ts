@@ -25,6 +25,7 @@ import {
   type RpcReply,
   type SchemaTableInfo,
 } from "../shared/contract.ts";
+import { NoConnectionTargetError } from "./connection.ts";
 import type { ConnectionSeams, ResolvedConnection } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
@@ -684,23 +685,33 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
     const connectionId = (req.connectionId as string | null | undefined) ?? null;
 
-    if (req.shape === "raw") {
-      if (typeof req.sql !== "string") {
-        return bad("raw execute requires a string 'sql'");
+    // The driver-seam-executing region: a `NoConnectionTargetError` (no connection
+    // configured at all) is translated into a neutral `bad_request` "no active
+    // connection" reply — NOT the generic `internal_error`. Any OTHER seam throw
+    // (a genuine engine/driver bug) is re-thrown so `dispatch`'s catch-all still
+    // wraps it as `internal_error`.
+    try {
+      if (req.shape === "raw") {
+        if (typeof req.sql !== "string") {
+          return bad("raw execute requires a string 'sql'");
+        }
+        const resolved = resolveConnection(connectionId);
+        if (!resolved.ok) return targetError(resolved.reason);
+        return await executeRaw(resolved.seams, req.sql, confirmed);
       }
-      const resolved = resolveConnection(connectionId);
-      if (!resolved.ok) return targetError(resolved.reason);
-      return executeRaw(resolved.seams, req.sql, confirmed);
-    }
-    if (req.shape === "structured") {
-      if (typeof req.op !== "object" || req.op === null || Array.isArray(req.op)) {
-        return bad("structured execute requires an 'op' object");
+      if (req.shape === "structured") {
+        if (typeof req.op !== "object" || req.op === null || Array.isArray(req.op)) {
+          return bad("structured execute requires an 'op' object");
+        }
+        const resolved = resolveConnection(connectionId);
+        if (!resolved.ok) return targetError(resolved.reason);
+        return await executeStructured(resolved.seams, req.op as Record<string, unknown>, confirmed);
       }
-      const resolved = resolveConnection(connectionId);
-      if (!resolved.ok) return targetError(resolved.reason);
-      return executeStructured(resolved.seams, req.op as Record<string, unknown>, confirmed);
+      return bad("execute 'shape' must be 'raw' or 'structured'");
+    } catch (err) {
+      if (err instanceof NoConnectionTargetError) return bad("no active connection");
+      throw err; // genuine driver bug → dispatch → internal_error (unchanged)
     }
-    return bad("execute 'shape' must be 'raw' or 'structured'");
   }
 
   return { execute };

@@ -19,7 +19,7 @@ import { resolveModel } from "./ai-provider.ts";
 import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl, isExposed, resolveBindHost } from "./binding.ts";
 import { createChatResponder } from "./chat.ts";
-import { createConnectionManager } from "./connection.ts";
+import { createConnectionManager, NoConnectionTargetError } from "./connection.ts";
 import { createConnectionRegistry } from "./connection-registry.ts";
 import { createConnectionTargets } from "./connection-targets.ts";
 import type { DriverFactory } from "./driver.ts";
@@ -296,24 +296,34 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
    * introspected schema, compose the Core-owned read-only SELECT/COUNT (identifiers
    * schema-validated + `quoteIdent`-quoted, LIMIT/OFFSET integer literals), run both
    * on the live connection, and map the page to `FrozenData`. A validation failure
-   * is a formed `bad_request`/`not_found` reply; a driver/connection throw is left
-   * to propagate → `internal_error` (engine-neutral, credentials never echoed).
+   * is a formed `bad_request`/`not_found` reply. No connection target configured
+   * (`NoConnectionTargetError`) is caught and returned as a neutral `bad_request`
+   * "no active connection" — NOT the generic `internal_error`. Any OTHER
+   * driver/connection throw still propagates → `internal_error` (engine-neutral,
+   * credentials never echoed).
    */
   async function tableRows(params: unknown): Promise<RpcReply<TableRowsResult>> {
-    const schema = await connectionManager.getSchema();
-    const planned = planTableRows(schema, params, (ident) => connectionManager.quoteIdent(ident));
-    if (!planned.ok) {
-      return errorReply(planned.error.code, planned.error.message);
+    try {
+      const schema = await connectionManager.getSchema();
+      const planned = planTableRows(schema, params, (ident) => connectionManager.quoteIdent(ident));
+      if (!planned.ok) {
+        return errorReply(planned.error.code, planned.error.message);
+      }
+      const { plan } = planned;
+      const countResult = await connectionManager.query(plan.countSql);
+      const total = readTotal(countResult.rows);
+      const dataResult = await connectionManager.query(plan.selectSql);
+      const data = rowsToFrozenData(
+        plan.columns.map((c) => c.name),
+        dataResult.rows,
+      );
+      return okReply({ data, page: plan.page, pageSize: plan.pageSize, total });
+    } catch (err) {
+      if (err instanceof NoConnectionTargetError) {
+        return errorReply("bad_request", "no active connection");
+      }
+      throw err; // genuine driver bug → dispatch → internal_error (unchanged)
     }
-    const { plan } = planned;
-    const countResult = await connectionManager.query(plan.countSql);
-    const total = readTotal(countResult.rows);
-    const dataResult = await connectionManager.query(plan.selectSql);
-    const data = rowsToFrozenData(
-      plan.columns.map((c) => c.name),
-      dataResult.rows,
-    );
-    return okReply({ data, page: plan.page, pageSize: plan.pageSize, total });
   }
 
   // Per-target connection resolver (Story 6.2): turns an optional saved-connection id

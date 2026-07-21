@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import type { DatabaseSchema } from "../shared/contract.ts";
-import { createConnectionManager } from "./connection.ts";
+import { createConnectionManager, NoConnectionTargetError } from "./connection.ts";
 import { DriverConnectionError, type Driver, type DriverFactory } from "./driver.ts";
 
 const SAMPLE_SCHEMA: DatabaseSchema = {
@@ -136,9 +136,22 @@ describe("connection manager", () => {
     const result = await mgr.connect();
     expect(result.status).toBe("failed");
     if (result.status === "failed") {
-      expect(result.failure).toBe("unsupported_scheme");
+      // Its own first-class kind — never the overloaded `unsupported_scheme` bucket.
+      expect(result.failure).toBe("no-target");
       expect(result.message).toContain("no connection target");
     }
+    expect(counts.factory).toBe(0);
+  });
+
+  test("the read path (getSchema/query) throws NoConnectionTargetError when databaseUrl is null", async () => {
+    const { factory, counts } = fakeDriver({ schema: SAMPLE_SCHEMA });
+    const mgr = createConnectionManager({ databaseUrl: null, createDriver: factory });
+
+    // A TYPED throw (not a generic Error) so read-path callers can `instanceof`-branch
+    // it into a neutral `bad_request` instead of the generic `internal_error`.
+    await expect(mgr.getSchema()).rejects.toBeInstanceOf(NoConnectionTargetError);
+    await expect(mgr.query("SELECT 1")).rejects.toBeInstanceOf(NoConnectionTargetError);
+    // Never opens a driver — there was nothing to connect to.
     expect(counts.factory).toBe(0);
   });
 

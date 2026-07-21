@@ -153,7 +153,7 @@ development_status:
   # Post-epic sweep (RUN 2): 18 triaged 'decides' (see deferred-work-decisions.md + the
   # decision: lines in deferred-work.md) + ~10 mechanical DW items. All decisions made 2026-07-21.
   epic-10: backlog
-  10-1-no-target-failure-kind: backlog       # Story 10.1: Classify "no connection target" as its own failure (retire the misleading internal_error)
+  10-1-no-target-failure-kind: done       # Story 10.1: Classify "no connection target" as its own failure (retire the misleading internal_error)
   10-2-per-connection-schema-scope: backlog  # Story 10.2: Optional per-connection schema scope (in-query filter)
   10-3-privileged-introspection-align: backlog # Story 10.3: Align privileged introspection (pg_class/pg_index) with visible tables
   10-4-core-resolve-by-connection-id: backlog # Story 10.4: Core resolves every read path by connectionId (connect/table.rows/chat)

@@ -325,6 +325,10 @@ const NEUTRAL_MESSAGE: Readonly<Record<ConnectionFailureKind, string>> = {
   // A supported-scheme URL that `new URL()` cannot parse (bad/out-of-range port,
   // unparseable authority). Structural — the raw URL is never echoed.
   "malformed-url": "the database URL is malformed",
+  // No connection target configured at all (`databaseUrl === null`). A driver never
+  // produces this (it is emitted by `doConnect` before any driver exists); the entry
+  // exists only to keep this map exhaustive over ConnectionFailureKind.
+  "no-target": "no connection target configured",
 };
 
 /**
