@@ -173,11 +173,13 @@ development_status:
   # PLATFORMS: win32-x64 + linux-x64 + linux-arm64 this epic. macOS is a LATER PHASE
   # (keyring spike never validated darwin). 11-2/11-3/11-4 consume ONE shared platform
   # list so adding darwin later is adding rows, not restructuring.
-  # NAMING (decided): main package unscoped `quick-studio`; per-platform binary packages
-  # scoped `@quick-studio/<platform>-<arch>`. esbuild layout — keeps `npx quick-studio` one command.
-  # MANUAL PREREQS (operator, not loop): npm login, create the `quick-studio` npm ORG
-  # (web-only; reserves the whole @quick-studio/* scope), publish the unscoped placeholder,
-  # git remote wired, NPM_TOKEN in repo secrets, first v* tag pushed AFTER 11-4 lands.
+  # NAMING (decided): ALL UNSCOPED - `quick-studio` main + `quick-studio-<platform>-<arch>`
+  # binaries. The `quick-studio` npm org name was unavailable; unscoped needs no org and no
+  # --access handling. Keeps `npx quick-studio <url>` one command.
+  # MANUAL PREREQS (operator, not loop): npm login + 2FA, publish 6 placeholder packages
+  # (npm cannot bootstrap a NEW package via OIDC - the first publish of each is always manual),
+  # git remote wired, trusted publisher registered per package, first v* tag AFTER 11-4 lands.
+  # NO NPM_TOKEN anywhere: publish.yml authenticates via OIDC trusted publishing.
   # See _bmad-output/planning-artifacts/epic-11-manual-prereqs.md.
   # Cross-cutting invariant: Ephemeral mode never writes to disk (Epic 2) — binds 11-5's
   # cache and 11-6's setup. Loopback/token/gates/RPC/exposure warning unchanged throughout.

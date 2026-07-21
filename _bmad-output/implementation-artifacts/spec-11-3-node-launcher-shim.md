@@ -61,7 +61,7 @@ context:
 
 ## Code Map
 
-- `bin/quick-studio.cjs` (new) — the launcher. Platform map (`win32-x64`, `linux-x64`, `linux-arm64`) → scoped package name (`@quick-studio/<platform>-<arch>`) → `require.resolve` → `spawn` → signal forwarding → exit mirroring. The map is a plain object literal so the later macOS phase adds two entries and nothing else.
+- `bin/quick-studio.cjs` (new) — the launcher. Platform map (`win32-x64`, `linux-x64`, `linux-arm64`) → unscoped package name (`quick-studio-<platform>-<arch>`) → `require.resolve` → `spawn` → signal forwarding → exit mirroring. The map is a plain object literal so the later macOS phase adds two entries and nothing else.
 - `package.json` — repoint `bin.quick-studio` to `bin/quick-studio.cjs`. Note the published manifest is **generated** in 11.4, so this edit governs the repo's own metadata; keep the two consistent. `engines` gains a `node` floor; `engines.bun` becomes a development statement only.
 - `bin/quick-studio.ts` — unchanged. Called out explicitly so a reviewer does not "helpfully" unify the two entries.
 - `src/core/…` — untouched. This story adds no product code.

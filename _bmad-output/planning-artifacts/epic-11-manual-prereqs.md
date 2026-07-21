@@ -7,10 +7,14 @@ nothing can be *verified end to end* until they are done.
 
 ## Decided (no longer open)
 
-**Package naming.** Main package **unscoped `quick-studio`**; per-platform binary packages
-**scoped `@quick-studio/<platform>-<arch>`**. The esbuild layout. The unscoped name is what
-keeps `npx quick-studio <db-url>` a single command; the scope is what reserves the binary
-namespace wholesale.
+**Package naming.** Everything **unscoped**: `quick-studio` for the main package, and
+`quick-studio-<platform>-<arch>` for each prebuilt binary. The `quick-studio` npm organization
+name was not available, and unscoped needs no org — which removes a whole setup step and the
+`--access public` footgun that scoped publishing carries.
+
+The tradeoff accepted: an unscoped prefix reserves nothing, so somebody could publish
+`quick-studio-darwin-arm64` before the macOS phase gets there. Mitigated by publishing
+placeholders for the darwin names up front (step 3).
 
 **Platform scope.** Windows and Linux are first-class this epic (`win32-x64`, `linux-x64`,
 `linux-arm64`). **macOS is a later phase** — the keyring spike never validated darwin, and a
@@ -28,11 +32,8 @@ someone else takes them.
 ! npm login
 ```
 
-**2. Create the `quick-studio` organization** at <https://www.npmjs.com/org/create>. Free for
-public packages. There is no CLI for org *creation* (`npm org` only manages members of an org
-that already exists), which is why this step cannot be automated. Creating the org is what
-reserves the **entire** `@quick-studio/*` namespace — you do not need to publish placeholder
-packages for each platform.
+**2. No organization needed.** The `quick-studio` org name was taken, and the unscoped layout
+makes it moot. Nothing to do here.
 
 **3. Publish the unscoped placeholder** to hold `quick-studio` itself. A ready-to-publish
 package is prepared (scratchpad `npm-placeholder/`); it is a minimal `0.0.1` that states the
@@ -53,11 +54,11 @@ npmjs.com, which does not exist until the package does. (PyPI allows pre-configu
 unpublished name; npm does not — `npm/cli` issue #8544 tracks the gap.) So every one of the
 four packages needs one manual bootstrap publish before CI can ever take over.
 
-**Publish all four placeholders in one sitting** — prepared in the scratchpad:
-`npm-placeholder/` (unscoped `quick-studio`) and `npm-placeholder-scoped/{win32-x64,
-linux-x64,linux-arm64}/` (the `@quick-studio/*` trio, each already carrying
-`publishConfig.access = "public"` so no `--access` flag is needed). The scoped three require
-the org from step 2 to exist first.
+**Publish all six placeholders in one sitting** — prepared in the scratchpad under
+`npm-placeholders/`: `quick-studio` plus `quick-studio-{win32-x64,linux-x64,linux-arm64}` (the
+three this epic ships) and `quick-studio-{darwin-arm64,darwin-x64}` (reserving the macOS phase
+against squatters). Unscoped packages are public by default, so no `--access` flag is needed
+anywhere.
 
 ## Before the first real release
 
@@ -68,10 +69,12 @@ has never run and the README's `../../releases` links resolve to nothing.
 Trusted Publisher. There is **no `NPM_TOKEN` and no token of any kind** — Story 11.4's
 `publish.yml` authenticates via OIDC, which GitHub Actions mints per run.
 
-Register all four packages (`quick-studio`, `@quick-studio/win32-x64`, `@quick-studio/linux-x64`,
-`@quick-studio/linux-arm64`), each pointing at this repo and the workflow filename `publish.yml`.
-Only one trusted publisher is allowed per package and the filename must match exactly, so
-`publish.yml` must not be renamed afterwards without reconfiguring all four.
+Register the four packages this epic actually publishes (`quick-studio`,
+`quick-studio-win32-x64`, `quick-studio-linux-x64`, `quick-studio-linux-arm64`), each pointing
+at this repo and the workflow filename `publish.yml`. The darwin placeholders need this only
+when the macOS phase starts. Only one trusted publisher is allowed per package and the
+filename must match exactly, so `publish.yml` must not be renamed afterwards without
+reconfiguring every one of them.
 
 Why not a token: npm is retiring the 2FA-bypass granular access tokens that unattended
 publishing depended on — they lose sensitive account operations in **August 2026** and lose
