@@ -62,21 +62,47 @@ export type FrozenData = {
 /**
  * Strict ISO-8601 UTC pattern: `YYYY-MM-DDTHH:MM:SS(.sss)?Z`.
  * Only the trailing `Z` (Zulu / UTC) is accepted — numeric offsets are rejected
- * so there is exactly one canonical encoding on the wire.
+ * so there is exactly one canonical encoding on the wire. Milliseconds (`\.\d{1,3}`)
+ * are the canonical precision limit (DW-6); {@link normalizeIsoUtc} floors an
+ * over-precise instant down to this before {@link assertIsoUtc} ever sees it.
+ * Exported for the drift property test in `contract.test.ts` only.
  */
-const ISO_UTC_RE =
+export const ISO_UTC_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+/**
+ * A `Z`-only, capture-grouped MIRROR of {@link ISO_UTC_RE} used solely by
+ * {@link normalizeIsoUtc} to split off the fractional-seconds field for truncation.
+ * It differs from the strict pattern in exactly one way — it admits any number of
+ * fractional digits (`\.(\d+)`) rather than 1-3 — so an over-precise instant can be
+ * matched and floored; it must NOT admit any new timezone form (still `Z`-only), so a
+ * non-UTC offset stays un-matched and falls through to {@link assertIsoUtc}'s verdict.
+ * Exported for the drift property test in `contract.test.ts` only.
+ */
+export const ISO_UTC_LENIENT_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/;
+
+/**
+ * Build the error message for a rejected ISO input, shared by {@link assertIsoUtc} and
+ * {@link normalizeIsoUtc} so the whole defect class has one message shape. NEVER calls
+ * `JSON.stringify` on the raw value — a BigInt or a cyclic object (both reachable from an
+ * untrusted `postMessage` frame) would make it throw — and caps the echoed text at ~80
+ * chars so an unbounded untrusted string cannot be reflected whole into the message.
+ */
+function describeIsoInput(value: unknown): string {
+  const raw = typeof value === "string" ? value : String(value);
+  const echo = raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+  return `Invalid ISO-8601 UTC date: ${JSON.stringify(echo)} (expected e.g. 2026-07-06T12:00:00Z)`;
+}
 
 /**
  * Assert that `iso` is a valid ISO-8601 UTC instant. Throws (never returns a
  * falsy value) so callers can rely on totality: after this returns, `iso` is a
- * canonical UTC string.
+ * canonical UTC string. Stays STRICT — a 4+-digit fractional field is non-canonical
+ * and rejected; canonicalizing precision is {@link normalizeIsoUtc}'s job, not this one.
  */
 export function assertIsoUtc(iso: string): void {
   if (typeof iso !== "string" || !ISO_UTC_RE.test(iso)) {
-    throw new TypeError(
-      `Invalid ISO-8601 UTC date: ${JSON.stringify(iso)} (expected e.g. 2026-07-06T12:00:00Z)`,
-    );
+    throw new TypeError(describeIsoInput(iso));
   }
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) {
@@ -90,6 +116,32 @@ export function assertIsoUtc(iso: string): void {
       `Non-canonical or invalid calendar date: ${JSON.stringify(iso)} (normalizes to ${roundTrip})`,
     );
   }
+}
+
+/**
+ * Canonicalize the *precision* of an ISO-8601 UTC instant to the frozen-date model's
+ * millisecond limit (DW-6): a fractional-seconds field with more than 3 digits is
+ * TRUNCATED (never rounded) to its first 3, so a Postgres/MySQL microsecond timestamp
+ * that reached this boundary — from a hand-edited Snapshot or a `postMessage` frame —
+ * is canonicalized instead of failing the whole payload. Everything else is delegated to
+ * {@link assertIsoUtc} for the verdict: a non-UTC offset, an impossible calendar date, an
+ * empty fractional part, and 0-3 in-policy digits behave exactly as before (an in-policy
+ * string is returned byte-identical, so this is idempotent and existing round-trip equality
+ * holds). Truncation is a `slice(0, 3)` on the captured DIGIT STRING — no arithmetic and no
+ * `Date` — so it cannot round and cannot carry into the seconds field: `…:59.999999Z` floors
+ * to `…:59.999Z` with the second unchanged, and the instant never moves forward in time. This
+ * canonicalizes precision ONLY, not spelling — `.5Z`/`.50Z`/`.500Z` stay three distinct
+ * in-policy strings, since the wire contract locks byte-identical passthrough for anything
+ * already within policy.
+ */
+export function normalizeIsoUtc(iso: string): string {
+  if (typeof iso !== "string") throw new TypeError(describeIsoInput(iso));
+  const m = ISO_UTC_LENIENT_RE.exec(iso);
+  const frac = m?.[2];
+  // No match, or already in policy → pass through and let assertIsoUtc render the verdict.
+  const out = m && frac !== undefined && frac.length > 3 ? `${m[1]}.${frac.slice(0, 3)}Z` : iso;
+  assertIsoUtc(out);
+  return out;
 }
 
 /**
@@ -147,7 +199,10 @@ function assertWellFormed(data: FrozenData): void {
 /**
  * Encode a {@link FrozenData} value into its canonical wire form. Pure and
  * total: validates every date cell is ISO-8601 UTC and throws on any invalid or
- * non-UTC date. `decode(encode(x))` deep-equals `x`.
+ * non-UTC date, while canonicalizing an over-precise date cell's precision to
+ * milliseconds (see {@link normalizeIsoUtc}). `decode(encode(x))` deep-equals `x`
+ * when every date cell is already within policy (≤3 fractional digits); an over-precise
+ * cell is floored, so the round-trip law holds from `encode(x)` onward.
  */
 export function encode(data: FrozenData): FrozenData {
   if (data.schemaVersion !== FROZEN_SCHEMA_VERSION) {
@@ -163,7 +218,9 @@ export function encode(data: FrozenData): FrozenData {
 
 /**
  * Decode a wire-form {@link FrozenData} back into the in-memory shape. Pure and
- * total: enforces the same ISO-8601 UTC invariant on every date cell.
+ * total: applies the same ISO-8601 UTC invariant on every date cell, canonicalizing an
+ * over-precise instant's precision down to milliseconds (see {@link normalizeIsoUtc})
+ * rather than only enforcing it.
  */
 export function decode(data: FrozenData): FrozenData {
   if (data.schemaVersion !== FROZEN_SCHEMA_VERSION) {
@@ -194,8 +251,10 @@ function encodeCell(cell: FrozenCell): FrozenCell {
     case "boolean":
       return { kind: "boolean", value: cell.value };
     case "date":
-      assertIsoUtc(cell.iso);
-      return { kind: "date", iso: cell.iso };
+      // Canonicalize precision (DW-6): an over-precise instant is floored to milliseconds
+      // rather than rejected; an in-policy `iso` comes back byte-identical. `normalizeIsoUtc`
+      // hands the result to `assertIsoUtc`, so a non-UTC / bad-calendar date still throws.
+      return { kind: "date", iso: normalizeIsoUtc(cell.iso) };
     default: {
       const _exhaustive: never = cell;
       throw new TypeError(`Unknown cell kind: ${JSON.stringify(_exhaustive)}`);

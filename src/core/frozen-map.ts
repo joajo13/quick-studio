@@ -71,6 +71,16 @@ function cellFor(value: unknown, kind: ValueKind): FrozenCell {
     case "boolean":
       return { kind: "boolean", value: value as boolean };
     case "date": {
+      // Millisecond precision (DW-6): both drivers hand back a JS `Date` under their
+      // DEFAULT configuration, so a Postgres `timestamp(6)` / MySQL `DATETIME(6)` is
+      // already floored to millisecond precision by the driver library before `toIsoUtc`
+      // runs — the sub-millisecond digits are gone by the time a date cell is built here.
+      // This is NOT true "by construction": a connection URL carrying `dateStrings=true`
+      // makes mysql2 yield timestamp STRINGS, which `naturalKind` routes to a `string`
+      // column instead (never a date cell), so that microsecond text survives verbatim as
+      // string content — the encode/decode boundary's `normalizeIsoUtc` only floors real
+      // date cells.
+      //
       // Defensive: an Invalid Date can never satisfy toIsoUtc — fall back to a
       // string cell so this stays total (naturalKind already routes invalid
       // dates to a string column, but a lone value must not be able to throw).

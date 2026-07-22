@@ -22,7 +22,7 @@
 
 import * as Plot from "@observablehq/plot";
 import type { PlotOptions } from "@observablehq/plot";
-import { isSnapshotDoc, type SnapshotBlock } from "../shared/snapshot.ts";
+import { isSnapshotDoc, normalizeSnapshotDoc, type SnapshotBlock, type SnapshotDoc } from "../shared/snapshot.ts";
 import { buildPlotOptions, renderMarkdownToHtml } from "../sandbox/render.ts";
 // The pure table renderer now lives in `shared/frozen-table` so the offline Snapshot and the
 // live Report draw tables through the SAME code (no third fork). Re-exported here so this
@@ -132,7 +132,21 @@ export function mountSnapshot(rawJson: string | null, host: MountHost): void {
     host.appendHtml(FALLBACK_HTML);
     return;
   }
-  renderDocInto(parsed.blocks, host);
+  // Render the CANONICALIZED payload (DW-6): `isSnapshotDoc` proved the doc valid but its
+  // guard discards `decode`'s normalized result, so draw `normalizeSnapshotDoc(parsed)` — an
+  // over-precise date cell is floored to milliseconds here, not shown verbatim as microseconds.
+  // Defense in depth: the guard already decoded every block, and mountSnapshot only ever feeds
+  // inert `JSON.parse` output, so this re-`decode` cannot throw on the real path — but keep the
+  // "never a blank page" promise (and match `guest.handleMessage`'s guarded re-decode) even if a
+  // future caller hands in a doc whose cells could re-read differently.
+  let normalized: SnapshotDoc;
+  try {
+    normalized = normalizeSnapshotDoc(parsed);
+  } catch {
+    host.appendHtml(FALLBACK_HTML);
+    return;
+  }
+  renderDocInto(normalized.blocks, host);
 }
 
 /**

@@ -49,7 +49,8 @@ origin: migrated from legacy ledger (code review of spec-1-1-walking-skeleton.md
 location: `ISO_UTC_RE` / `assertIsoUtc` (frozen-date utilities)
 reason: `ISO_UTC_RE` allows only 1–3 fractional digits and `assertIsoUtc` re-serializes through a JS `Date` (millisecond resolution), so Postgres/MySQL microsecond timestamps (`.123456Z`) would throw. No timestamps flow until Epic 1 story 1.3 / Epic 3, and fixing it correctly is a precision-policy decision, not a one-line regex widen.
 decision: [2026-07-21, user] Truncate sub-second to milliseconds explicitly and DOCUMENT the policy (ms is sufficient for a browse/inspection tool; keeps the frozen-date model simple).
-status: open
+status: done 2026-07-22
+resolution: resolved by sweep bundle dw-frozen-date-ms-precision-policy
 
 ### DW-7: Optionally add a max request-body guard (Content-Length limit) on `POST /rpc`
 

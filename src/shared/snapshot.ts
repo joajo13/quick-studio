@@ -106,3 +106,21 @@ export function isSnapshotDoc(value: unknown): value is SnapshotDoc {
   if (!Array.isArray(doc.blocks)) return false;
   return doc.blocks.every(isSnapshotBlock);
 }
+
+/**
+ * Return a copy of `doc` whose every `table`/`chart` block carries `decode(block.data)` — the
+ * CANONICALIZED payload (an over-precise date cell floored to millisecond precision, DW-6) —
+ * rather than the original object the guard proved valid but never rewrote (`isValidFrozen`
+ * uses `decode` only as a throw/no-throw oracle and discards its result). `prose`/`empty`
+ * blocks pass through by reference. Pure; it may assume `doc` already passed {@link isSnapshotDoc},
+ * so `decode` cannot throw here. This is the helper {@link mountSnapshot} renders so the offline
+ * runtime draws the millisecond form, not the microsecond string it parsed out of the file.
+ */
+export function normalizeSnapshotDoc(doc: SnapshotDoc): SnapshotDoc {
+  const blocks = doc.blocks.map((block) =>
+    block.kind === "table" || block.kind === "chart"
+      ? { ...block, data: decode(block.data) }
+      : block,
+  );
+  return { ...doc, blocks };
+}

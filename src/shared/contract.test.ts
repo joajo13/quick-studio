@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
   FROZEN_SCHEMA_VERSION,
+  ISO_UTC_LENIENT_RE,
+  ISO_UTC_RE,
   SANDBOX_PROTOCOL_VERSION,
   assertIsoUtc,
   decode,
@@ -8,6 +10,7 @@ import {
   errorReply,
   isSandboxInbound,
   isSandboxOutbound,
+  normalizeIsoUtc,
   okReply,
   toIsoUtc,
   type FrozenData,
@@ -173,6 +176,110 @@ describe("ISO-8601 UTC enforcement", () => {
   test("toIsoUtc throws a TypeError on an invalid Date (not a raw RangeError)", () => {
     expect(() => toIsoUtc(new Date("garbage"))).toThrow(TypeError);
     expect(() => toIsoUtc(new Date(NaN))).toThrow(TypeError);
+  });
+});
+
+describe("millisecond precision policy (DW-6) — normalizeIsoUtc", () => {
+  test("truncates a microsecond instant to milliseconds", () => {
+    expect(normalizeIsoUtc("2026-07-06T12:00:00.123456Z")).toBe("2026-07-06T12:00:00.123Z");
+  });
+
+  test("truncates, never rounds — the second is left unchanged", () => {
+    expect(normalizeIsoUtc("2026-07-06T12:00:59.999999Z")).toBe("2026-07-06T12:00:59.999Z");
+  });
+
+  test("floors a sub-millisecond-only fraction to .000 (never carries)", () => {
+    expect(normalizeIsoUtc("2026-07-06T12:00:00.000123Z")).toBe("2026-07-06T12:00:00.000Z");
+  });
+
+  test("returns in-policy strings (0-3 fractional digits) byte-identical", () => {
+    for (const iso of [
+      "2026-07-06T12:00:00Z",
+      "2026-07-06T12:00:00.5Z",
+      "2026-07-06T12:00:00.50Z",
+      "2026-07-06T12:00:00.123Z",
+    ]) {
+      expect(normalizeIsoUtc(iso)).toBe(iso);
+    }
+  });
+
+  test("is idempotent on an over-precise instant (normalize∘normalize = normalize)", () => {
+    const once = normalizeIsoUtc("2026-07-06T12:00:00.123456Z");
+    expect(normalizeIsoUtc(once)).toBe(once);
+  });
+
+  test("an over-precise date CELL decodes to the millisecond form; the whole payload is accepted", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "d", type: "date" }],
+      rows: [[{ kind: "date", iso: "2026-07-06T12:00:00.123456Z" }]],
+    };
+    const cell = decode(data).rows[0]?.[0];
+    expect(cell).toEqual({ kind: "date", iso: "2026-07-06T12:00:00.123Z" });
+    expect(() => encode(data)).not.toThrow();
+  });
+
+  test("an all-zero over-precise fraction floors to .000Z (passes only via assertIsoUtc's trailing-zero compare)", () => {
+    expect(normalizeIsoUtc("2026-07-06T12:00:00.0000Z")).toBe("2026-07-06T12:00:00.000Z");
+  });
+
+  test("rejects an over-precise NON-UTC offset (only the fractional field may change)", () => {
+    expect(() => normalizeIsoUtc("2026-07-06T12:00:00.123456+02:00")).toThrow(TypeError);
+  });
+
+  test("rejects an over-precise but impossible calendar date", () => {
+    expect(() => normalizeIsoUtc("2026-13-40T12:00:00.123456Z")).toThrow(TypeError);
+  });
+
+  test("rejects a leap-second instant even when over-precise", () => {
+    expect(() => normalizeIsoUtc("2026-07-06T12:00:60.999999Z")).toThrow(TypeError);
+  });
+
+  test("rejects an empty fractional part", () => {
+    expect(() => normalizeIsoUtc("2026-07-06T12:00:00.Z")).toThrow(TypeError);
+  });
+
+  test("rejects a non-string, and non-serializable inputs that would break JSON.stringify", () => {
+    expect(() => normalizeIsoUtc(null as unknown as string)).toThrow(TypeError);
+    // A BigInt makes `JSON.stringify` throw — describeIsoInput must String()-echo it instead.
+    expect(() => normalizeIsoUtc(123n as unknown as string)).toThrow(TypeError);
+    // A cyclic object also breaks JSON.stringify; the message must still build (and be readable).
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    let message = "";
+    try {
+      normalizeIsoUtc(cyclic as unknown as string);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain("Invalid ISO-8601 UTC date");
+  });
+
+  test("assertIsoUtc accepts 1-, 2- and 3-digit fractions and rejects 4+ (stays strict)", () => {
+    expect(() => assertIsoUtc("2026-07-06T12:00:00.1Z")).not.toThrow();
+    expect(() => assertIsoUtc("2026-07-06T12:00:00.12Z")).not.toThrow();
+    expect(() => assertIsoUtc("2026-07-06T12:00:00.123Z")).not.toThrow();
+    expect(() => assertIsoUtc("2026-07-06T12:00:00.1234Z")).toThrow(TypeError);
+    expect(() => assertIsoUtc("2026-07-06T12:00:00.123456Z")).toThrow(TypeError);
+  });
+
+  test("property: every string matching ISO_UTC_RE also matches ISO_UTC_LENIENT_RE (no drift)", () => {
+    const dates = ["2026-07-06", "2020-01-01", "1969-12-31", "0001-01-01"];
+    const times = ["12:00:00", "00:00:00", "23:59:59", "12:34:56"];
+    const fracs = ["", ".1", ".12", ".123", ".5", ".50", ".500", ".999", ".0", ".00", ".000"];
+    // Also throw in some strings the STRICT pattern must reject, to prove the implication is
+    // non-vacuous (they are simply skipped, never asserted against the lenient pattern).
+    const overPrecise = [".1234", ".123456", ".000123", ".9999"];
+    for (const d of dates) {
+      for (const t of times) {
+        for (const f of [...fracs, ...overPrecise]) {
+          const s = `${d}T${t}${f}Z`;
+          if (ISO_UTC_RE.test(s)) {
+            expect(ISO_UTC_LENIENT_RE.test(s)).toBe(true);
+          }
+        }
+      }
+    }
   });
 });
 
