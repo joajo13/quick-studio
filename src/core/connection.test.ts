@@ -365,6 +365,27 @@ describe("connection manager", () => {
     expect(mgr.describe()).toBeNull();
     expect(counts.factory).toBe(0);
   });
+
+  test("hasTarget() separates 'nothing configured' from the urls describe() cannot describe", () => {
+    const { factory, counts } = fakeDriver({ schema: SAMPLE_SCHEMA });
+    const none = createConnectionManager({ databaseUrl: null, createDriver: factory });
+    const hostless = createConnectionManager({ databaseUrl: "postgres:///shop", createDriver: factory });
+    const unparseable = createConnectionManager({ databaseUrl: "not a url", createDriver: factory });
+    const good = createConnectionManager({ databaseUrl: "postgres://u:p@h:5432/db", createDriver: factory });
+
+    // The three `describe() === null` cases are NOT the same thing — only the first
+    // is genuinely target-less, and only it may contribute no root to the schema tree.
+    // `hostless` is the REACHABLE broken-target case this predicate exists for.
+    expect(none.hasTarget()).toBe(false);
+    expect(hostless.hasTarget()).toBe(true);
+    // `unparseable` is a total-function guard, NOT a supported scenario: the CLI rejects
+    // an unparseable positional url with `CliArgsError` → `exit(1)` before a manager is
+    // ever constructed (`cli-args.ts:104-114`), so this path is unreachable from the CLI.
+    expect(unparseable.hasTarget()).toBe(true);
+    expect(good.hasTarget()).toBe(true);
+    // Pure existence bit: nothing is parsed and no driver is ever opened.
+    expect(counts.factory).toBe(0);
+  });
 });
 
 /**

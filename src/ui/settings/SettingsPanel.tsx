@@ -219,7 +219,22 @@ function envelopeText(error: RpcErrorEnvelope): string {
   return error.detail ? `${error.code}: ${error.message} (${error.detail})` : `${error.code}: ${error.message}`;
 }
 
-export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.Element {
+export function SettingsPanel({
+  onClose,
+  onRegistryChanged,
+}: {
+  onClose: () => void;
+  /**
+   * Fired after every SUCCESSFUL registry mutation (add / edit / remove), so the
+   * permanently-mounted schema tree can re-read `connections.list` and reconcile its
+   * roots without an app restart (Story 10.5). Wired from the mutation itself rather
+   * than from a tab-close event: the tree and this panel are siblings in one React tree,
+   * both live for the whole session, and a saved connection must appear in the tree the
+   * moment it is saved — that is what the empty-state's "Agregá una conexión en Ajustes"
+   * promises. Never fired on a failed mutation (nothing changed to reconcile).
+   */
+  onRegistryChanged?: () => void;
+}): React.JSX.Element {
   const [state, setState] = useState<ConnectionsState>(emptyConnections);
   const [loading, setLoading] = useState(true);
   // Did the mount-time list actually land? If it errored, `loading` still clears
@@ -292,6 +307,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
         setState((s) => applyAdded(s, reply.result));
         setAddDraft(emptyDraft());
         setError(null);
+        onRegistryChanged?.();
       } else {
         setError(envelopeText(reply.error));
       }
@@ -311,6 +327,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
         setState((s) => applyEdited(s, reply.result));
         setEditingId(null);
         setError(null);
+        onRegistryChanged?.();
       } else {
         setError(envelopeText(reply.error));
       }
@@ -325,6 +342,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }): React.JSX.E
       if (reply.ok) {
         setState((s) => applyRemoved(s, id));
         setError(null);
+        onRegistryChanged?.();
       } else {
         setError(envelopeText(reply.error));
       }

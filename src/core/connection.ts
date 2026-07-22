@@ -103,12 +103,28 @@ export type ConnectionManager = {
   /**
    * Derive a credential-free descriptor of the in-memory active target from the
    * closure-held url (Story 8.7). Pure + synchronous: opens NO driver, forces no
-   * `connect`, mutates no cached state. Returns `null` when no url is configured, the
-   * url is unparseable, or the url is hostless (guarded, degrade-not-throw). Exposes ONLY `engine`/`host`
+   * `connect`, mutates no cached state. Returns `null` when no url is configured or the
+   * url is hostless (e.g. `postgres:///shop` — the reachable broken-target case); also,
+   * for an unparseable url, which the CLI rejects long before a manager exists (see
+   * {@link ConnectionManager.hasTarget}) — guarded, degrade-not-throw. Exposes ONLY `engine`/`host`
    * (+ optional non-sensitive `database`) — the raw url, user, and password never
    * leave this closure, mirroring the {@link ConnectionSummary} boundary.
    */
   describe(): { engine: string; host: string; database?: string } | null;
+  /**
+   * Whether a connection target is CONFIGURED at all (Story 10.5) — `databaseUrl !== null`,
+   * nothing more. Pure + synchronous: opens no driver, parses nothing, never throws. It
+   * exists because {@link ConnectionManager.describe} answers `null` for BOTH "no url" and
+   * "a url I cannot describe", which left the UI unable to distinguish a boot with nothing
+   * configured from a boot configured with a broken url. The one REACHABLE broken case is a
+   * url that PARSES but has no host (e.g. `postgres:///shop`), which `describe` rejects by
+   * its own host guard. (An unparseable url is `describe`-less too, but it never reaches a
+   * running manager from the CLI: `cli-args.ts:104-114` shape-checks the positional url with
+   * `new URL()` and throws `CliArgsError` → `exit(1)` first — true, but unreachable.) A bare
+   * boolean, deliberately not a tri-state: what the target IS remains `describe`'s job, and
+   * whether it WORKS remains `connect`'s.
+   */
+  hasTarget(): boolean;
   /** Close any open driver. Idempotent; swallows teardown errors. */
   close(): Promise<void>;
 };
@@ -450,6 +466,14 @@ export function createConnectionManager(
       } catch {
         return null;
       }
+    },
+
+    hasTarget(): boolean {
+      // Existence only — the url is never parsed here, so a HOSTLESS target (the reachable
+      // broken case, e.g. `postgres:///shop`) still answers `true`, which is the whole
+      // point: `describe()` cannot say so. An unparseable url answers `true` as well, but
+      // the CLI rejects that one before any manager exists (`cli-args.ts:104-114`).
+      return databaseUrl !== null;
     },
 
     async close(): Promise<void> {

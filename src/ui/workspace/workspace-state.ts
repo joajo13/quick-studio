@@ -49,6 +49,16 @@ export type TabKind = WorkspaceTabKind | "create-table";
 export type TableRef = {
   readonly schema: string;
   readonly name: string;
+  /**
+   * The connection the table was activated FROM (Story 10.5): a saved connection's id,
+   * or `null`/absent for the boot target (the default). Every Core call the bound tab
+   * makes — `table.rows`, `execute` for cell edits and row DML, and the PK/index lookup
+   * that feeds them — carries it, so the rows come from the database the user actually
+   * clicked in and a write can never land in a different one. SESSION-ONLY in this
+   * story: `toWorkspaceSnapshot` maps tabs field-by-field and never emits `table`, so
+   * this cannot reach disk; PERSISTING and RESTORING it is Story 10.6.
+   */
+  readonly connectionId?: string | null;
 };
 
 /** A single open document Tab. Ids are unique within a {@link WorkspaceState}. */

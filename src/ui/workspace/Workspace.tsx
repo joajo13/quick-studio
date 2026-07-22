@@ -13,6 +13,7 @@
  * oblivious to run-mode, exactly like the rest of the UI ring.
  */
 
+import { useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
 import type { ErdTabLayout, ExposureInfo, ProviderKind, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
@@ -254,10 +255,14 @@ export function Workspace({
   onOpenCreateTable: () => void;
   onActivate: (id: number) => void;
   onClose: (id: number) => void;
-  /** Route a schema-tree table activation into the workspace reducer (Story 3.2). */
-  onActivateTable: (table: SchemaTableInfo) => void;
-  /** Fired once when the schema tree resolves the live schema. */
-  onSchemaLoaded: (tables: ReadonlyArray<SchemaTableInfo>) => void;
+  /**
+   * Route a schema-tree table activation into the workspace reducer (Story 3.2), now
+   * carrying the owning root's target (`null` = the boot root) so the bound tab reads
+   * and writes against the database the user clicked in (Story 10.5).
+   */
+  onActivateTable: (table: SchemaTableInfo, connectionId: string | null) => void;
+  /** Fired once PER ROOT when the schema tree resolves that root's live schema. */
+  onSchemaLoaded: (tables: ReadonlyArray<SchemaTableInfo>, connectionId: string | null) => void;
   /** PK column names of the active table tab's bound table (grid key-icon). */
   primaryKeys: ReadonlyArray<string>;
   /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
@@ -306,6 +311,14 @@ export function Workspace({
   const activeTable =
     activeTab !== null && activeTab.kind === "table" ? (activeTab.table ?? null) : null;
 
+  // Connection-registry revision (Story 10.5): bumped by every successful add/edit/remove
+  // in the Settings tab body, read by the schema tree as a cue to re-read `connections.list`
+  // and reconcile its roots. It lives HERE — the nearest common ancestor of the tree and the
+  // Settings tab, both of which are permanent members of this one React tree — rather than in
+  // App, so no unrelated shell state has to thread through two more props. A monotonic counter
+  // (not a boolean/flag) so back-to-back mutations each register as their own change.
+  const [registryRevision, setRegistryRevision] = useState(0);
+
   // Both the create-table (Story 9.4) and Settings (Story 8.6) surfaces are now normal
   // singleton tabs — no overlay flag lives here anymore. Their rail toggles route through
   // the workspace reducer's open-or-focus seams.
@@ -333,6 +346,7 @@ export function Workspace({
                 onActivate={onActivateTable}
                 onSchemaLoaded={onSchemaLoaded}
                 extraTables={extraTables}
+                registryRevision={registryRevision}
               />
             </div>
           </div>
@@ -382,6 +396,7 @@ export function Workspace({
                   tables={allTables}
                   schemas={schemas}
                   onTableCreated={onTableCreated}
+                  onRegistryChanged={() => setRegistryRevision((n) => n + 1)}
                   queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
                   onQueryDraftChange={(sql) => {
                     if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
@@ -411,7 +426,7 @@ export function Workspace({
                   type="button"
                   onClick={onStop}
                   disabled={stopping}
-                  className="ml-auto rounded-md px-2.5 py-1 font-mono text-[11px] text-red-400 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+                  className="ml-auto rounded-md px-2.5 py-1 font-mono text-[11px] text-err transition-colors hover:bg-err-soft disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                 >
                   {stopping ? "Stopping…" : "Stop"}
                 </button>

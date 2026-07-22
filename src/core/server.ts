@@ -509,7 +509,14 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
         connect,
         // Read-only descriptor of the in-memory active target + run mode (Story 8.7).
         // Pure: derives from the held url, opens no driver, mutates nothing.
-        activeConnection: () => ({ mode, connection: connectionManager.describe() }),
+        // `hasTarget` rides alongside (Story 10.5): `describe()` answers null for both
+        // "nothing configured" and "configured but undescribable", so the schema tree
+        // needs the bare existence bit to tell a boot-less session from a broken boot url.
+        activeConnection: () => ({
+          mode,
+          connection: connectionManager.describe(),
+          hasTarget: connectionManager.hasTarget(),
+        }),
         // Manage-connections registry (lazily opens the store on first call).
         connections: connectionRegistry,
         // Workspace-state registry (lazily opens the store on first call).

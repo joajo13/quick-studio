@@ -156,6 +156,7 @@ function stubCtx(
       return {
         mode: "ephemeral",
         connection: { engine: "postgres", host: "db.example.com:5432", database: "shop" },
+        hasTarget: true,
       };
     },
     async tableRows(): Promise<RpcReply<TableRowsResult>> {
@@ -290,6 +291,7 @@ describe("rpc dispatch", () => {
       expect(reply.result).toEqual({
         mode: "ephemeral",
         connection: { engine: "postgres", host: "db.example.com:5432", database: "shop" },
+        hasTarget: true,
       });
       // Credential-free boundary: the serialized reply carries no user/password/full-url.
       const serialized = JSON.stringify(reply);

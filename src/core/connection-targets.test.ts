@@ -60,6 +60,11 @@ function fakeManager(url: string, schema?: string) {
         return null;
       }
     },
+    // Mirrors the real `ConnectionManager.hasTarget()` (`connection.ts`), which
+    // is pure EXISTENCE — `databaseUrl !== null` — and never inspects the url's shape or
+    // length. Every fake here is constructed WITH a url, so the faithful answer is a flat
+    // `true`; an empty or unparseable url would still be a CONFIGURED target.
+    hasTarget: () => true,
     close: async () => {
       closed = true;
     },

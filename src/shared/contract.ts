@@ -439,6 +439,17 @@ export type ActiveConnectionInfo = {
     readonly host: string; // URL.host (host[:port]) — never userinfo
     readonly database?: string; // optional, non-sensitive (URL.pathname sans leading slash); NEVER user/password
   } | null;
+  /**
+   * Whether a boot target is CONFIGURED at all (Story 10.5). Deliberately a single
+   * boolean, not a tri-state: `connection` collapses "nothing configured" and
+   * "configured but not describable" (a url that parses with no host, e.g.
+   * `postgres:///shop`) into the same `null`, so the multi-root schema tree could not
+   * tell a genuinely-empty boot from a broken one and showed the calm empty-state for
+   * both. With this, `hasTarget && connection === null` renders the boot root in
+   * `error` (its own `connect` supplies the Core's engine-neutral verdict) while
+   * `!hasTarget` contributes no root. Credential-free: a bare yes/no about existence.
+   */
+  readonly hasTarget: boolean;
 };
 
 /** Params for `connections.add`. The url carries the credentials (UI→Core only). */

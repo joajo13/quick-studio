@@ -117,8 +117,14 @@ function TableTabView({
   const [mutating, setMutating] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
 
-  // Exactly one PK column is the executor's `resolveSinglePkTable` precondition;
-  // without it inline edit + delete are disabled (insert stays available).
+  // Exactly one PK column is the executor's `resolveSinglePkTable` precondition. Without
+  // it the tab is fully READ-ONLY: inline edit and row delete are disabled AND the
+  // Add-Row affordance is hidden (see the result bar below), so insert goes too.
+  // A SAVED-CONNECTION tab always lands here: `primaryKeys` is resolved out of the shared
+  // `allTables` catalog, which since Story 10.5 describes the BOOT target only, and
+  // `App.tsx` deliberately refuses to answer for a non-null `ref.connectionId` rather
+  // than hand a write a same-named boot table's key. Giving such a tab its own
+  // per-connection catalog (and with it its editing back) is Story 10.6.
   const canMutate = primaryKeys.length === 1;
   // A blank schema means "the connection's default namespace" (e.g. a table created
   // into the default schema on an otherwise-empty DB, whose optimistic tree entry
@@ -127,6 +133,12 @@ function TableTabView({
   // lets the Core resolve the default, so browse AND structured mutations both work.
   const effectiveSchema = table.schema.trim() === "" ? undefined : table.schema;
   const target = { schema: effectiveSchema, table: table.name };
+  // The connection this tab was activated FROM (Story 10.5). Spread into EVERY Core call
+  // this tab makes — the browse read below and the structured-mutation `execute` alike —
+  // so rows come from the database on screen and a write can never land in another one.
+  // Omitted entirely for the boot target, keeping the default path's wire bytes unchanged.
+  const connectionScope =
+    table.connectionId == null ? {} : ({ connectionId: table.connectionId } as const);
 
   // NOTE: per-table state (page/data/grid/error/loading) is reset by REMOUNTING —
   // the parent keys this component by the bound table identity, so a table switch
@@ -141,7 +153,12 @@ function TableTabView({
     // Time the existing read for the result-bar `· <ms> ms` readout — a passive
     // measurement around the SAME rpc; it changes neither the call nor the deps.
     const startedAt = performance.now();
-    void rpc<TableRowsResult>("table.rows", { schema: effectiveSchema, table: table.name, page }).then((reply) => {
+    void rpc<TableRowsResult>("table.rows", {
+      schema: effectiveSchema,
+      table: table.name,
+      page,
+      ...connectionScope,
+    }).then((reply) => {
       if (!alive) return;
       if (!reply.ok) {
         // Don't attribute a latency readout to a failed load — the result bar would
@@ -167,7 +184,7 @@ function TableTabView({
     return () => {
       alive = false;
     };
-  }, [table.schema, table.name, page, reloadNonce]);
+  }, [table.schema, table.name, table.connectionId, page, reloadNonce]);
 
   // Run one structured op through the guarded Core executor. On `ok` (insert/update
   // auto-commit, or a confirmed delete) it refetches the current page via the
@@ -177,7 +194,12 @@ function TableTabView({
   const runOp = async (op: StructuredOp, confirmed: boolean): Promise<ExecuteResult["status"] | "error"> => {
     setMutating(true);
     setMutationError(null);
-    const reply = await rpc<ExecuteResult>("execute", { shape: "structured", op, confirmed });
+    const reply = await rpc<ExecuteResult>("execute", {
+      shape: "structured",
+      op,
+      confirmed,
+      ...connectionScope,
+    });
     setMutating(false);
     if (!reply.ok) {
       setMutationError(envelopeText(reply.error));
@@ -476,6 +498,7 @@ export function TabContent({
   onCloseTab,
   schemas,
   onTableCreated,
+  onRegistryChanged,
 }: {
   tab: WorkspaceTab | null;
   /** PK column names of the active table tab's bound table (for the grid key icon). */
@@ -510,6 +533,13 @@ export function TabContent({
   schemas?: ReadonlyArray<string>;
   /** Append a freshly-created table to the App-level list on create success (Story 9.4). */
   onTableCreated?: (table: SchemaTableInfo) => void;
+  /**
+   * Report that the connection REGISTRY mutated (Story 10.5), so the permanently-mounted
+   * schema tree can re-read `connections.list` and reconcile its roots. Fired from the
+   * Settings mutation itself — not from a tab close — because the tree and Settings are
+   * siblings in one React tree and a mount-only fetch froze the root list for the session.
+   */
+  onRegistryChanged?: () => void;
 }): React.JSX.Element {
   if (tab === null) {
     return <EmptyState />;
@@ -518,9 +548,11 @@ export function TabContent({
   if (tab.kind === "table") {
     return tab.table !== undefined ? (
       // Key by the bound table identity so a table switch REMOUNTS with fresh
-      // per-table state (page/data/grid/error) and fires a single fetch.
+      // per-table state (page/data/grid/error) and fires a single fetch. The owning
+      // connection is part of that identity (Story 10.5) — the same `schema.name` under
+      // two different roots is two different tables and must not reuse one mount's rows.
       <TableTabView
-        key={`${tab.table.schema}.${tab.table.name}`}
+        key={`${tab.table.connectionId ?? ""}::${tab.table.schema}.${tab.table.name}`}
         table={tab.table}
         primaryKeys={primaryKeys ?? []}
         indexes={indexes ?? []}
@@ -595,7 +627,13 @@ export function TabContent({
     // key={tab.id} mirrors every sibling branch so the body remounts per tab id — a
     // no-op while the singleton holds, but robust if two settings tabs ever coexist
     // (e.g. a legacy snapshot before restore's collapse defense runs).
-    return <SettingsPanel key={tab.id} onClose={() => onCloseTab?.(tab.id)} />;
+    return (
+      <SettingsPanel
+        key={tab.id}
+        onClose={() => onCloseTab?.(tab.id)}
+        onRegistryChanged={onRegistryChanged}
+      />
+    );
   }
 
   if (tab.kind === "create-table") {

@@ -492,6 +492,8 @@ describe("connect RPC through the gate (Story 1.3)", () => {
         host: "db.example.com:5432",
         database: "shop",
       });
+      // Story 10.5: the bare existence bit rides alongside the descriptor.
+      expect(reply.result.hasTarget).toBe(true);
       // Credential-free bytes: no password, no user, no full url on the wire.
       expect(raw).not.toContain("s3cret");
       expect(raw).not.toContain("alice");
@@ -510,6 +512,26 @@ describe("connect RPC through the gate (Story 1.3)", () => {
       expect(reply.ok).toBe(true);
       expect(reply.result.mode).toBe("persistent");
       expect(reply.result.connection).toBeNull();
+      // Nothing configured at all — the schema tree contributes NO boot root for this.
+      expect(reply.result.hasTarget).toBe(false);
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test("connection.active on a configured-but-undescribable boot url reports hasTarget:true with connection:null", async () => {
+    // A url that PARSES but has no host (`describe()` → null) is the one real
+    // "configured but broken" case reachable by the UI — `cli-args.ts` rejects a
+    // genuinely unparseable `--url` before any UI exists. The boolean is what lets the
+    // tree render an ERROR root here instead of the calm "Sin conexión activa".
+    const c = await startCore(0, { databaseUrl: "postgres:///shop", mode: "ephemeral" });
+    try {
+      const res = await rpc(c, { method: "connection.active" });
+      const reply = await res.json();
+      expect(res.status).toBe(200);
+      expect(reply.ok).toBe(true);
+      expect(reply.result.connection).toBeNull();
+      expect(reply.result.hasTarget).toBe(true);
     } finally {
       await c.stop();
     }

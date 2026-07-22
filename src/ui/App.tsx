@@ -173,7 +173,7 @@ function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element 
   // green `--ok` when connected, red when errored, muted for stopped AND loading —
   // color is spent only where it is functional, never as decoration.
   const dotColor =
-    status.phase === "ok" ? "bg-ok" : status.phase === "error" ? "bg-red-500" : "bg-muted-foreground";
+    status.phase === "ok" ? "bg-ok" : status.phase === "error" ? "bg-err" : "bg-muted-foreground";
 
   const label =
     status.phase === "loading"
@@ -213,7 +213,7 @@ function SaveIndicator(): React.JSX.Element {
       title="Workspace save failed — retrying on next change"
       className="inline-flex items-center gap-1.5 font-mono text-[10.5px] text-muted-foreground"
     >
-      <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-red-500" aria-hidden />
+      <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-err" aria-hidden />
       <span>Save failed</span>
     </div>
   );
@@ -316,6 +316,39 @@ export function App(): React.JSX.Element {
   const [createdTables, setCreatedTables] = useState<ReadonlyArray<SchemaTableInfo>>([]);
   const onTableCreated = (table: SchemaTableInfo): void => setCreatedTables((cur) => [...cur, table]);
 
+  /**
+   * The schema tree fires this on each root's `ready` TRANSITION since Story 10.5
+   * (multi-root tree) — once per root in practice, plus once more per successful
+   * "Reintentar", which is a genuine new introspection — so it accepts the BOOT root
+   * alone (`connectionId === null`). Every consumer of `allTables`
+   * below — the create-table schema options, the PK lookup, the index sub-view, the ERD —
+   * describes the boot target, so letting a saved connection's root write `schemaTables`
+   * would render another database's tables in the ERD and resolve PK-addressed WRITES
+   * against the wrong catalog. Making those consumers connection-aware is Story 10.6.
+   *
+   * A fresh boot introspection also RETIRES the optimistic entries it now contains
+   * (DW-41's other half): `createdTables` is otherwise append-only, so a re-introspection
+   * (including the DW-45 post-DDL bust) would leave every created table duplicated as a
+   * phantom for the rest of the session.
+   *
+   * NOTE — that half is written but barely reachable today, which is why DW-41 is still
+   * `open (partial)` in the ledger: the boot root only re-introspects from `idle` (mount,
+   * before any table exists) or from `error` via "Reintentar", and `SchemaTree` never
+   * unmounts. So a table created after mount stays in `createdTables` for the session.
+   */
+  const onSchemaLoaded = (
+    tables: ReadonlyArray<SchemaTableInfo>,
+    connectionId: string | null,
+  ): void => {
+    if (connectionId !== null) return;
+    setSchemaTables(tables);
+    const introspected = new Set(tables.map((t) => `${t.schema}.${t.name}`));
+    setCreatedTables((cur) => {
+      const kept = cur.filter((t) => !introspected.has(`${t.schema}.${t.name}`));
+      return kept.length === cur.length ? cur : kept;
+    });
+  };
+
   // Session-only draft SQL per query Tab id (Story 3.6), keyed by Tab id so each
   // query Tab keeps its own typed-but-unrun text across Tab switches. Deliberately
   // NEVER folded into `toWorkspaceSnapshot`/`workspace.save` — the snapshot invariant
@@ -396,6 +429,13 @@ export function App(): React.JSX.Element {
     const active = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? null;
     if (active === null || active.kind !== "table" || active.table === undefined) return [];
     const ref = active.table;
+    // `allTables` describes the BOOT target only (see `onSchemaLoaded`), so a tab bound
+    // to a SAVED connection must not borrow a same-named boot table's key: this PK is
+    // what an inline edit or a row delete is ADDRESSED BY, and a wrong one would aim a
+    // write at a row in a different database. No match ⇒ no key ⇒ the grid stays
+    // read-only (`canMutate` is `primaryKeys.length === 1`). Story 10.6 makes the
+    // per-connection catalog available and lifts this.
+    if ((ref.connectionId ?? null) !== null) return [];
     const match = allTables.find((t) => t.schema === ref.schema && t.name === ref.name);
     return match?.primaryKey ?? [];
   }, [workspace, allTables]);
@@ -407,6 +447,9 @@ export function App(): React.JSX.Element {
     const active = workspace.tabs.find((t) => t.id === workspace.activeTabId) ?? null;
     if (active === null || active.kind !== "table" || active.table === undefined) return [];
     const ref = active.table;
+    // Same boot-target scoping as `primaryKeys` above: a saved-connection tab shows no
+    // indexes rather than another database's (the sub-view renders its own empty state).
+    if ((ref.connectionId ?? null) !== null) return [];
     const match = allTables.find((t) => t.schema === ref.schema && t.name === ref.name);
     return match?.indexes ?? [];
   }, [workspace, allTables]);
@@ -623,10 +666,16 @@ export function App(): React.JSX.Element {
             return next;
           });
         }}
-        onActivateTable={(table) =>
-          dispatch({ type: "bindTable", ref: { schema: table.schema, name: table.name } })
+        onActivateTable={(table, connectionId) =>
+          // The bound ref RETAINS the root the table was clicked in (Story 10.5), so every
+          // Core call the tab makes targets that database. Session-only here — the ref is
+          // never emitted by `toWorkspaceSnapshot`; persisting it is Story 10.6.
+          dispatch({
+            type: "bindTable",
+            ref: { schema: table.schema, name: table.name, connectionId },
+          })
         }
-        onSchemaLoaded={setSchemaTables}
+        onSchemaLoaded={onSchemaLoaded}
         primaryKeys={primaryKeys}
         indexes={indexes}
         allTables={allTables}

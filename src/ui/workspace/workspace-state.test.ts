@@ -302,6 +302,32 @@ describe("create-table tab NON-persistence (Story 9.4)", () => {
   });
 });
 
+describe("TableRef.connectionId NON-persistence (Story 10.5 — session-only)", () => {
+  test("toWorkspaceSnapshot emits no connectionId anywhere for a connection-scoped table tab", () => {
+    // The contract is explicit that a tab's retained `connectionId` is SESSION-ONLY in
+    // Story 10.5 (persisting + restoring it is 10.6). `toWorkspaceSnapshot` maps persisted
+    // tabs field-by-field and never emits `table`, so tsc already implies it — this pins
+    // it at RUNTIME so a future field-spread refactor cannot leak the id to disk.
+    const CONNECTION_ID = "b7e6f1c2-0000-4aaa-9bbb-deadbeefcafe";
+    let state = openMany("table"); // table tab id 1, active
+    state = bindTableToActiveTab(state, {
+      schema: "public",
+      name: "orders",
+      connectionId: CONNECTION_ID,
+    });
+    // The binding really is on the in-memory state — otherwise the assertions below
+    // would pass vacuously.
+    expect(state.tabs[0]?.table?.connectionId).toBe(CONNECTION_ID);
+
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    // The persisted tab carries id/kind/title ONLY — no `table`, so no `connectionId`.
+    expect(snapshot.tabs).toEqual([{ id: 1, kind: "table", title: "orders" }]);
+    const serialized = JSON.stringify(snapshot);
+    expect(serialized).not.toContain(CONNECTION_ID);
+    expect(serialized).not.toContain("connectionId");
+  });
+});
+
 describe("restoreWorkspace", () => {
   test("rebuilds tabs/activeTabId/nextId verbatim from a well-formed snapshot", () => {
     const snapshot: WorkspaceSnapshot = {
