@@ -559,7 +559,8 @@ source_spec: `spec-7-4-redesign-erd-neutral.md`
 location: `src/ui/workspace/ErdTabView.tsx` (`hoveredNodeId` state; edges `useMemo` deps `[graph.edges, hoveredNodeId]`; no reset effect on `nodes` change)
 severity: low
 reason: The hover highlight is pure presentation over the derived edges, driven by `onNodeMouseEnter`/`onNodeMouseLeave`. In the narrow case where the exact hovered table is dropped/recreated (via a `tables` change) without a mouseleave, `hoveredNodeId` persists; because node ids are the NUL-joined `schema\0name`, a later table reusing that id would inherit the highlight until the next hover. Very low probability (table create/remove rarely coincides with hovering that same node) and self-correcting on the next pointer move; edge/position derivation and persistence are unaffected. A one-line reconciling effect (`if hoveredNodeId not in nodes → clear`) is the fix; deferred as low-consequence.
-status: open
+status: done 2026-07-22
+resolution: already resolved: src/ui/workspace/ErdTabView.tsx:406-415 — an explicit `useEffect` commented "DW-66 reconcile" clears the stale hover: `if (hoveredNodeId !== null && !nodes.some((n) => n.id === hoveredNodeId)) setHoveredNodeId(null)` with deps `[nodes, hoveredNodeId]`. The reconciling effect this entry asked for exists, so a dropped/recreated table can no longer inherit the highlight.
 
 ### DW-67: ERD type labels (`text-[10px]`, `--t-text` muted) and the type legend (`text-[10.5px]`, 9px swatches) render sub-11px muted-on-tonal text with no verified contrast in either theme
 
