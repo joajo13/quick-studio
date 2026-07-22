@@ -810,6 +810,24 @@ export type WorkspaceSnapshotTab = {
   readonly id: number;
   readonly kind: WorkspaceTabKind;
   readonly title: string;
+  /**
+   * Which connection this Tab was pointed at (Story 10.6) — an ADDITIVE optional field,
+   * so {@link WORKSPACE_SNAPSHOT_VERSION} stays `1` (a pre-10.6 snapshot simply has none
+   * and loads cleanly; bumping the version would DISCARD every persisted workspace).
+   * ABSENT or `null` ⇒ the boot/default target — the same convention
+   * {@link ConnectRequest.connectionId}, {@link TableRowsRequest.connectionId} and
+   * {@link ChatStreamRequest.connectionId} already spell out, so there is exactly one
+   * "default target" encoding across the codebase.
+   *
+   * It carries the OPAQUE saved-connection id ONLY (AR-12) — never a url, user, password
+   * or engine string, so the snapshot stays credential-free like every other field here.
+   * It is deliberately INDEPENDENT of the live table binding: `schema`/`name` still never
+   * persist (Story 3.2 stands), so a restored table Tab remembers WHICH database it was
+   * browsing while still reopening unbound. Because the connection may have been removed
+   * between two launches, the id is a HINT the render layer reconciles against the live
+   * `connections.list` — never something a loader may assume still resolves.
+   */
+  readonly connectionId?: string | null;
 };
 
 /**
@@ -842,6 +860,11 @@ export type ErdTabLayout = {
  * additive-optional posture as `erdLayouts` (a pre-8.5 v1 snapshot has none and loads
  * cleanly, no version bump). It carries NO key and NO row/chat content — chat messages
  * and per-Tab chat state still never touch disk.
+ *
+ * Per-tab `connectionId` (Story 10.6, see {@link WorkspaceSnapshotTab.connectionId}) is
+ * the third field in that same additive-optional family: it is written only when a Tab
+ * actually targets a SAVED connection, so a boot-only workspace still serializes exactly
+ * as it did pre-10.6 — and, like the two above, it costs no version bump.
  */
 export type WorkspaceSnapshot = {
   readonly version: 1;

@@ -13,9 +13,19 @@
  * oblivious to run-mode, exactly like the rest of the UI ring.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import type { ErdTabLayout, ExposureInfo, ProviderKind, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
+import type {
+  ActiveConnectionInfo,
+  ConnectionSummary,
+  ErdTabLayout,
+  ExposureInfo,
+  ListConnectionsResult,
+  ProviderKind,
+  SchemaIndexInfo,
+  SchemaTableInfo,
+} from "../../shared/contract.ts";
+import { rpc } from "../rpc/client.ts";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import type { ChatState } from "./chat-model.ts";
 import type { ReportSpec } from "../../shared/report-spec.ts";
@@ -246,6 +256,7 @@ export function Workspace({
   extraTables,
   schemas,
   onTableCreated,
+  onReassignConnection,
 }: {
   state: WorkspaceState;
   onOpen: (kind: TabKind) => void;
@@ -305,6 +316,15 @@ export function Workspace({
   schemas: ReadonlyArray<string>;
   /** Append a freshly-created table to the App-level list (tree + PK lookup). */
   onTableCreated: (table: SchemaTableInfo) => void;
+  /**
+   * Point a tab at a different saved connection (Story 10.6) — fired by the
+   * "Reasignar conexión…" affordance on a tab whose connection was removed. `null` is a
+   * first-class choice, not a degenerate one: it means the boot/default target, the same
+   * convention `ExecuteRequest.connectionId` uses, and it is the ONLY escape for a
+   * workspace whose saved connections were all deleted but which was relaunched with a
+   * boot `--url`.
+   */
+  onReassignConnection?: (tabId: number, connectionId: string | null) => void;
 }): React.JSX.Element {
   const activeTab =
     state.tabs.find((t) => t.id === state.activeTabId) ?? null;
@@ -318,6 +338,74 @@ export function Workspace({
   // App, so no unrelated shell state has to thread through two more props. A monotonic counter
   // (not a boolean/flag) so back-to-back mutations each register as their own change.
   const [registryRevision, setRegistryRevision] = useState(0);
+
+  // The LIVE saved-connection set (Story 10.6) — the only rpc this shell makes. `null` means
+  // "not known yet" (in flight, or the read failed), which `isTabConnectionMissing` treats as
+  // "never flag a tab": a registry read that never answered must not accuse a restored tab of
+  // pointing at a deleted connection. It lives HERE for the same reason `registryRevision`
+  // does — Workspace is the nearest common ancestor of the tab bodies and the Settings tab —
+  // and it is keyed on that revision, so an add/edit/remove in Settings reconciles the
+  // unavailable state without an app restart, exactly like the schema tree's roots do.
+  const [connections, setConnections] = useState<ReadonlyArray<ConnectionSummary> | null>(null);
+
+  // Whether a boot/default target is CONFIGURED (`ActiveConnectionInfo.hasTarget`, Story 10.5's
+  // "a boot target exists" predicate — deliberately a bare yes/no, since `connection` collapses
+  // "nothing configured" and "configured but not describable" into the same `null`). It is read
+  // in the SAME round-trip as the registry because the reassign picker needs BOTH: without it, a
+  // workspace saved against `conn-2` whose saved connections were then all deleted, relaunched
+  // with a boot `--url`, would show a DISABLED "Reasignar conexión…" plus "no hay conexiones
+  // guardadas" — while a perfectly usable boot connection sits right there — and the only way
+  // out of that tab would be to close it.
+  const [hasBootTarget, setHasBootTarget] = useState(false);
+
+  // The `registryRevision` whose failed registry read has already been retried once (see the
+  // effect below). Storing the REVISION rather than a bare counter is what makes the budget
+  // genuinely one-shot PER REVISION: a plain `attempt` flag is only ever set, never reset, so
+  // the second and every later revision would inherit a spent budget and get no retry at all.
+  // Writing it re-enters the effect (it is a dependency), which is how the retry actually
+  // refetches; `null` means "this revision has a retry available".
+  const [retriedRevision, setRetriedRevision] = useState<number | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    // Both reads in ONE round-trip (the idiom `SchemaTree.tsx`'s mount effect already uses):
+    // the picker's two data sources must not arrive in two renders, or it would briefly offer
+    // "no hay conexiones guardadas" while the boot entry was still pending.
+    void Promise.all([
+      rpc<ListConnectionsResult>("connections.list"),
+      rpc<ActiveConnectionInfo>("connection.active"),
+    ]).then(([listReply, activeReply]) => {
+      if (!alive) return;
+      // On `!ok` keep whatever we already had (including the initial `null`): downgrading a
+      // known-good set to `null` on a transient failure would clear a legitimately-shown
+      // unavailable state, and inventing an EMPTY set would flag every saved-connection tab.
+      if (listReply.ok) setConnections(listReply.result);
+      // Same rule for the boot half: a failed `connection.active` means "unknown", never
+      // "gone", so a previously-proven boot entry is never taken back off the picker.
+      if (activeReply.ok) setHasBootTarget(activeReply.result.hasTarget);
+      if ((!listReply.ok || !activeReply.ok) && retriedRevision !== registryRevision) {
+        // Exactly ONE retry per revision, never a poll. Without it a single transient failure
+        // at boot leaves `connections === null` — i.e. the whole missing-connection feature
+        // silently off — until the user happens to mutate the registry in Settings, which is
+        // the only other thing that bumps `registryRevision`. It is bounded at one because a
+        // Core that cannot answer a local loopback registry read is a dead app, not a flaky
+        // network: that condition is already surfaced by the connection indicator, and
+        // hammering it would only add noise to a failure the user can already see.
+        //
+        // EITHER half failing arms it, not just the list: `hasBootTarget` starts `false` and
+        // is only ever raised on `activeReply.ok`, so it conflates "unknown" with "definitely
+        // none" — and an unrecovered `connection.active` therefore reproduces the exact dead
+        // end the second read exists to prevent (a disabled "Reasignar conexión…" plus "no
+        // hay conexiones guardadas" while a usable boot target sits right there).
+        retry = setTimeout(() => setRetriedRevision(registryRevision), 2000);
+      }
+    });
+    return () => {
+      alive = false;
+      if (retry !== undefined) clearTimeout(retry);
+    };
+  }, [registryRevision, retriedRevision]);
 
   // Both the create-table (Story 9.4) and Settings (Story 8.6) surfaces are now normal
   // singleton tabs — no overlay flag lives here anymore. Their rail toggles route through
@@ -413,6 +501,9 @@ export function Workspace({
                   onOpenReport={onOpenReport}
                   erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
                   onErdLayoutChange={onErdLayoutChange}
+                  connections={connections}
+                  hasBootTarget={hasBootTarget}
+                  onReassignConnection={onReassignConnection}
                 />
               </div>
 

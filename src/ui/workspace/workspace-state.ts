@@ -54,9 +54,11 @@ export type TableRef = {
    * or `null`/absent for the boot target (the default). Every Core call the bound tab
    * makes — `table.rows`, `execute` for cell edits and row DML, and the PK/index lookup
    * that feeds them — carries it, so the rows come from the database the user actually
-   * clicked in and a write can never land in a different one. SESSION-ONLY in this
-   * story: `toWorkspaceSnapshot` maps tabs field-by-field and never emits `table`, so
-   * this cannot reach disk; PERSISTING and RESTORING it is Story 10.6.
+   * clicked in and a write can never land in a different one. Still SESSION-ONLY as a
+   * REF field: `toWorkspaceSnapshot` maps tabs field-by-field and never emits `table`,
+   * so the whole ref (this id included) dies with the session. What DOES survive a
+   * restart since Story 10.6 is the tab-level mirror {@link WorkspaceTab.connectionId},
+   * which {@link bindTableToActiveTab} keeps in lockstep with this value.
    */
   readonly connectionId?: string | null;
 };
@@ -73,6 +75,22 @@ export type WorkspaceTab = {
    * table" empty state until a tree table is activated into it.
    */
   readonly table?: TableRef;
+  /**
+   * Which connection this Tab targets (Story 10.6) — INDEPENDENT of {@link table}, and
+   * the ONE connection fact that survives a restart. It exists precisely BECAUSE `table`
+   * still does not persist (Story 3.2 stands: the schema/name binding is session-only),
+   * so a restored table Tab can remember which database it was browsing even though it
+   * has forgotten which table. {@link bindTableToActiveTab} mirrors `ref.connectionId`
+   * here on every bind so the live and persisted values can never disagree.
+   *
+   * `undefined` and `null` mean the SAME thing everywhere — the boot/default target —
+   * mirroring `ExecuteRequest.connectionId`'s convention; `undefined` is what a pre-10.6
+   * snapshot (and any never-bound tab) restores as, `null` is what an explicit boot-root
+   * bind writes. Only the OPAQUE id is ever held here (AR-12) — never a url or credential.
+   * Reachability is NOT decided here: this module is pure and has no RPC, so the live-set
+   * comparison is {@link isTabConnectionMissing}, fed by the render layer.
+   */
+  readonly connectionId?: string | null;
 };
 
 /** The complete in-memory Workspace Tab state. Immutable — helpers return new values. */
@@ -222,28 +240,112 @@ export function openOrFocusCreateTable(state: WorkspaceState): WorkspaceState {
 }
 
 /**
+ * The ONE blank-id predicate for {@link WorkspaceTab.connectionId} (Story 10.6), applied at
+ * every seam that writes the field — {@link bindTableToActiveTab} (the primary writer, fed by
+ * the tree), {@link setTabConnection} (the reassign seam) and {@link restoreWorkspace}'s
+ * on-read sanitize — so "blank" cannot mean one thing in one place and another somewhere else.
+ *
+ * A blank id is normalised to `null` (the boot/default target) rather than kept, because
+ * `ConnectionSummary.id` is only `typeof`-checked where it enters the UI: a hand-edited
+ * registry can yield `id: ""` or `id: "   "`, and Core's save boundary (`checkTabs` in
+ * `workspace-registry.ts`) rejects a PRESENT-but-blank `connectionId` outright. Letting one
+ * through would poison EVERY subsequent `workspace.save` with `bad_request` for the rest of
+ * the session, silently — a failed autosave has no UI surface. `null` is the one value that is
+ * always accepted and always means the same thing everywhere.
+ */
+function normalizeConnectionId(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  return raw.trim().length === 0 ? null : raw;
+}
+
+/**
  * Bind a live table to the active data Tab (Story 3.2). If the active Tab is a
  * `table` Tab, it is REUSED — rebound to `ref` and renamed to the table name (so
  * clicking table after table in the tree reuses one grid Tab). Otherwise a new,
  * active `table` Tab is opened for it. The Tab title is the table name verbatim
  * (AR-19 — never re-cased). Pure — returns a new state.
+ *
+ * Story 10.6: the tab-level {@link WorkspaceTab.connectionId} is mirrored from
+ * `ref.connectionId` in BOTH branches (an absent ref id is the boot target, the same thing
+ * `null` means), so the persisted value can never drift from the live binding. Writing it on
+ * the REBIND branch too is what stops a tab that used to point at `conn-2` from persisting
+ * `conn-2` after being rebound to a boot table. This is the PRIMARY writer of the field — the
+ * one a user hits by clicking a table in the tree — so it runs the same
+ * {@link normalizeConnectionId} guard as the reassign seam.
  */
 export function bindTableToActiveTab(state: WorkspaceState, ref: TableRef): WorkspaceState {
   const active = state.tabs.find((t) => t.id === state.activeTabId) ?? null;
   const title = ref.name;
+  const connectionId = normalizeConnectionId(ref.connectionId);
   if (active !== null && active.kind === "table") {
     const tabs = state.tabs.map((t) =>
-      t.id === active.id ? { ...t, table: ref, title } : t,
+      t.id === active.id ? { ...t, table: ref, title, connectionId } : t,
     );
     return { ...state, tabs };
   }
   const id = state.nextId;
-  const tab: WorkspaceTab = { id, kind: "table", title, table: ref };
+  const tab: WorkspaceTab = { id, kind: "table", title, table: ref, connectionId };
   return {
     tabs: [...state.tabs, tab],
     activeTabId: id,
     nextId: id + 1,
   };
+}
+
+/**
+ * Point Tab `tabId` at `connectionId` (Story 10.6) — the "Reasignar conexión…" seam for a
+ * Tab whose saved connection was removed while the workspace was closed.
+ *
+ * The stale {@link WorkspaceTab.table} binding is CLEARED, never carried over: it named a
+ * `schema.name` inside a DIFFERENT database, and a same-named table in the newly chosen one
+ * is not the same table — reusing it would silently browse (and, with a PK in hand, write
+ * to) rows the user never asked for. Dropping it returns the Tab to its ordinary unbound
+ * "select a table" state, which is exactly where a restored Tab already lives (Story 3.2).
+ *
+ * Total: an unknown `tabId` returns the SAME state reference (so a React `useReducer` bails
+ * out of the re-render, like {@link closeTab}/{@link activateTab} on a no-op). Every sibling
+ * Tab keeps its object identity. Pure — never throws.
+ */
+export function setTabConnection(
+  state: WorkspaceState,
+  tabId: number,
+  connectionId: string | null,
+): WorkspaceState {
+  if (!state.tabs.some((t) => t.id === tabId)) return state;
+  // Same blank-id rule as every other writer of the field — see `normalizeConnectionId`.
+  const normalized = normalizeConnectionId(connectionId);
+  const tabs = state.tabs.map((t) => {
+    if (t.id !== tabId) return t;
+    // Rebuild WITHOUT `table` rather than setting it to `undefined`, so the tab object
+    // stays key-for-key what a freshly-restored (unbound) tab looks like.
+    const { table: _dropped, ...rest } = t;
+    return { ...rest, connectionId: normalized };
+  });
+  return { ...state, tabs };
+}
+
+/**
+ * Whether `tab` points at a connection that is no longer in the live saved-connection set
+ * (Story 10.6). The live ids arrive as a PLAIN `ReadonlySet` parameter — this module owns
+ * the decision but must never own the `connections.list` RPC that produces it (it is pure,
+ * DOM-free and dependency-free), which is also what makes the rule unit-testable at all.
+ *
+ * Three deliberate rules:
+ *  - `liveIds === null` ⇒ `false`. The set is NOT KNOWN yet (fetch in flight, or it failed).
+ *    A registry read that never answered must never accuse a tab of pointing at nothing —
+ *    the tab renders its normal body until the truth is actually in hand.
+ *  - `tab.connectionId == null` ⇒ `false` (covers `null` AND `undefined`, i.e. an explicit
+ *    boot bind and a pre-10.6/never-bound tab alike). The boot target is not a saved
+ *    connection, so it is never in `connections.list` and can never be "missing".
+ *  - otherwise the id must be present in the live set.
+ */
+export function isTabConnectionMissing(
+  tab: WorkspaceTab,
+  liveIds: ReadonlySet<string> | null,
+): boolean {
+  if (liveIds === null) return false;
+  if (tab.connectionId == null) return false;
+  return !liveIds.has(tab.connectionId);
 }
 
 /* ------------------------------------------------------------------ *
@@ -294,6 +396,15 @@ export function sanitizePanelSizes(
  * it by keeping ONLY the FIRST occurrence per id — otherwise a later `closeTab`
  * would filter out and remove BOTH tabs at once. The `maxId`/`nextId`/`activeTabId`
  * logic below is unchanged and simply operates on the deduped set.
+ *
+ * Story 10.6: a tab's persisted `connectionId` is carried across here — and SANITIZED on
+ * the way in, because the store deliberately does NOT gate the field (gating it there is
+ * all-or-nothing over `tabs`, so one hand-edited value would nuke the entire workspace;
+ * see `workspace-store.ts`'s note). Only a NON-EMPTY STRING survives; anything else
+ * (absent, `null`, `42`, `{}`) omits the key entirely rather than writing `null`, so a
+ * restored tab is key-for-key what a pre-10.6 tab restored as. `table` still stays
+ * `undefined` for every restored tab — this story persists the connection, never the
+ * schema/name binding (Story 3.2 stands).
  */
 export function restoreWorkspace(snapshot: WorkspaceSnapshot): WorkspaceState {
   const seenIds = new Set<number>();
@@ -301,7 +412,16 @@ export function restoreWorkspace(snapshot: WorkspaceSnapshot): WorkspaceState {
   for (const t of snapshot.tabs) {
     if (seenIds.has(t.id)) continue; // keep the first tab per id; drop later dupes
     seenIds.add(t.id);
-    deduped.push({ id: t.id, kind: t.kind, title: t.title });
+    // Same blank-id rule as the two in-memory writers (`normalizeConnectionId`), except a
+    // blank/absent/wrong-typed value OMITS the key rather than writing `null` — so a
+    // restored tab is key-for-key what a never-bound tab looks like.
+    const connectionId = normalizeConnectionId(t.connectionId);
+    deduped.push({
+      id: t.id,
+      kind: t.kind,
+      title: t.title,
+      ...(connectionId !== null ? { connectionId } : {}),
+    });
   }
   // Settings-singleton defense (Story 8.6): a hand-edited/legacy snapshot could carry
   // two `settings` tabs with DISTINCT ids (which the id-dedupe above keeps). Settings is
@@ -405,7 +525,18 @@ export function toWorkspaceSnapshot(
   const base: WorkspaceSnapshot = {
     version: WORKSPACE_SNAPSHOT_VERSION,
     panelSizes: [...panelSizes],
-    tabs: persistedTabs.map((t) => ({ id: t.id, kind: t.kind, title: t.title })),
+    // `connectionId` (Story 10.6) rides along ONLY when the tab actually targets a saved
+    // connection. `!= null` covers BOTH `null` and `undefined` — mirroring the
+    // `lastProvider` line below — so a boot-bound or never-bound tab emits no key at all
+    // and an ephemeral/single-connection workspace stays byte-identical to a pre-10.6
+    // snapshot (the untouched-workspace no-resave invariant). Writing `null` would add
+    // bytes without adding information: `null` and absent are read identically everywhere.
+    tabs: persistedTabs.map((t) => ({
+      id: t.id,
+      kind: t.kind,
+      title: t.title,
+      ...(t.connectionId != null ? { connectionId: t.connectionId } : {}),
+    })),
     activeTabId,
     nextId: state.nextId,
   };

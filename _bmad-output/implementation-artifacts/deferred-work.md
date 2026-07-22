@@ -724,3 +724,31 @@ source_spec: `spec-10-5-multi-root-schema-tree.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260722-141217-22a8; this entry preserves the lingering follow-up recommendation for a deliberate later review.
 status: open
+
+### DW-70: Query and chat tabs still execute against the boot target regardless of which connection root the user is browsing — neither can ACQUIRE a `connectionId` today
+origin: implementation of spec-10-6-tabs-carry-connection.md, 2026-07-22
+source_spec: `spec-10-6-tabs-carry-connection.md`
+location: `src/ui/workspace/QueryTabView.tsx` (`runRawQuery(sql)` / `runRawQuery(pendingSql, true)` call sites), `src/ui/workspace/ChatTabView.tsx` (no `connectionId` anywhere), `src/ui/workspace/workspace-state.ts` (`bindTableToActiveTab` is the only writer of `WorkspaceTab.connectionId`)
+severity: low
+reason: Epic 10's Story-10.6 AC text says "a table/query tab" carries a `connectionId`, but the authoritative solution point and the only per-tab connection-scoped ref type (`TableRef`) cover TABLE tabs only. `QueryTabView` calls `runRawQuery(sql)` with no id (the third `connectionId` parameter exists on `run-raw-query.ts` since Story 6.2 but is never passed here) and `ChatTabView` has no `connectionId` at all, so neither tab kind can acquire one: the schema tree only ever activates *tables*, and there is no per-tab target picker outside Report tabs' own Story-6.2 mechanism (report tabs are therefore NOT part of this gap). Persisting a field nothing can populate would be dead weight, so 10.6 wired table tabs only — while keeping `WorkspaceTab.connectionId` and `WorkspaceSnapshotTab.connectionId` generic over tab kind precisely so the follow-up is purely ADDITIVE: it needs a per-tab target picker (or a "new query against this connection" tree affordance) plus the `connectionId` pass-through at the two `runRawQuery` call sites and in the chat stream request — not a schema change, not a snapshot-version bump, and not a change to the save/load boundaries.
+status: open
+
+- source_spec: `spec-10-6-tabs-carry-connection.md`
+  summary: A restored tab whose `connectionId` still RESOLVES surfaces that fact nowhere — the persisted id is read only by the missing-connection check, so the story's headline value ("reopen this tab against the right database") is observable only in the failure case.
+  evidence: `WorkspaceTab.connectionId` has exactly two readers (`isTabConnectionMissing` and the `ConnectionUnavailable` swap in `TabContent.tsx`). A tab restored with a live id renders the ordinary `SelectTablePrompt` with no connection name in the body, the tab strip or the status bar, and every RPC still keys off the session-only `tab.table.connectionId`. The 10.5 review already logged the same gap ("same-named tables from different connections are indistinguishable"); a per-tab connection indicator is the remedy and is out of 10.6's frozen scope.
+
+- source_spec: `spec-10-6-tabs-carry-connection.md`
+  summary: Editing a saved connection's URL in Settings keeps its id live, so a tab bound to that id silently starts reading (and writing) the OLD table name against the NEW database, with no reconciliation and no warning.
+  evidence: The registry invalidates the multi-target pool per id, so the next `table.rows`/`execute` from that tab resolves the edited URL while `tab.table` still holds the previous database's `schema.name`. `registryRevision` bumps on the edit but only drives root reconciliation in the tree and the live-id set here — neither clears a bound `table`. Pre-existing since 10.4/10.5 (this story only made the id survive a restart); the fix is a per-connection revision that clears bound refs whose connection's target changed.
+
+- source_spec: `spec-10-6-tabs-carry-connection.md`
+  summary: `connections.list` now has three independent owners with no shared cache (`Workspace`, `SchemaTree`, `ReportTabView`), and the two `registryRevision`-keyed copies can silently disagree.
+  evidence: `Workspace.tsx` and `SchemaTree.tsx` fire the same RPC on mount and on every registry mutation; if Workspace's read fails while the tree's succeeds, the tree shows every root while `connections` stays `null` and NO tab is ever flagged unavailable — with no signal that the check is off. `SchemaTree` already retains its last successful list and could be the single source, or the fetch could be hoisted once and passed to both.
+
+- source_spec: `spec-10-6-tabs-carry-connection.md`
+  summary: A background tab whose connection was removed is invisible until it is activated, and on relaunch an affected tab briefly renders "select a table" before flipping to "conexión no disponible".
+  evidence: `TabContent` only ever receives the ACTIVE tab, so the strip (`TabBar.tsx`) gives no hint that other tabs are broken — the AC's "siblings untouched" is satisfied literally while leaving the user to discover the problem by clicking. The flash comes from `connections` starting `null` ("unknown set ⇒ never flag", deliberate) with no pending state between the workspace restore and the `connections.list` reply.
+
+- source_spec: `spec-10-6-tabs-carry-connection.md`
+  summary: `src/core/workspace-store.test.ts` contains NUL bytes, so git classifies it as binary and every diff of it reads `Bin N -> M bytes` — its changes are invisible to any diff-based review.
+  evidence: Pre-existing at `4ad9393` (not introduced by this story). Confirmed with `file` (reports `data`, not `JavaScript source`) while its sibling `workspace-registry.test.ts` reports `UTF-8 text`. This review had to reconstruct the file's 10.6 additions by hand; a reviewer taking the diff at face value would have reviewed the story with one of its four test files entirely dark.

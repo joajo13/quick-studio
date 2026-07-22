@@ -81,7 +81,14 @@ function isTabKind(value: unknown): value is WorkspaceTabKind {
   return typeof value === "string" && (WORKSPACE_TAB_KINDS as readonly string[]).includes(value);
 }
 
-/** `tabs` must be an array of `{ id: finite number; kind: WorkspaceTabKind; title: string }`. */
+/**
+ * `tabs` must be an array of `{ id: finite number; kind: WorkspaceTabKind; title: string }`,
+ * each optionally carrying `connectionId: null | non-blank string` (Story 10.6).
+ *
+ * The validated array is returned VERBATIM (the raw objects, never rebuilt), which is what
+ * carries an additive tab field like `connectionId` through `validateSnapshotParams` to the
+ * store untouched — so any new field MUST be validated here or it reaches disk unchecked.
+ */
 function checkTabs(
   value: unknown,
 ): { ok: true; value: WorkspaceSnapshotTab[] } | { ok: false; reason: string } {
@@ -108,6 +115,23 @@ function checkTabs(
     }
     if (typeof tab.title !== "string") {
       return { ok: false, reason: "each tab.title must be a string" };
+    }
+    // Optional `connectionId` (Story 10.6): ABSENT or `null` both mean the boot/default
+    // target, so only a PRESENT non-null value is constrained — and it must be a non-BLANK
+    // string, since neither `""` nor `"   "` is an id any registry lookup could ever resolve.
+    // "Blank" (not merely "empty") is the deliberate predicate: it is exactly the one the UI
+    // ring normalises to `null` in `workspace-state.ts`'s `normalizeConnectionId`, and the two
+    // boundaries have to agree — a value the UI silently rewrites but this boundary would have
+    // accepted means a tab can flip its target without the user choosing it. This is the
+    // TRUSTED write boundary, so it rejects outright: without the check a UI bug could
+    // persist `connectionId: 42` and every later load (which is deliberately tolerant —
+    // see `workspace-store.ts`) would have to cope with it forever.
+    if (
+      tab.connectionId !== undefined &&
+      tab.connectionId !== null &&
+      !(typeof tab.connectionId === "string" && tab.connectionId.trim().length > 0)
+    ) {
+      return { ok: false, reason: "each tab.connectionId must be null or a non-empty string" };
     }
     // `id` is now proven a finite number — safe to key the uniqueness Set on it.
     if (seenIds.has(tab.id)) {

@@ -381,3 +381,51 @@ describe("workspace-registry — store-open failure mapping", () => {
     expect(attempts).toBe(1);
   });
 });
+
+describe("workspace-registry — per-tab connectionId validation (Story 10.6)", () => {
+  test("null, a non-empty string, and an absent field all save — and round-trip out verbatim", () => {
+    // `checkTabs` returns the RAW tab objects, so this also proves the additive field
+    // reaches the store untouched rather than being rebuilt away.
+    const cases: ReadonlyArray<ReadonlyArray<Record<string, unknown>>> = [
+      [{ id: 1, kind: "table", title: "orders", connectionId: "conn-2" }],
+      [{ id: 1, kind: "table", title: "orders", connectionId: null }],
+      [{ id: 1, kind: "table", title: "orders" }],
+    ];
+    for (const tabs of cases) {
+      const fake = fakeStore("persistent");
+      const reg = registryOver(fake.store);
+      const snapshot = { ...SAMPLE, tabs, activeTabId: 1, nextId: 2 };
+      expect(reg.save(snapshot)).toEqual({ ok: true, value: { saved: true } });
+      const loaded = reg.load();
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok) expect(loaded.value.snapshot?.tabs).toEqual(tabs as never);
+    }
+  });
+
+  test("a malformed connectionId is a bad_request naming tabs, and nothing is written", () => {
+    // `"   "` is in here deliberately: the UI ring normalises a BLANK id to `null`
+    // (`normalizeConnectionId` in `workspace-state.ts`), so this boundary must reject the
+    // same shape rather than accepting a value the UI would silently have rewritten.
+    for (const bad of [42, "", "   ", "\t\n", {}, true, []]) {
+      const fake = fakeStore("persistent");
+      const reg = registryOver(fake.store);
+      const r = reg.save({
+        ...SAMPLE,
+        tabs: [{ id: 1, kind: "table", title: "orders", connectionId: bad }],
+        activeTabId: 1,
+        nextId: 2,
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.code).toBe("bad_request");
+        expect(r.detail).toContain("tabs");
+        expect(r.message).toContain("connectionId");
+      }
+      // Nothing reached the store, and a follow-up load still sees the untouched initial.
+      expect(fake.saveCalls()).toBe(0);
+      const loaded = reg.load();
+      expect(loaded.ok).toBe(true);
+      if (loaded.ok) expect(loaded.value.snapshot).toBeNull();
+    }
+  });
+});

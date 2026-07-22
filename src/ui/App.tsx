@@ -54,6 +54,7 @@ import {
   restoreLastProvider,
   restoreWorkspace,
   sanitizePanelSizes,
+  setTabConnection,
   toWorkspaceSnapshot,
   type TableRef,
   type TabKind,
@@ -84,6 +85,10 @@ type WorkspaceAction =
   | { type: "bindTable"; ref: TableRef }
   | { type: "openSettings" }
   | { type: "openCreateTable" }
+  // Point one tab at another saved connection (Story 10.6) — the "Reasignar conexión…"
+  // affordance on a tab whose connection was removed. The debounced `workspace.save`
+  // already fires on any reducer-state change, so the new id persists with no extra wiring.
+  | { type: "setTabConnection"; id: number; connectionId: string | null }
   | { type: "restore"; snapshot: WorkspaceSnapshot };
 
 function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
@@ -100,6 +105,8 @@ function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): Works
       return openOrFocusSettings(state);
     case "openCreateTable":
       return openOrFocusCreateTable(state);
+    case "setTabConnection":
+      return setTabConnection(state, action.id, action.connectionId);
     case "restore":
       return restoreWorkspace(action.snapshot);
   }
@@ -433,8 +440,10 @@ export function App(): React.JSX.Element {
     // to a SAVED connection must not borrow a same-named boot table's key: this PK is
     // what an inline edit or a row delete is ADDRESSED BY, and a wrong one would aim a
     // write at a row in a different database. No match ⇒ no key ⇒ the grid stays
-    // read-only (`canMutate` is `primaryKeys.length === 1`). Story 10.6 makes the
-    // per-connection catalog available and lifts this.
+    // read-only (`canMutate` is `primaryKeys.length === 1`). Story 10.6 carried the
+    // `connectionId` onto the tab but deliberately did NOT lift this: giving each connection
+    // root its own catalog is deferred (see the `primaryKeys`/`indexes` bail entry in
+    // `_bmad-output/implementation-artifacts/deferred-work.md`).
     if ((ref.connectionId ?? null) !== null) return [];
     const match = allTables.find((t) => t.schema === ref.schema && t.name === ref.name);
     return match?.primaryKey ?? [];
@@ -666,10 +675,14 @@ export function App(): React.JSX.Element {
             return next;
           });
         }}
+        onReassignConnection={(id, connectionId) =>
+          dispatch({ type: "setTabConnection", id, connectionId })
+        }
         onActivateTable={(table, connectionId) =>
           // The bound ref RETAINS the root the table was clicked in (Story 10.5), so every
-          // Core call the tab makes targets that database. Session-only here — the ref is
-          // never emitted by `toWorkspaceSnapshot`; persisting it is Story 10.6.
+          // Core call the tab makes targets that database. The REF stays session-only —
+          // `toWorkspaceSnapshot` never emits `table` (Story 3.2) — but `bindTableToActiveTab`
+          // now mirrors this id onto the tab itself, and THAT survives a relaunch (10.6).
           dispatch({
             type: "bindTable",
             ref: { schema: table.schema, name: table.name, connectionId },
