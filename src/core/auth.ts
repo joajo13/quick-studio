@@ -14,6 +14,14 @@ import { isWildcardHost } from "./binding.ts";
 /** Number of random bytes in the session token (256 bits). */
 const TOKEN_BYTES = 32;
 
+/**
+ * Number of random bytes in the app-shell CSP nonce (128 bits). The CSP spec asks
+ * for at least 128 bits of entropy per nonce; more would only bloat every inline
+ * `<script>` tag without buying security, since the nonce is regenerated per boot
+ * and the shell is `no-store` (never cached, never replayed against a later boot).
+ */
+const NONCE_BYTES = 16;
+
 /** Scheme-default HTTP port, which browsers omit from `Host`/`Origin`. */
 const HTTP_DEFAULT_PORT = 80;
 
@@ -46,18 +54,72 @@ function authorityPort(authority: string): string {
 }
 
 /**
- * Mint a fresh per-boot session token: 256 bits of CSPRNG output as lowercase
- * hex. A new token is generated on every call (every boot). The caller holds it
- * in memory only.
+ * Draw `byteLength` bytes from the CSPRNG and render them as lowercase hex
+ * (`2 * byteLength` chars, zero-padded so the length is fixed and a leading zero
+ * byte is never swallowed).
+ *
+ * The ONE minting primitive behind both {@link mintSessionToken} and
+ * {@link mintCspNonce}. It is shared deliberately: the two secrets differ only in
+ * width, so two copies of the same loop would mean a future hardening change
+ * (a different RNG call, a different encoding, a rejection-sampling step) could
+ * land on one and silently miss the other — and the one it missed would be the
+ * weaker secret nobody re-audits. Private: the widths are the callers' contract,
+ * not a knob.
  */
-export function mintSessionToken(): string {
-  const bytes = new Uint8Array(TOKEN_BYTES);
+function randomHex(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
   crypto.getRandomValues(bytes);
   let hex = "";
   for (const b of bytes) {
     hex += b.toString(16).padStart(2, "0");
   }
   return hex;
+}
+
+/**
+ * Mint a fresh per-boot session token: 256 bits of CSPRNG output as lowercase
+ * hex. A new token is generated on every call (every boot). The caller holds it
+ * in memory only.
+ */
+export function mintSessionToken(): string {
+  return randomHex(TOKEN_BYTES);
+}
+
+/**
+ * Mint a fresh per-boot CSP nonce for the app shell (DW-2): 128 bits of CSPRNG
+ * output as lowercase hex, minted through the very same {@link randomHex}
+ * primitive as the session token because it carries the same weight — a
+ * guessable nonce is an XSS bypass, since
+ * any injected `<script nonce="…">` matching it would execute with the shell's
+ * full ambient authority (including `window.__QS_TOKEN__` and `/rpc` reach).
+ *
+ * Provenance guarantees, identical to {@link mintSessionToken}: minted ONCE per
+ * boot (the shell HTML is a boot-time template served `no-store`, so one nonce
+ * covers every request of that boot and never survives it), held in memory only
+ * for the life of the process, never logged, never persisted, never returned on
+ * the public `Core` surface. Two boots must never share a nonce — a leaked nonce
+ * from a previous session must not unlock the next one.
+ *
+ * What those guarantees do NOT amount to, and must not be read as: secrecy from
+ * the local machine. The shell that carries the nonce is served at the UNGATED
+ * `GET /`, so any process on this box can simply fetch it and read the current
+ * boot's nonce out of the HTML — exactly as it can read the session token, which
+ * is the same-machine exposure DW-2's ledger entry explicitly carved out as a
+ * separate, still-open concern. The threat this value closes is GUESSING (a
+ * remote-injected script cannot fabricate a matching `nonce` attribute), not
+ * READING. Anything that assumes the nonce is confidential against local
+ * processes is assuming a property this deployment does not provide.
+ *
+ * Lowercase hex is deliberate: the value is interpolated straight into both the
+ * `'nonce-…'` CSP source token and an HTML attribute, and the hex alphabet
+ * contains no character that could terminate either context. This exact shape —
+ * 32 lowercase hex chars — is also the contract consumers validate against
+ * all-or-nothing (`safeCspNonce` in `server.ts`), so changing the width or the
+ * encoding here without changing that gate fails the suite rather than silently
+ * shipping a shell whose inline scripts are all refused.
+ */
+export function mintCspNonce(): string {
+  return randomHex(NONCE_BYTES);
 }
 
 /**

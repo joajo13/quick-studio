@@ -18,9 +18,15 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DatabaseSchema } from "../shared/contract.ts";
+import {
+  REPAIRABLE_HOSTILE_SANDBOX_ORIGINS,
+  UNUSABLE_SANDBOX_ORIGINS,
+  USABLE_SANDBOX_ORIGINS,
+} from "../shared/sandbox-origin.fixtures.ts";
 import { resolveAppDir } from "./app-dir.ts";
+import { mintCspNonce } from "./auth.ts";
 import { DriverConnectionError, type Driver, type DriverFactory } from "./driver.ts";
-import { overBodyLimit, renderIndexHtml, startCore, type Core } from "./server.ts";
+import { overBodyLimit, renderIndexHtml, shellCspHeaders, startCore, type Core } from "./server.ts";
 import { uiBundle } from "./ui-bundle.generated.ts";
 
 let core: Core;
@@ -540,7 +546,12 @@ describe("connect RPC through the gate (Story 1.3)", () => {
 
 describe("renderIndexHtml exposure injection", () => {
   test("carries exposed:true and the bound host into the served HTML", () => {
-    const html = renderIndexHtml("abc123", { exposed: true, host: "0.0.0.0", port: 4321 }, "http://127.0.0.1:5555");
+    const html = renderIndexHtml(
+      "abc123",
+      { exposed: true, host: "0.0.0.0", port: 4321 },
+      "http://127.0.0.1:5555",
+      "0123456789abcdef0123456789abcdef",
+    );
     expect(html).toContain("window.__QS_EXPOSURE__");
     expect(html).toContain('"exposed":true');
     expect(html).toContain('"host":"0.0.0.0"');
@@ -552,27 +563,508 @@ describe("renderIndexHtml exposure injection", () => {
       "abc123",
       { exposed: true, host: "</script><script>alert(1)</script>", port: 80 },
       "http://127.0.0.1:5555",
+      "0123456789abcdef0123456789abcdef",
     );
     // The literal `</script>` sequence must never appear unescaped in the shell.
     expect(html).not.toContain("<script>alert(1)");
     expect(html).toContain("\\u003c");
   });
 
-  test("injects the sandbox origin and URL-charset-filters it", () => {
-    const html = renderIndexHtml("abc123", { exposed: false, host: "127.0.0.1", port: 80 }, "http://127.0.0.1:6789");
+  test("injects a usable sandbox origin verbatim", () => {
+    const html = renderIndexHtml(
+      "abc123",
+      { exposed: false, host: "127.0.0.1", port: 80 },
+      "http://127.0.0.1:6789",
+      "0123456789abcdef0123456789abcdef",
+    );
     expect(html).toContain("window.__QS_SANDBOX_ORIGIN__");
     expect(html).toContain("http://127.0.0.1:6789");
   });
 
-  test("strips a script-breakout attempt from an untrusted sandbox origin", () => {
-    const html = renderIndexHtml(
-      "abc123",
-      { exposed: false, host: "127.0.0.1", port: 80 },
-      'http://127.0.0.1:1</script><script>alert(1)</script>',
+  test("refuses an untrusted sandbox origin whole rather than repairing it", () => {
+    // Accept-or-reject on the RAW value, the same rule `shellCspHeaders` applies. The
+    // earlier character filter would have kept the survivors — for a breakout payload
+    // that is inert residue, but for `"http://evil.test\\:6789"` it was a valid,
+    // fabricated REMOTE origin that the shell, the header and the iframe then agreed on.
+    for (const hostile of REPAIRABLE_HOSTILE_SANDBOX_ORIGINS) {
+      const html = renderIndexHtml(
+        "abc123",
+        { exposed: false, host: "127.0.0.1", port: 80 },
+        hostile,
+        "0123456789abcdef0123456789abcdef",
+      );
+      expect(html).not.toContain("<script>alert(1)");
+      // The injected global is empty — which Ring 2 renders as `about:blank` — and no
+      // residue of the payload survives anywhere in the document.
+      expect(html).toContain("window.__QS_SANDBOX_ORIGIN__ = \"\";");
+      expect(html).not.toContain("evil.test");
+      expect(html).not.toContain("unsafe-inline");
+    }
+  });
+});
+
+// DW-2: the token-bearing app shell is served under a strict per-boot CSP with a
+// CSPRNG nonce on its three inline scripts. These lock the exact header set, the
+// header<->body nonce agreement, per-boot freshness, both fail-closed corners, and
+// that none of it leaked onto the separately-contracted `/live/<id>` page.
+describe("app-shell CSP (DW-2)", () => {
+  /** A well-formed 32-hex nonce, standing in for `mintCspNonce()` output. */
+  const NONCE = "0123456789abcdef0123456789abcdef";
+  const SANDBOX = "http://127.0.0.1:6789";
+  const EXPOSURE = { exposed: false, host: "127.0.0.1", port: 80 } as const;
+
+  /**
+   * The exact, complete source list for every directive that does NOT depend on boot
+   * state. Only `script-src` (per-boot nonce) and `frame-src` (per-boot sandbox origin)
+   * are excluded, and both are pinned separately at each call site.
+   *
+   * Exact strings, not substrings, because a CSP only ever regresses by WIDENING: every
+   * `.toContain("connect-src 'self'")` in this file used to pass unchanged against
+   * `connect-src 'self' https://attacker.example`, so the suite placed no upper bound on
+   * what any directive permitted. `toBe` on the whole directive is the only assertion
+   * shape that says "this and nothing more".
+   */
+  const FIXED_SHELL_DIRECTIVES: Record<string, string> = {
+    "default-src": "default-src 'self'",
+    // No nonce/hash here on purpose: per spec either would make `'unsafe-inline'` inert
+    // and break the 47 React `style={{…}}` attributes plus three runtime `<style>` injectors.
+    "style-src": "style-src 'self' 'unsafe-inline'",
+    // `data:` for CodeMirror's `.cm-highlightTab` background, and NO remote scheme —
+    // that omission is what blocks a stored-XSS from beaconing out via an `<img src>`.
+    "img-src": "img-src 'self' data:",
+    "font-src": "font-src 'self'",
+    // The egress pin on scripted REQUESTS (fetch/XHR/WebSocket/EventSource). It does not
+    // reach scripted navigation; that residual is recorded on the constant in `server.ts`.
+    "connect-src": "connect-src 'self'",
+    "worker-src": "worker-src 'none'",
+    "object-src": "object-src 'none'",
+    "base-uri": "base-uri 'none'",
+    "form-action": "form-action 'none'",
+    "frame-ancestors": "frame-ancestors 'none'",
+  };
+
+  /**
+   * Every directive name the shell policy is allowed to emit. An allowlist, not a
+   * spot-check: a directive name the browser does not recognize is DISCARDED wholesale
+   * (`img-scr 'self'` silently grants everything `img-src` was meant to deny), and a
+   * loose `.toContain()` on the rest of the policy would never notice.
+   */
+  const EXPECTED_DIRECTIVE_NAMES = [
+    ...Object.keys(FIXED_SHELL_DIRECTIVES),
+    "script-src",
+    "frame-src",
+  ];
+
+  /** Pull the nonce off the shell's first inline `<script>` (absent ⇒ null). */
+  function bodyNonce(html: string): string | null {
+    const m = /<script nonce="([0-9a-f]+)">/.exec(html);
+    return m === null ? null : (m[1] as string);
+  }
+
+  /** Pull the `'nonce-…'` value out of a policy's `script-src` (absent ⇒ null). */
+  function headerNonce(csp: string): string | null {
+    const m = /'nonce-([^']*)'/.exec(csp);
+    return m === null ? null : (m[1] as string);
+  }
+
+  /**
+   * The single `name source…` directive called `name`, or `""` when absent. Every
+   * negative assertion goes through this rather than `csp.not.toContain("…")`: a
+   * substring check on the whole policy is scoped to nothing, so
+   * `not.toContain("script-src 'self' 'unsafe-inline'")` happily passes for the very
+   * string it exists to forbid (`script-src 'self' 'nonce-…' 'unsafe-inline'`).
+   */
+  function directiveOf(csp: string, name: string): string {
+    return (
+      csp
+        .split(";")
+        .map((d) => d.trim())
+        .find((d) => d === name || d.startsWith(`${name} `)) ?? ""
     );
-    expect(html).not.toContain("<script>alert(1)");
-    // The filter drops `<`/`>`/space so the injected value is inert.
-    expect(html).not.toContain("</script><script>alert(1)");
+  }
+
+  /**
+   * Well-formedness AND tightness, asserted together against EVERY matrix input rather
+   * than only the happy path — because both halves of the contract have the same silent
+   * failure mode.
+   *
+   * Structural: every `;`-separated directive is a name plus at least one non-empty
+   * source, no directive NAME repeats, and every name is on the allowlist. (Every
+   * directive this policy emits carries sources by construction; CSP's valueless
+   * directives like `upgrade-insecure-requests` are not part of the shell policy, so
+   * "must have ≥1 source" is a statement about THIS policy, not about CSP in general.)
+   * A browser that cannot parse a directive may drop it — or the entire policy — and
+   * silently hand back the ambient authority the CSP exists to remove.
+   *
+   * Tightness: every boot-independent directive equals its {@link FIXED_SHELL_DIRECTIVES}
+   * entry EXACTLY. Without this the whole file was one-sided — it proved the policy was
+   * at least as strict as intended and never that it was no LOOSER, which is the only
+   * direction a CSP regresses in.
+   *
+   * The two BOOT-DEPENDENT directives cannot be pinned to a constant, so they are pinned
+   * to their complete shape instead: `script-src` is `'self'` alone or `'self'` plus one
+   * full-width minted nonce, and `frame-src` is `'none'` or exactly one `scheme://host`
+   * source. That closes the last hole this helper had — two of its call sites pinned only
+   * `frame-src`, so a `script-src 'self' 'unsafe-inline'` would have passed them.
+   */
+  function expectWellFormed(csp: string): void {
+    expect(csp).not.toMatch(/;\s*;/);
+    // An empty `'nonce-'` token — what a naive interpolation of a blank nonce emits.
+    expect(csp).not.toContain("'nonce-'");
+    const names: string[] = [];
+    for (const directive of csp.split(";")) {
+      const trimmed = directive.trim();
+      // `name source [source…]`: a leading directive name, then ≥1 non-empty source.
+      expect(trimmed).toMatch(/^[a-z-]+ \S[^;]*$/);
+      names.push(trimmed.split(" ")[0] as string);
+    }
+    // A REPEATED directive name is not an error the browser reports — it takes the
+    // first occurrence and silently ignores every later one, so an appended
+    // `script-src 'unsafe-inline'` reads as harmless while an appended
+    // `frame-ancestors *` reads as effective. Neither is something a `.toContain()`
+    // on the policy string can see.
+    expect(names.length).toBe(new Set(names).size);
+    // And a name that is not on the allowlist is either a typo (discarded ⇒ the
+    // protection silently evaporates) or a directive nobody reviewed.
+    for (const name of names) {
+      expect(EXPECTED_DIRECTIVE_NAMES).toContain(name);
+    }
+    // Every boot-independent directive is PRESENT and is EXACTLY its pinned value —
+    // no extra source, no dropped directive, in any of the fail-closed corners either.
+    for (const [name, expected] of Object.entries(FIXED_SHELL_DIRECTIVES)) {
+      expect(directiveOf(csp, name)).toBe(expected);
+    }
+    // The two boot-dependent directives, bounded by SHAPE since their value varies:
+    // nothing rides along behind the nonce, and nothing rides along behind the origin.
+    expect(directiveOf(csp, "script-src")).toMatch(
+      /^script-src 'self'( 'nonce-[0-9a-f]{32}')?$/,
+    );
+    expect(directiveOf(csp, "frame-src")).toMatch(
+      /^frame-src ('none'|https?:\/\/[A-Za-z0-9[\]][A-Za-z0-9.:[\]-]*)$/,
+    );
+  }
+
+  describe("shellCspHeaders (pure builder)", () => {
+    test("emits every directive from the verified Ring 2 inventory", () => {
+      const csp = shellCspHeaders(NONCE, SANDBOX)["content-security-policy"] ?? "";
+      // The ten boot-independent directives are pinned EXACTLY (value and completeness)
+      // by `expectWellFormed`; the two boot-dependent ones are pinned here.
+      expectWellFormed(csp);
+      // The nonce rides on `script-src` and `'unsafe-inline'`/`'unsafe-eval'` are absent —
+      // that pairing IS the XSS mitigation; either keyword would make the nonce pointless.
+      // `toBe`, so an appended source cannot slip in behind a passing substring check.
+      expect(directiveOf(csp, "script-src")).toBe(`script-src 'self' 'nonce-${NONCE}'`);
+      expect(csp).not.toContain("'unsafe-eval'");
+      expect(directiveOf(csp, "frame-src")).toBe(`frame-src ${SANDBOX}`);
+      // Redundant with the exact pins above, kept because they name the specific
+      // regressions: a nonce/hash in `style-src` makes `'unsafe-inline'` inert, and ANY
+      // remote scheme in `img-src` reopens the no-gesture beacon channel.
+      expect(directiveOf(csp, "style-src")).not.toContain("'nonce-");
+      expect(directiveOf(csp, "style-src")).not.toContain("'sha");
+      expect(directiveOf(csp, "img-src")).not.toMatch(/https?:/);
+      // `child-src` is deliberately NOT duplicated — a second copy of the sandbox origin
+      // inside a security control is a drift hazard, not a fallback worth having.
+      expect(csp).not.toContain("child-src");
+      // The directive SET is closed: exactly the twelve names, no thirteenth.
+      const names = csp.split(";").map((d) => d.trim().split(" ")[0]);
+      expect(names.sort()).toEqual([...EXPECTED_DIRECTIVE_NAMES].sort());
+    });
+
+    test("preserves the existing shell header contract and adds the framing guard", () => {
+      const h = shellCspHeaders(NONCE, SANDBOX);
+      expect(h["content-type"]).toBe("text/html; charset=utf-8");
+      // `no-store` keeps the embedded per-boot token out of the on-disk cache — the CSP
+      // work must not have dropped it.
+      expect(h["cache-control"]).toBe("no-store");
+      expect(h["x-content-type-options"]).toBe("nosniff");
+      // `frame-ancestors` is the modern control; XFO covers browsers that predate it.
+      expect(h["x-frame-options"]).toBe("DENY");
+    });
+
+    test("frame-src fails closed to 'none' for an unusable sandbox origin", () => {
+      // Exactly the values `buildSandboxIframeAttrs` rejects — both consumers now call
+      // the SAME `isUsableSandboxOrigin`, so this loop and the one in
+      // `sandbox-host.test.ts` are two views of ONE shared matrix. The interesting
+      // members are the hostless and empty-host forms (`"http://"`, `"http://:1234"`,
+      // `"http://[:]:80"`): they clear a bare `^https?://` shape test yet would emit
+      // sources like `frame-src http://` that are not source expressions at all — and an
+      // unparseable directive is exactly the "browser may drop the policy" failure here.
+      for (const origin of UNUSABLE_SANDBOX_ORIGINS) {
+        const csp = shellCspHeaders(NONCE, origin)["content-security-policy"] ?? "";
+        // `toBe`, not `toContain`: the fallback must be the WHOLE directive, so a
+        // residue of the rejected value cannot ride along as a second source.
+        expect(directiveOf(csp, "frame-src")).toBe("frame-src 'none'");
+        // Never a dangling `frame-src;` — the exact malformed output being guarded against.
+        expect(csp).not.toContain("frame-src ;");
+        expect(csp).not.toContain("frame-src http://;");
+        expect(csp).not.toContain("frame-src https://;");
+        expectWellFormed(csp);
+      }
+    });
+
+    // The Ring 1 half of the cross-ring agreement (DW-2 review): every origin the
+    // iframe WILL navigate to is admitted verbatim, and admitted alone. Paired with
+    // `sandbox-host.test.ts`'s matrix test over the same lists — that pairing is what
+    // now enforces the "header and frame reach the same verdict" claim these files make.
+    test("a usable sandbox origin is admitted verbatim, and is the only frame-src source", () => {
+      for (const origin of USABLE_SANDBOX_ORIGINS) {
+        const csp = shellCspHeaders(NONCE, origin)["content-security-policy"] ?? "";
+        expect(directiveOf(csp, "frame-src")).toBe(`frame-src ${origin}`);
+        expectWellFormed(csp);
+      }
+    });
+
+    // DW-2 residual, recorded deliberately: on `QS_HOST=::1` / `::` the sandbox origin is
+    // a bracketed IPv6 literal, which CSP3's `host-part` grammar (ALPHA / DIGIT / `-`)
+    // does not formally admit — Chromium and Gecko accept it, a spec-strict browser would
+    // not. The emitted value must nonetheless stay BYTE-IDENTICAL to the iframe `src`:
+    // there is no portable CSP spelling for an IPv6 origin, and every alternative is a
+    // real loosening. The failure mode on a strict browser is a blank preview pane (the
+    // frame is refused) — it fails closed, never open.
+    test("an IPv6 sandbox origin is emitted verbatim, byte-identical to the iframe src", () => {
+      const origin = "http://[::1]:5555";
+      const csp = shellCspHeaders(NONCE, origin)["content-security-policy"] ?? "";
+      expect(csp).toContain(`frame-src ${origin}`);
+      // The brackets and inner colons must reach the header untouched — a mangled origin
+      // would not match the frame's actual origin and would block it, which is the
+      // second reason (after the forged-host one) there is no filter in this path.
+      expect(directiveOf(csp, "frame-src")).toBe(`frame-src ${origin}`);
+      expectWellFormed(csp);
+    });
+
+    // The mutation this test exists to kill: gate a REPAIRED origin instead of the raw
+    // one. Under the removed character filter every value below survived into a
+    // well-formed policy — and the first three into a policy naming a host or a port the
+    // input never denoted, which the injected global and the iframe `src` then agreed on.
+    // A filter that can hand its caller a valid origin is not a sanitizer, it is a
+    // forger; the gate now decides on the raw value and refuses all of these.
+    test("a hostile sandbox origin is refused whole — never filtered into a valid one", () => {
+      for (const hostile of REPAIRABLE_HOSTILE_SANDBOX_ORIGINS) {
+        const csp = shellCspHeaders(NONCE, hostile)["content-security-policy"] ?? "";
+        expect(directiveOf(csp, "frame-src")).toBe("frame-src 'none'");
+        // No forged second directive, and no fabricated host anywhere in the policy.
+        expect(csp).not.toContain("script-src 'unsafe-inline'");
+        expect(csp).not.toContain("evil.test");
+        expect(csp).toContain(`script-src 'self' 'nonce-${NONCE}'`);
+        expectWellFormed(csp);
+      }
+    });
+
+    test("anything that is not a full minted nonce drops the source entirely", () => {
+      // All-or-nothing, and the PARTIAL cases are the point. A filter-and-keep rule
+      // ("strip non-hex, use the survivors") fails OPEN precisely where it matters:
+      // `"ab;evil cd"` would collapse to a well-formed `'nonce-abecd'` carrying ~20 bits
+      // — a valid-looking policy with a brute-forceable nonce. Only a fully-destroyed
+      // input would have hit the safe branch. So: valid-or-nothing.
+      for (const bad of [
+        "", // empty
+        "zz;", // no hex at all
+        "!!!",
+        "ghijklmnop",
+        "ab;evil cd", // partially hex — the fail-open case
+        'ab"><x cd', // partially hex + an HTML-attribute breakout attempt
+        "0123456789abcdef0123456789abcde", // 31 chars: one short of a minted nonce
+        "0123456789abcdef0123456789abcdef0", // 33 chars: one long
+        "0123456789ABCDEF0123456789ABCDEF", // hex, right width, but not the minted case
+        `${NONCE};script-src 'unsafe-inline'`, // directive-injection attempt
+      ]) {
+        const csp = shellCspHeaders(bad, SANDBOX)["content-security-policy"] ?? "";
+        expect(csp).toContain("script-src 'self'");
+        // No `'nonce-…'` source of ANY entropy — not a short one, not an empty one.
+        expect(csp).not.toContain("'nonce-");
+        expect(headerNonce(csp)).toBeNull();
+        // The rejected payload leaves no residue at all: `script-src` degrades to exactly
+        // the bare `'self'` form, never a forged extra source.
+        expect(directiveOf(csp, "script-src")).toBe("script-src 'self'");
+        expect(csp).not.toContain("evil");
+        expectWellFormed(csp);
+      }
+    });
+  });
+
+  describe("renderIndexHtml nonce injection", () => {
+    test("stamps the nonce on all three inline scripts and none on the module tag", () => {
+      const html = renderIndexHtml("abc123", { exposed: false, host: "127.0.0.1", port: 80 }, SANDBOX, NONCE);
+      // All three inline scripts must carry it — the header's nonce is inert without
+      // them, and a missing one means no token / no banner / no sandbox origin.
+      expect(html).toContain(`<script nonce="${NONCE}">window.__QS_TOKEN__`);
+      expect(html).toContain(`<script nonce="${NONCE}">window.__QS_EXPOSURE__`);
+      expect(html).toContain(`<script nonce="${NONCE}">window.__QS_SANDBOX_ORIGIN__`);
+      // `/app.js` is external + same-origin, already covered by `script-src 'self'`.
+      expect(html).toContain('<script type="module" src="/app.js"></script>');
+    });
+
+    test("anything but a full minted nonce omits the attribute rather than emitting nonce=\"\"", () => {
+      for (const bad of [
+        "",
+        "zz;",
+        "!!!",
+        "ghijklmnop",
+        "ab;evil cd", // partially hex — must NOT degrade to a live `nonce="abecd"`
+        'ab"><x cd', // partially hex + an attribute breakout attempt
+        "0123456789abcdef0123456789abcde", // one char short
+        "0123456789abcdef0123456789abcdef0", // one char long
+      ]) {
+        const html = renderIndexHtml("abc123", EXPOSURE, SANDBOX, bad);
+        // `nonce=""` would be an attribute an injected script could trivially replicate,
+        // and a SHORT nonce is one it could brute-force — so the fail-closed choice is no
+        // attribute at all, matching the builder, which drops the source for the same
+        // input. The scripts are then simply refused by the browser: blank UI, not a
+        // silently weakened policy.
+        expect(html).not.toContain('nonce=""');
+        expect(html).not.toContain("nonce=");
+        expect(bodyNonce(html)).toBeNull();
+        expect(html).toContain("<script>window.__QS_TOKEN__");
+        expect(html).toContain("<script>window.__QS_EXPOSURE__");
+        expect(html).toContain("<script>window.__QS_SANDBOX_ORIGIN__");
+        // The rejected payload never reaches the attribute context.
+        expect(html).not.toContain("<x ");
+        expect(html).not.toContain("evil");
+      }
+    });
+  });
+
+  describe("nonce contract (mint <-> header <-> body)", () => {
+    // The guarantee the shared `safeCspNonce` helper exists to make real: header and
+    // body derive their nonce from ONE rule, so they cannot disagree. A disagreement is
+    // the silent-breakage mode — a perfectly valid policy in which every inline script
+    // is refused: no token, no banner, no UI, and no error anyone reads.
+    test("shellCspHeaders and renderIndexHtml agree for every class of input", () => {
+      for (const input of [
+        mintCspNonce(), // a real minted nonce — must survive on BOTH sides
+        "ab;evil cd", // partially filterable — must die on BOTH sides
+        "!!!", // fully invalid
+        "", // empty
+      ]) {
+        const csp = shellCspHeaders(input, SANDBOX)["content-security-policy"] ?? "";
+        const html = renderIndexHtml("abc123", EXPOSURE, SANDBOX, input);
+        // The single assertion that matters: same value, or absent on both sides.
+        expect(headerNonce(csp)).toBe(bodyNonce(html));
+        expectWellFormed(csp);
+      }
+    });
+
+    // The mint/consumer contract. Without this, changing `mintCspNonce`'s width, case, or
+    // alphabet would pass its own tests, pass every CSP test that uses a hand-written
+    // constant, and white-screen the real app — the consumers would silently reject every
+    // minted nonce. This is the test that turns that into a red suite instead.
+    test("mintCspNonce output always survives into a live source AND a live attribute", () => {
+      for (let i = 0; i < 64; i++) {
+        const n = mintCspNonce();
+        const csp = shellCspHeaders(n, SANDBOX)["content-security-policy"] ?? "";
+        const html = renderIndexHtml("abc123", EXPOSURE, SANDBOX, n);
+        expect(headerNonce(csp)).toBe(n);
+        expect(csp).toContain(`script-src 'self' 'nonce-${n}'`);
+        expect(bodyNonce(html)).toBe(n);
+        expect(html).toContain(`<script nonce="${n}">window.__QS_TOKEN__`);
+        expectWellFormed(csp);
+      }
+    });
+  });
+
+  describe("served shell", () => {
+    test("GET / carries the strict CSP header plus the preserved no-store/nosniff contract", async () => {
+      const res = await fetch(`${core.url}/`);
+      expect(res.status).toBe(200);
+      const csp = res.headers.get("content-security-policy") ?? "";
+      // Same exact pins as the pure builder, asserted on what the SERVER actually
+      // emitted — the builder being right is worth nothing if the route serves
+      // `htmlHeaders` or a stale precomputed copy.
+      expectWellFormed(csp);
+      expect(directiveOf(csp, "script-src")).toMatch(/^script-src 'self' 'nonce-[0-9a-f]{32}'$/);
+      // The sandbox is a distinct PORT, so `default-src 'self'` would block it — the
+      // real bound origin must appear verbatim or the Ring 2 -> Ring 3 loop breaks.
+      expect(directiveOf(csp, "frame-src")).toBe(`frame-src ${core.sandboxOrigin}`);
+      expect(csp).not.toContain("'unsafe-eval'");
+      // `frame-ancestors` is silently ignored in a <meta> policy (Story 6.4 lesson), so
+      // the header delivery + the XFO twin are both load-bearing here.
+      expect(res.headers.get("x-frame-options")).toBe("DENY");
+      // Pre-existing guarantees, unweakened.
+      expect(res.headers.get("cache-control")).toBe("no-store");
+      expect(res.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(res.headers.get("content-type")).toBe("text/html; charset=utf-8");
+    });
+
+    test("GET /index.html is byte-identical to GET / in both headers and body", async () => {
+      // `date` is wall-clock and would differ between two requests; everything else is
+      // compared, name AND value. Naming four headers explicitly would let a future
+      // alias branch ADD or DROP a fifth (a `set-cookie`, a missing `cache-control`)
+      // without a single assertion noticing — the alias must not be a second, weaker
+      // code path, so the whole header set is the contract.
+      const headerSet = (res: Response): string[] =>
+        [...res.headers.entries()]
+          .filter(([name]) => name.toLowerCase() !== "date")
+          .map(([name, value]) => `${name.toLowerCase()}: ${value}`)
+          .sort();
+
+      const [root, alias] = await Promise.all([fetch(`${core.url}/`), fetch(`${core.url}/index.html`)]);
+      expect(alias.status).toBe(root.status);
+      expect(headerSet(alias)).toEqual(headerSet(root));
+      // Sanity: the comparison is not vacuously passing on an empty set.
+      expect(headerSet(root)).toContain(`content-security-policy: ${root.headers.get("content-security-policy") as string}`);
+      expect(await alias.text()).toBe(await root.text());
+    });
+
+    test("the header nonce is exactly the nonce on all three inline scripts", async () => {
+      const res = await fetch(`${core.url}/`);
+      const csp = res.headers.get("content-security-policy") ?? "";
+      const html = await res.text();
+      const nonce = bodyNonce(html);
+      // A mismatch here is the silent-breakage failure mode: the page loads, the CSP is
+      // valid, and every inline script is refused — no token, no UI.
+      expect(nonce).not.toBeNull();
+      expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+      expect(csp).toContain(`'nonce-${nonce as string}'`);
+      expect(html).toContain(`<script nonce="${nonce as string}">window.__QS_TOKEN__`);
+      expect(html).toContain(`<script nonce="${nonce as string}">window.__QS_EXPOSURE__`);
+      expect(html).toContain(`<script nonce="${nonce as string}">window.__QS_SANDBOX_ORIGIN__`);
+      // The nonce and the session token are different secrets of different widths, so
+      // `nonce !== token` is true for every value the program can produce and asserts
+      // nothing. What IS worth pinning: the token must not have leaked into the response
+      // headers. The shell hands it to script via the inline `<script>` and nowhere else,
+      // and a header carrying it would put it in every proxy and devtools log.
+      for (const [, value] of res.headers.entries()) {
+        expect(value).not.toContain(core.token);
+      }
+    });
+
+    test("a second boot mints a different nonce that never appears in the first boot's shell", async () => {
+      const c = await startCore(0);
+      try {
+        const [a, b] = await Promise.all([
+          fetch(`${core.url}/`).then((r) => r.text()),
+          fetch(`${c.url}/`).then((r) => r.text()),
+        ]);
+        const nonceA = bodyNonce(a);
+        const nonceB = bodyNonce(b);
+        expect(nonceA).not.toBeNull();
+        expect(nonceB).not.toBeNull();
+        // Per-boot freshness: a nonce leaked from one session must not unlock the next.
+        expect(nonceB).not.toBe(nonceA);
+        expect(a).not.toContain(nonceB as string);
+        expect(b).not.toContain(nonceA as string);
+      } finally {
+        await c.stop();
+      }
+    }, 30000);
+
+    test("the shell CSP did not leak onto the separately-contracted /live/<id> page", async () => {
+      const pub = await callRpc(core.token, {
+        method: "livereport.publish",
+        params: {
+          schemaVersion: 1,
+          blocks: [{ kind: "prose", markdown: "# csp regression" }],
+        },
+      });
+      const reply = await pub.json();
+      expect(reply.ok).toBe(true);
+      const res = await fetch(`${core.url}${reply.result.path as string}`);
+      expect(res.status).toBe(200);
+      // AD-3 pins the live page's header contract: `frame-ancestors 'none'` and NOTHING
+      // else. The shell policy would break its inlined runtime and inline styles.
+      expect(res.headers.get("content-security-policy")).toBe("frame-ancestors 'none'");
+      expect(res.headers.get("x-frame-options")).toBe("DENY");
+    });
   });
 });
 

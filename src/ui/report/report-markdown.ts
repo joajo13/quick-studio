@@ -44,11 +44,17 @@ function isSafeUrl(rawUrl: string, isImageSrc = false): boolean {
   if (url.startsWith("\\") || /^%5c/i.test(url)) return false;
   const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(url);
   if (scheme === null) return true; // relative / fragment / no scheme
-  // An IMAGE `src` fetches on render with NO user gesture. Unlike the Ring 3 sandbox — where
-  // a CSP (`connect-src 'none'`, restricted `img-src`) backstops egress — a report renders in
-  // Ring 2 with no CSP, so a remote `src` would send a request off the machine on preview
-  // (R5: no data leaves the machine; no arbitrary embeds). A scheme-less relative `src` is
-  // fine; any explicit scheme (http/https/…) on an image is neutralized to `#`.
+  // An IMAGE `src` fetches on render with NO user gesture, so a remote `src` would send a
+  // request off the machine on preview (R5: no data leaves the machine; no arbitrary embeds).
+  // As of DW-2 Ring 2 DOES carry a CSP whose `img-src 'self' data:` refuses a remote image
+  // origin outright, so this rewrite is now defense-in-depth rather than the sole barrier.
+  // It stays anyway because it is a DIFFERENT kind of guard: it NEUTRALIZES the URL at
+  // render time (the attribute never holds a remote origin) instead of relying on the
+  // browser to refuse the fetch — so it holds even where a policy is missing, mis-delivered,
+  // or unsupported. (It is not that the exported documents lack a policy: `SNAPSHOT_CSP` and
+  // `LIVE_REPORT_CSP` both open with `default-src 'none'` and declare no `img-src`, so images
+  // are blocked there MORE strictly than in the shell.) A scheme-less relative `src` is fine;
+  // any explicit scheme (http/https/…) on an image is neutralized to `#`.
   if (isImageSrc) return false;
   return SAFE_URL_SCHEMES.has((scheme[1] as string).toLowerCase());
 }
