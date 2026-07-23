@@ -20,8 +20,13 @@ import {
   type IntrospectedForeignKey,
   type IntrospectedIndex,
 } from "./driver.ts";
-import { buildMysqlConfig, createMutex } from "./driver-mysql.ts";
-import { mapUnsafeResult } from "./driver-postgres.ts";
+import { buildMysqlConfig, createMutex, mysqlSchemaScope } from "./driver-mysql.ts";
+import {
+  mapUnsafeResult,
+  pgIndexColumnVisibility,
+  pgSchemaScope,
+  pgSupportsConparentid,
+} from "./driver-postgres.ts";
 
 /** A synthetic engine/OS error carrying the `code`/`errno` tags drivers surface. */
 function fakeErr(tags: { code?: string; errno?: number }): Error {
@@ -424,6 +429,327 @@ describe("assembleSchema — foreign-key folding (Story 4.1)", () => {
       { schema: "public", table: "t", column: "c", dataType: "text", nullable: true },
     ]);
     expect(schema.tables[0]?.foreignKeys).toEqual([]);
+  });
+});
+
+describe("assembleSchema — primary-key folding (DW-31 key order)", () => {
+  test("a composite PK folds in KEY order, not table-column order", () => {
+    // Columns arrive in table order [a, b]; the PK's own ordinal order is [b, a].
+    // `primaryKey` must mirror the KEY order (the adapters pre-order the PK rows by the
+    // key's own `ordinal_position`), so it comes out ["b", "a"], not ["a", "b"].
+    const schema = assembleSchema(
+      "postgres",
+      [
+        { schema: "public", table: "t", column: "a", dataType: "integer", nullable: false },
+        { schema: "public", table: "t", column: "b", dataType: "integer", nullable: false },
+      ],
+      [],
+      [],
+      [
+        { schema: "public", table: "t", column: "b" },
+        { schema: "public", table: "t", column: "a" },
+      ],
+    );
+    expect(schema.tables[0]?.primaryKey).toEqual(["b", "a"]);
+  });
+
+  test("a single-column PK folds to a one-element list", () => {
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "users", column: "id", dataType: "integer", nullable: false }],
+      [],
+      [],
+      [{ schema: "public", table: "users", column: "id" }],
+    );
+    expect(schema.tables[0]?.primaryKey).toEqual(["id"]);
+  });
+
+  test("a table with no PK rows carries an empty `primaryKey`", () => {
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "logs", column: "msg", dataType: "text", nullable: true }],
+      [],
+      [],
+      [],
+    );
+    expect(schema.tables[0]?.primaryKey).toEqual([]);
+  });
+
+  test("a PK row for a table absent from the column list never spawns a phantom table", () => {
+    const schema = assembleSchema(
+      "postgres",
+      [{ schema: "public", table: "users", column: "id", dataType: "integer", nullable: false }],
+      [],
+      [],
+      [
+        { schema: "public", table: "users", column: "id" },
+        // No `ghost` table exists in the column list — this PK row must be dropped.
+        { schema: "public", table: "ghost", column: "x" },
+      ],
+    );
+    expect(schema.tables.map((t) => `${t.schema}.${t.name}`)).toEqual(["public.users"]);
+    expect(schema.tables[0]?.primaryKey).toEqual(["id"]);
+  });
+});
+
+// DW-42: `pg_constraint.conparentid` exists only on PostgreSQL 11+
+// (`server_version_num >= 110000`), so the FK query gates the partition-copy filter on
+// this boundary. Prove the boundary directly (no live DB needed).
+describe("pgSupportsConparentid — PG 11 version boundary (DW-42)", () => {
+  test("PG 10 (100000) is unsupported; PG 11 (110000) and PG 16 (160001) are supported", () => {
+    expect(pgSupportsConparentid(100000)).toBe(false);
+    expect(pgSupportsConparentid(110000)).toBe(true);
+    expect(pgSupportsConparentid(160001)).toBe(true);
+  });
+});
+
+// Story 10.2 — the pinned-schema scope predicate shared by the four mysql
+// introspection queries. Pure, so the precedence rule (R2: the pin wins over the
+// URL's own database) and the untouched no-pin path are provable without a live mysql.
+describe("mysqlSchemaScope — pinned introspection scope (Story 10.2)", () => {
+  const SYSTEM = ["information_schema", "performance_schema", "mysql", "sys"];
+
+  test("pinned + URL database: the PIN wins (R2)", () => {
+    expect(mysqlSchemaScope("reporting", "appdb")).toEqual({
+      where: "table_schema = ?",
+      params: ["reporting"],
+    });
+  });
+
+  test("pinned only (URL has no database path): scoped to the pin", () => {
+    expect(mysqlSchemaScope("reporting", null)).toEqual({
+      where: "table_schema = ?",
+      params: ["reporting"],
+    });
+  });
+
+  test("no pin + URL database: today's behavior, scoped to the URL's database", () => {
+    expect(mysqlSchemaScope(undefined, "appdb")).toEqual({
+      where: "table_schema = ?",
+      params: ["appdb"],
+    });
+  });
+
+  test("neither: today's behavior, the system schemas excluded by placeholder", () => {
+    expect(mysqlSchemaScope(undefined, null)).toEqual({
+      where: "table_schema NOT IN (?, ?, ?, ?)",
+      params: SYSTEM,
+    });
+  });
+
+  test("a blank/whitespace pin counts as UNSET at the driver boundary", () => {
+    for (const blank of ["", "   ", "\t\n"]) {
+      expect(mysqlSchemaScope(blank, "appdb")).toEqual({
+        where: "table_schema = ?",
+        params: ["appdb"],
+      });
+      expect(mysqlSchemaScope(blank, null)).toEqual({
+        where: "table_schema NOT IN (?, ?, ?, ?)",
+        params: SYSTEM,
+      });
+    }
+  });
+
+  test("the schema name is a bound VALUE, never spliced into the predicate text", () => {
+    const scope = mysqlSchemaScope("evil'; DROP TABLE t; --", null);
+    expect(scope.where).toBe("table_schema = ?");
+    expect(scope.params).toEqual(["evil'; DROP TABLE t; --"]);
+  });
+
+  test("returns FRESH arrays per call (mysql2 consumes them positionally)", () => {
+    expect(mysqlSchemaScope(undefined, null).params).not.toBe(
+      mysqlSchemaScope(undefined, null).params,
+    );
+  });
+
+  // The TRIMMED pin is what gets bound, not the raw stored string: `"  reporting  "`
+  // would match zero tables as a value comparison against `table_schema`.
+  test("a padded pin is bound TRIMMED, not raw", () => {
+    expect(mysqlSchemaScope("  reporting  ", "appdb")).toEqual({
+      where: "table_schema = ?",
+      params: ["reporting"],
+    });
+  });
+});
+
+// Story 10.2 — the postgres counterpart. No live DB: postgres.js builds a `sql`…``
+// fragment LAZILY, exposing the literal text parts as `strings` and the values it will
+// BIND as `args`, so both arms are fully provable against a never-connected client
+// (same trick as the extended-protocol backstop below, which never opens a socket
+// against the non-routable 127.0.0.1:1).
+//
+// This locks the two properties nothing else in the suite can: (a) the UNPINNED arms
+// reproduce the pre-10.2 predicates VERBATIM — a one-character drift in
+// `n.nspname !~ '^pg_'` would silently resurface every `pg_toast` index for every
+// existing connection — and (b) the PINNED arms carry the schema as a bound ARG, never
+// spliced into the query text.
+/**
+ * The literal SQL text of a fragment: its `strings` parts with each bind slot marked.
+ *
+ * `strings`/`args` are postgres.js INTERNALS, not public API — reached through `unknown`
+ * on purpose. If a postgres.js bump ever renamed them these helpers would throw rather
+ * than fail an assertion, and the real damage would be that every predicate lock below
+ * silently stopped meaning anything. Shared by the 10.2 and 10.3 blocks so that coupling
+ * lives in exactly one place.
+ */
+const textOf = (fragment: unknown): string =>
+  (fragment as { strings: readonly string[] }).strings.join("$?");
+/** The values postgres.js will BIND for a fragment (empty ⇒ pure literal predicate). */
+const argsOf = (fragment: unknown): readonly unknown[] =>
+  (fragment as { args: readonly unknown[] }).args;
+
+/**
+ * Run `fn` against a never-connected postgres.js client (non-routable 127.0.0.1:1), then
+ * end it. `fn` may be async — its promise is awaited BEFORE teardown, so a future async
+ * assertion cannot run after the client is gone or be skipped outright.
+ */
+const withSql = async (
+  run: (sql: ReturnType<typeof postgres>) => void | Promise<void>,
+): Promise<void> => {
+  const sql = postgres("postgres://u:p@127.0.0.1:1/db", { max: 1 });
+  try {
+    await run(sql);
+  } finally {
+    await sql.end({ timeout: 1 });
+  }
+};
+
+describe("pgSchemaScope — pinned introspection scope (Story 10.2)", () => {
+  test("UNPINNED: the four predicates are today's, verbatim, with NOTHING bound", async () => {
+    await withSql((sql) => {
+      const scope = pgSchemaScope(sql, undefined);
+      expect(textOf(scope.colScope)).toBe(
+        "table_schema NOT IN ('pg_catalog', 'information_schema')",
+      );
+      expect(textOf(scope.pkScope)).toBe(
+        "tc.table_schema NOT IN ('pg_catalog', 'information_schema')",
+      );
+      expect(textOf(scope.idxScope)).toBe(
+        "n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'",
+      );
+      expect(textOf(scope.fkScope)).toBe(
+        "con_ns.nspname !~ '^pg_' AND con_ns.nspname <> 'information_schema'",
+      );
+      for (const fragment of Object.values(scope)) expect(argsOf(fragment)).toEqual([]);
+    });
+  });
+
+  test("PINNED: each predicate is an equality whose value is a BOUND arg, never text", async () => {
+    await withSql((sql) => {
+      const scope = pgSchemaScope(sql, "reporting");
+      expect(textOf(scope.colScope)).toBe("table_schema = $?");
+      expect(textOf(scope.pkScope)).toBe("tc.table_schema = $?");
+      expect(textOf(scope.idxScope)).toBe("n.nspname = $?");
+      expect(textOf(scope.fkScope)).toBe("con_ns.nspname = $?");
+      for (const fragment of Object.values(scope)) {
+        expect(argsOf(fragment)).toEqual(["reporting"]);
+        // The name lives ONLY in the bind slot — no fragment's text mentions it.
+        expect(textOf(fragment)).not.toContain("reporting");
+      }
+    });
+  });
+
+  test("a hostile schema name stays a bound VALUE (no splice, no injection)", async () => {
+    await withSql((sql) => {
+      const evil = "public'; DROP TABLE t; --";
+      const scope = pgSchemaScope(sql, evil);
+      expect(textOf(scope.colScope)).toBe("table_schema = $?");
+      expect(argsOf(scope.colScope)).toEqual([evil]);
+    });
+  });
+
+  test("a blank/whitespace pin falls back to the UNPINNED arms (driver-boundary defense)", async () => {
+    await withSql((sql) => {
+      for (const blank of ["", "   ", "\t\n"]) {
+        const scope = pgSchemaScope(sql, blank);
+        expect(textOf(scope.colScope)).toBe(
+          "table_schema NOT IN ('pg_catalog', 'information_schema')",
+        );
+        expect(argsOf(scope.colScope)).toEqual([]);
+      }
+    });
+  });
+
+  test("a padded pin is bound TRIMMED, not raw", async () => {
+    await withSql((sql) => {
+      const scope = pgSchemaScope(sql, "  reporting  ");
+      for (const fragment of Object.values(scope)) expect(argsOf(fragment)).toEqual(["reporting"]);
+    });
+  });
+});
+
+// Story 10.3 — the index query's per-column PRIVILEGE alignment, locked on two axes.
+//
+// (1) The fragment's text. Ground truth is Postgres's own `information_schema.columns`
+// view — `src/backend/catalog/information_schema.sql` in the server source, whose WHERE
+// ends with `pg_has_role(c.relowner, 'USAGE') OR has_column_privilege(c.oid, a.attnum,
+// 'SELECT, INSERT, UPDATE, REFERENCES')`. `EXPECTED` below is that clause re-aliased to
+// the index query's `t`/`a`. Being a literal copy, this test is a change-DETECTOR: it
+// catches accidental drift, NOT a deliberate edit made in both places at once. Anyone
+// touching it must re-check the predicate against the view definition above, since a
+// silently weaker check would let the index query surface a (table, column) pair the
+// columns query hides. If a future PG release adds a privilege to that list, the two
+// diverge and this test will not notice.
+//
+// (2) The SPLICE. A correct fragment nobody interpolates is worth nothing, and deleting
+// `AND ${idxVisibility}` from the query would still compile and still pass every
+// assertion about the fragment itself. The composed query is only reachable through a
+// live connection, so the splice is asserted against the module's own SOURCE TEXT
+// instead — the one offline way to prove the predicate actually reaches the WHERE.
+describe("pgIndexColumnVisibility — index/columns privilege alignment (Story 10.3)", () => {
+  // Postgres's own `information_schema.columns` privilege check, re-aliased to `t`/`a`.
+  const EXPECTED =
+    "(pg_has_role(t.relowner, 'USAGE') OR has_column_privilege(t.oid, a.attnum, 'SELECT, INSERT, UPDATE, REFERENCES'))";
+
+  test("the predicate is information_schema.columns' own check, character for character", async () => {
+    await withSql((sql) => {
+      expect(textOf(pgIndexColumnVisibility(sql))).toBe(EXPECTED);
+    });
+  });
+
+  test("it binds NOTHING — a pure literal predicate, no parameters", async () => {
+    await withSql((sql) => {
+      expect(argsOf(pgIndexColumnVisibility(sql))).toEqual([]);
+    });
+  });
+
+  // The fragment carries no FROM clause of its own: it is only correct because the index
+  // query already binds `pg_class t` and `pg_attribute a`. It must also be parenthesized
+  // as ONE unit, or `AND ${fragment}` would re-associate with the sibling conjuncts
+  // (`${idxScope}`, `a.attnum > 0`) around its internal `OR` and widen the result set —
+  // so depth must never return to 0 before the final character.
+  test("it is one parenthesized unit over the t./a. aliases the index query binds", async () => {
+    await withSql((sql) => {
+      const text = textOf(pgIndexColumnVisibility(sql));
+      expect(text).toContain("t.relowner");
+      expect(text).toContain("t.oid");
+      expect(text).toContain("a.attnum");
+      let depth = 0;
+      let closedEarly = false;
+      for (const [i, ch] of [...text].entries()) {
+        if (ch === "(") depth++;
+        else if (ch === ")") depth--;
+        if (depth === 0 && i < text.length - 1) closedEarly = true;
+      }
+      expect(closedEarly).toBe(false);
+      expect(depth).toBe(0);
+    });
+  });
+
+  // The splice itself. Reads the adapter's source rather than trusting that the one call
+  // site stays wired — an unused `const idxVisibility` compiles clean, so nothing else in
+  // the suite would notice the privilege filter quietly leaving the query.
+  test("the index query's WHERE actually splices the predicate, beside scope and attnum", async () => {
+    const source = await Bun.file(
+      new URL("./driver-postgres.ts", import.meta.url).pathname,
+    ).text();
+    const where = source.slice(
+      source.indexOf("FROM pg_index ix"),
+      source.indexOf("ORDER BY n.nspname, t.relname, i.relname"),
+    );
+    expect(where).toContain("WHERE ${idxScope}");
+    expect(where).toContain("AND a.attnum > 0");
+    expect(where).toContain("AND ${idxVisibility}");
   });
 });
 

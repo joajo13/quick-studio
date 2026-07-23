@@ -38,6 +38,7 @@ import type {
   SchemaTableInfo,
 } from "../shared/contract.ts";
 import { PROVIDER_KINDS } from "../shared/contract.ts";
+import { extractReport, parseReportSpec } from "../shared/report-spec.ts";
 import { reasoningProviderOptions } from "./ai-provider.ts";
 import type { ResolveModelResult } from "./ai-provider.ts";
 import type { RegistryResult } from "./provider-registry.ts";
@@ -91,6 +92,9 @@ export function buildChatSystemPrompt(payload: ChatProviderPayload): string {
     "when a query answers the question, output exactly one statement in a ```sql fenced block.",
     "when a chart helps, also emit exactly one ```chart fenced block containing a json object with:",
     `  "mark" (one of line, bar, dot, area), "x" and "y" set to result column names, an optional "series" column, and an optional "title".`,
+    "when the user asks you to build a report, emit exactly one ```report fenced block containing a json object with:",
+    `  an optional "title" string, and a non-empty "blocks" array of ordered blocks, each either`,
+    `  {"kind":"prose","markdown":"..."} or {"kind":"query","sql":"...","chart"?:{"mark":..., "x":..., "y":..., "series"?:..., "title"?:...}}.`,
     "do not invent tables or columns.",
   ].join("\n");
   return `${instruction}\n\n${payload.schema.text}`;
@@ -184,8 +188,16 @@ const defaultGenerateStream: GenerateStreamFn = ({
 
 /** Dependencies for {@link createChatResponder}. `generateStream` is the test seam. */
 export type ChatResponderDeps = {
-  /** The single live schema source (memoized `connectionManager.getSchema`). */
-  readonly getSchema: () => Promise<DatabaseSchema>;
+  /**
+   * The live schema source, resolved PER REQUEST (Story 10.4): the optional
+   * `connectionId` off the request body selects which saved connection is introspected;
+   * absent/`null` ⇒ the boot connection, exactly as before. Throwing is how "there is no
+   * usable connection for this id" is signalled — the caller's catch maps it to the
+   * existing neutral "no active connection" reply, so an unresolvable target needs no new
+   * chat error code. Targeting changes only WHICH schema is summarized, never the
+   * schema-only payload invariant.
+   */
+  readonly getSchema: (connectionId?: string | null) => Promise<DatabaseSchema>;
   /** Core-internal raw-key lookup for a kind (null when unconfigured). */
   readonly getKey: (provider: ProviderKind) => RegistryResult<string | null>;
   /** Map a kind + key to a model handle (pure construction, no network). */
@@ -216,7 +228,6 @@ function badRequest(message: string, detail: string): RegistryResult<never> {
 /** The fully-prepared, schema-only request handed to the single streaming call. */
 type PreparedRequest = {
   readonly provider: ProviderKind;
-  readonly apiKey: string;
   readonly model: LanguageModel;
   readonly system: string;
   readonly prompt: string;
@@ -253,6 +264,16 @@ function prepareRequest(
       return badRequest("message required", "field=message");
     }
 
+    // Optional target (Story 10.4): a saved-connection id, or absent/null for the boot
+    // connection. A wrong TYPE is a protocol violation — rejected here with the same
+    // `bad_request` + `field=` convention `provider`/`message` use, before any key lookup
+    // or schema round-trip. An id that is well-formed but UNRESOLVABLE is a different
+    // thing and deliberately lands on the "no active connection" catch below.
+    const connectionId = p?.connectionId;
+    if (connectionId !== undefined && connectionId !== null && typeof connectionId !== "string") {
+      return badRequest("invalid connectionId", "field=connectionId");
+    }
+
     // Resolve the key in Ring 1. A registry failure (store unavailable) propagates
     // its own code; an unconfigured provider (null) is a clean not_found.
     const keyResult = deps.getKey(provider);
@@ -267,12 +288,14 @@ function prepareRequest(
     }
     const apiKey = keyResult.value;
 
-    // Introspect the single live connection's schema. No live connection (or a
-    // connect failure) surfaces here as a throw → a neutral no-connection error
-    // (never a key/secret in the detail).
+    // Introspect the TARGETED connection's schema (the boot one when no id was sent).
+    // No live connection, an unresolvable id, or a connect failure all surface here as a
+    // throw → the same neutral no-connection error (never a key/secret, never the id, in
+    // the detail). Chat therefore cannot distinguish "unknown id" from "store blip" — a
+    // deliberate trade: the RPC callers that need that distinction have it.
     let schema: DatabaseSchema;
     try {
-      schema = await deps.getSchema();
+      schema = await deps.getSchema(connectionId);
     } catch {
       return badRequest("no active connection", "schema=unavailable");
     }
@@ -290,7 +313,6 @@ function prepareRequest(
       ok: true,
       value: {
         provider,
-        apiKey,
         model: resolved.model,
         system: buildChatSystemPrompt(payload),
         prompt: message,
@@ -298,6 +320,29 @@ function prepareRequest(
       },
     };
   })();
+}
+
+/**
+ * Extract a numeric HTTP status from a provider error — its own `statusCode` then
+ * `status`, returned only when it is an integer in the HTTP range 100–599 (else
+ * `undefined`). A `number` primitive cannot encode the key, so it is the ONLY
+ * provider-derived value the error path is allowed to log (see the `answerStream`
+ * catch invariant); the range/integer check merely keeps the diagnostic honest.
+ */
+function errorStatusCode(err: unknown): number | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  for (const key of ["statusCode", "status"] as const) {
+    // A hostile error could expose `statusCode`/`status` as a throwing getter;
+    // reading it must never escape (answerStream's catch is Total — never throws).
+    let v: unknown;
+    try {
+      v = (err as Record<string, unknown>)[key];
+    } catch {
+      continue;
+    }
+    if (typeof v === "number" && Number.isInteger(v) && v >= 100 && v <= 599) return v;
+  }
+  return undefined;
 }
 
 /**
@@ -316,7 +361,7 @@ export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
         yield { type: "error", code: prepared.code, message: prepared.message };
         return;
       }
-      const { provider, apiKey, model, system, prompt, tables } = prepared.value;
+      const { provider, model, system, prompt, tables } = prepared.value;
 
       const context: ChatContextSummary = {
         policy: "schema-only",
@@ -359,17 +404,28 @@ export function createChatResponder(deps: ChatResponderDeps): ChatResponder {
         // spurious "stream failed" log, and no misleading `error` chunk (the caller is
         // already gone and the controller is dead, so it could not be delivered anyway).
         if (signal?.aborted) return;
-        // Redact the key from the cause before logging: a provider auth error can echo
-        // the credential, and the spec forbids the key ever being logged or sent.
-        const rawCause = err instanceof Error ? err.message : String(err);
-        const cause = apiKey.length > 0 ? rawCause.split(apiKey).join("***") : rawCause;
-        process.stderr.write(`[chat] provider stream failed: ${cause}\n`);
+        // Security invariant: the provider key must NEVER reach any log. An auth error
+        // can echo the credential in forms substring-redaction can't cover, so we never
+        // interpolate the raw provider error — only a numeric status, which cannot carry it.
+        const status = errorStatusCode(err);
+        process.stderr.write(
+          `[chat] provider stream failed${status === undefined ? "" : ` (http ${status})`}\n`,
+        );
         yield { type: "error", code: "internal_error", message: "provider call failed" };
         return;
       }
 
-      // Terminal frame: extract the query once over the fully-accumulated answer.
-      yield { type: "done", query: extractQuery(full), context };
+      // Terminal frame: extract the query + report once over the fully-accumulated
+      // answer. `parseReportSpec` is the Core-side gate — a missing/malformed fence
+      // yields `null`, and NOTHING opens on the UI side until a spec passes it. A report
+      // answer is its own answer type: when the model produced a VALID report
+      // (`report !== null`), the standalone "run query" affordance is suppressed so a
+      // report never doubles as a runnable single query. But a report attempt that FAILS
+      // validation is NOT a report answer — it must not swallow a genuinely separate,
+      // runnable ` ```sql ` block in the same message, so the query affordance is kept.
+      const report = parseReportSpec(extractReport(full).rawReport);
+      const query = report !== null ? null : extractQuery(full);
+      yield { type: "done", query, report, context };
     },
   };
 }

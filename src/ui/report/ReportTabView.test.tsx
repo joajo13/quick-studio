@@ -77,13 +77,14 @@ describe("ReportTabView", () => {
     expect(onStateChange).not.toHaveBeenCalled();
   });
 
-  test("renders the re-target picker with the Default (launch connection) option", () => {
-    // Story 6.2: the toolbar carries a target picker whose default (value "") is the
-    // launch connection = `null`. The saved-connection options are populated by a mount
-    // effect (not run in a static render); the Default option is always present.
+  test("renders the re-target picker as a shadcn Select trigger", () => {
+    // Story 6.2 (Epic 9 shadcn conversion): the toolbar carries a target picker. It is a
+    // Radix/shadcn Select whose option list (default = launch connection = `null`, plus each
+    // saved connection) is PORTAL-rendered only when the menu opens — so a static render
+    // exposes the trigger (`role="combobox"`) but not the item text.
     const html = renderToStaticMarkup(<ReportTabView state={emptyReport()} onStateChange={() => {}} />);
     expect(html).toContain('aria-label="report target"');
-    expect(html).toContain("Default (launch connection)");
+    expect(html).toContain('role="combobox"');
   });
 
   test("the picker reflects a non-null stored target as the selected value", () => {

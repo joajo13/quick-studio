@@ -35,6 +35,14 @@ import { mapChart } from "./report-chart.ts";
 import { renderReportMarkdown } from "./report-markdown.ts";
 import { planRetarget } from "./retarget-plan.ts";
 import { ReportChart } from "./ReportChart.tsx";
+import { Button } from "../components/ui/button.tsx";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select.tsx";
 import {
   addProseBlock,
   addQueryBlock,
@@ -85,15 +93,11 @@ async function toOutcome(
   }
 }
 
-const btn =
-  "rounded-[var(--radius)] border border-[var(--rpt-accent-line)] bg-[var(--rpt-accent-soft)] px-2 py-0.5 font-mono text-xs lowercase text-[var(--foreground)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
-const ghostBtn =
-  "rounded-[var(--radius)] border border-[var(--border)] px-2 py-0.5 font-mono text-[11px] lowercase text-[var(--muted-foreground)] transition-colors hover:bg-[var(--muted)] disabled:cursor-not-allowed disabled:opacity-40";
-// The export controls wear the prototype's ink treatment (report.html `.seg-btn.on`):
-// an ink-accent border + fill on ink-contrast text. They remain two independent action
-// <button>s (own `handleExport` / `handleExportLive`), NOT a role="tablist" mode selector.
-const exportBtn =
-  "rounded-[var(--radius)] border border-[var(--rpt-accent-line)] bg-[var(--rpt-accent)] px-2 py-0.5 font-mono text-[11px] lowercase text-[var(--rpt-accent-ink)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40";
+// Radix Select forbids an empty-string item value, so these sentinels stand in for the
+// "default (launch connection)" target and the empty chart-picker options; each is mapped
+// back to `null`/`""` on change.
+const DEFAULT_TARGET = "__default__";
+const NONE = "__none__";
 
 /** The per-block header: an ordinal label + reorder/remove controls. */
 function BlockControls({
@@ -111,15 +115,15 @@ function BlockControls({
     <div className="flex items-center gap-2">
       <span className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">{label}</span>
       <div className="ml-auto flex items-center gap-1">
-        <button type="button" aria-label="move up" className={ghostBtn} onClick={onUp}>
+        <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="move up" onClick={onUp}>
           ↑
-        </button>
-        <button type="button" aria-label="move down" className={ghostBtn} onClick={onDown}>
+        </Button>
+        <Button type="button" variant="ghost" size="icon" className="h-7 w-7" aria-label="move down" onClick={onDown}>
           ↓
-        </button>
-        <button type="button" aria-label="remove block" className={ghostBtn} onClick={onRemove}>
+        </Button>
+        <Button type="button" variant="ghost" size="sm" className="h-7 px-2" aria-label="remove block" onClick={onRemove}>
           remove
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -154,44 +158,63 @@ function ChartSpecEditor({
     setDraft(next);
     onChange(next);
   };
-  const select = "rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--rpt-accent-line)]";
   return (
     <div className="flex flex-wrap items-center gap-2">
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">mark</label>
-      <select aria-label="mark" className={select} value={draft.mark} onChange={(e) => update({ ...draft, mark: e.target.value as MarkKind })}>
-        {MARK_KINDS.map((m) => (
-          <option key={m} value={m}>
-            {m}
-          </option>
-        ))}
-      </select>
+      <Select value={draft.mark} onValueChange={(v) => update({ ...draft, mark: v as MarkKind })}>
+        <SelectTrigger aria-label="mark" className="h-8 w-[110px] lowercase">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          {MARK_KINDS.map((m) => (
+            <SelectItem key={m} value={m}>
+              {m}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">x</label>
-      <select aria-label="x column" className={select} value={draft.x} onChange={(e) => update({ ...draft, x: e.target.value })}>
-        <option value="">select…</option>
-        {columns.map((c) => (
-          <option key={c} value={c}>
-            {c}
-          </option>
-        ))}
-      </select>
+      <Select value={draft.x === "" ? NONE : draft.x} onValueChange={(v) => update({ ...draft, x: v === NONE ? "" : v })}>
+        <SelectTrigger aria-label="x column" className="h-8 w-[140px] lowercase">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={NONE}>select…</SelectItem>
+          {columns.map((c) => (
+            <SelectItem key={c} value={c}>
+              {c}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">y</label>
-      <select aria-label="y column" className={select} value={draft.y} onChange={(e) => update({ ...draft, y: e.target.value })}>
-        <option value="">select…</option>
-        {columns.map((c) => (
-          <option key={c} value={c}>
-            {c}
-          </option>
-        ))}
-      </select>
+      <Select value={draft.y === "" ? NONE : draft.y} onValueChange={(v) => update({ ...draft, y: v === NONE ? "" : v })}>
+        <SelectTrigger aria-label="y column" className="h-8 w-[140px] lowercase">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={NONE}>select…</SelectItem>
+          {columns.map((c) => (
+            <SelectItem key={c} value={c}>
+              {c}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
       <label className="font-mono text-[11px] lowercase text-[var(--muted-foreground)]">series</label>
-      <select aria-label="series column" className={select} value={draft.series} onChange={(e) => update({ ...draft, series: e.target.value })}>
-        <option value="">none</option>
-        {columns.map((c) => (
-          <option key={c} value={c}>
-            {c}
-          </option>
-        ))}
-      </select>
+      <Select value={draft.series === "" ? NONE : draft.series} onValueChange={(v) => update({ ...draft, series: v === NONE ? "" : v })}>
+        <SelectTrigger aria-label="series column" className="h-8 w-[140px] lowercase">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value={NONE}>none</SelectItem>
+          {columns.map((c) => (
+            <SelectItem key={c} value={c}>
+              {c}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
     </div>
   );
 }
@@ -462,20 +485,22 @@ export function ReportTabView({
         <label htmlFor="report-target" className="ml-2 font-mono text-[11px] lowercase text-[var(--muted-foreground)]">
           target
         </label>
-        <select
-          id="report-target"
-          aria-label="report target"
-          value={state.targetConnectionId ?? ""}
-          onChange={(e) => handleRetarget(e.target.value === "" ? null : e.target.value)}
-          className="rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] px-2 py-1 font-mono text-[11px] lowercase text-[var(--foreground)] outline-none focus:border-[var(--rpt-accent-line)]"
+        <Select
+          value={state.targetConnectionId ?? DEFAULT_TARGET}
+          onValueChange={(v) => handleRetarget(v === DEFAULT_TARGET ? null : v)}
         >
-          <option value="">Default (launch connection)</option>
-          {connections.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+          <SelectTrigger id="report-target" aria-label="report target" className="h-8 w-[240px] lowercase">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={DEFAULT_TARGET}>default (launch connection)</SelectItem>
+            {connections.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                {c.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         <div className="ml-auto flex items-center gap-2">
           {/* Ink-treated export control (Story 6.3; 7.6 neutral look — report.html `.seg-btn.on`
               idiom via `exportBtn`): freezes the current block results into a self-contained .html
@@ -491,34 +516,34 @@ export function ReportTabView({
               {exportLiveError}
             </span>
           ) : null}
-          <button
-            type="button"
-            className={exportBtn}
+          <Button
+            variant="outline"
+            size="sm"
             disabled={exporting}
             aria-label="export snapshot"
             onClick={() => void handleExport()}
           >
             {exporting ? "exporting…" : "export snapshot"}
-          </button>
-          {/* Sibling ink-treated export control (Story 6.4; 7.6 neutral look via `exportBtn`):
-              publishes the current layout+SQL to the local Core, opens the loopback live view, and
-              downloads a portable secret-free .html. Disabled while a live export is in flight so a
-              double-click cannot launch overlapping exports. An independent action button, not a selected tab. */}
-          <button
-            type="button"
-            className={exportBtn}
+          </Button>
+          {/* Sibling export control (Story 6.4): publishes the current layout+SQL to the local
+              Core, opens the loopback live view, and downloads a portable secret-free .html.
+              Disabled while a live export is in flight so a double-click cannot launch overlapping
+              exports. An independent action button, not a selected tab. */}
+          <Button
+            variant="outline"
+            size="sm"
             disabled={exportingLive}
             aria-label="export live report"
             onClick={() => void handleExportLive()}
           >
             {exportingLive ? "exporting…" : "export live report"}
-          </button>
-          <button type="button" className={btn} onClick={() => onStateChange((prev) => addProseBlock(prev))}>
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => onStateChange((prev) => addProseBlock(prev))}>
             + prose
-          </button>
-          <button type="button" className={btn} onClick={() => onStateChange((prev) => addQueryBlock(prev))}>
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => onStateChange((prev) => addQueryBlock(prev))}>
             + query
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -672,26 +697,23 @@ function QueryBlock({
         style={{ fontFamily: "var(--font-mono)", fontSize: "12px" }}
       />
       <div className="flex items-center gap-2">
-        <button type="button" className={btn} disabled={entry.busy || entry.confirm !== null} onClick={onRun}>
+        <Button type="button" variant="secondary" size="sm" disabled={entry.busy || entry.confirm !== null} onClick={onRun}>
           {entry.busy ? "running…" : "run"}
-        </button>
+        </Button>
         {result !== null ? (
           <div className="ml-auto flex items-center gap-0.5" role="tablist" aria-label="result view">
             {(["table", "chart"] as const).map((v) => (
-              <button
+              <Button
                 key={v}
                 type="button"
                 role="tab"
                 aria-selected={block.view === v}
+                variant={block.view === v ? "secondary" : "ghost"}
+                size="sm"
                 onClick={() => onView(v)}
-                className={`rounded-[var(--radius)] border px-2 py-0.5 font-mono text-[11px] lowercase transition-colors ${
-                  block.view === v
-                    ? "border-[var(--rpt-accent-line)] bg-[var(--rpt-accent-soft)] text-[var(--foreground)]"
-                    : "border-[var(--border)] text-[var(--muted-foreground)] hover:bg-[var(--muted)]"
-                }`}
               >
                 {v}
-              </button>
+              </Button>
             ))}
           </div>
         ) : null}

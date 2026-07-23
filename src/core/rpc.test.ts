@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { okReply } from "../shared/contract.ts";
 import type {
   ActiveConnectionInfo,
   ConnectResult,
@@ -21,12 +22,19 @@ import type { WorkspaceRegistry } from "./workspace-registry.ts";
  * registry's error contract (bad params → bad_request, unknown edit → not_found).
  */
 function fakeRegistry(): ConnectionRegistry {
-  const byId = new Map<string, { name: string; url: string }>();
+  const byId = new Map<string, { name: string; url: string; schema?: string }>();
   let counter = 0;
   const summary = (id: string): ConnectionSummary => {
     const rec = byId.get(id)!;
     const u = new URL(rec.url);
-    return { id, name: rec.name, host: u.host, engine: u.protocol.replace(/:$/, "") };
+    return {
+      id,
+      name: rec.name,
+      host: u.host,
+      engine: u.protocol.replace(/:$/, ""),
+      // Conditional, in lockstep with the real registry: unpinned ⇒ no `schema` key.
+      ...(rec.schema === undefined ? {} : { schema: rec.schema }),
+    };
   };
   return {
     list: () => ({ ok: true, value: [...byId.keys()].map(summary) }),
@@ -35,7 +43,12 @@ function fakeRegistry(): ConnectionRegistry {
         return { ok: false, code: "bad_request", message: "name empty", detail: "field=name" };
       }
       const id = `id-${++counter}`;
-      byId.set(id, { name: params.name.trim(), url: params.url });
+      const schema = params.schema?.trim();
+      byId.set(id, {
+        name: params.name.trim(),
+        url: params.url,
+        ...(schema === undefined || schema.length === 0 ? {} : { schema }),
+      });
       return { ok: true, value: summary(id) };
     },
     edit: (params) => {
@@ -45,6 +58,12 @@ function fakeRegistry(): ConnectionRegistry {
       }
       if (params.name !== undefined) rec.name = params.name;
       if (params.url !== undefined) rec.url = params.url;
+      // R1: for `schema` a BLANK value clears the pin; an absent key keeps it.
+      if (params.schema !== undefined) {
+        const schema = params.schema.trim();
+        if (schema.length === 0) delete rec.schema;
+        else rec.schema = schema;
+      }
       return { ok: true, value: summary(params.id) };
     },
     remove: (params) => {
@@ -53,7 +72,8 @@ function fakeRegistry(): ConnectionRegistry {
     },
     getStoredUrl: (id) => {
       const rec = byId.get(id);
-      return rec === undefined ? { kind: "not-found" } : { kind: "found", url: rec.url };
+      if (rec === undefined) return { kind: "not-found" };
+      return { kind: "found", url: rec.url, ...(rec.schema === undefined ? {} : { schema: rec.schema }) };
     },
     close: () => {},
   };
@@ -107,12 +127,14 @@ function stubCtx(
 ): RpcContext & {
   calls: number;
   connectCalls: number;
+  connectParams: unknown;
   tableRowsCalls: number;
   executeCalls: number;
 } {
   const ctx = {
     calls: 0,
     connectCalls: 0,
+    connectParams: undefined as unknown,
     tableRowsCalls: 0,
     executeCalls: 0,
     connections: fakeRegistry(),
@@ -121,14 +143,20 @@ function stubCtx(
     requestShutdown() {
       ctx.calls++;
     },
-    async connect(): Promise<ConnectResult> {
+    // Story 10.4: `connect` is a PREFORMED handler taking `params` (the optional
+    // `connectionId`), so the stub returns an already-formed reply. Mechanical — the
+    // paramless wire bytes are identical (`preformed(okReply(x))` serializes exactly as
+    // dispatch's auto-`okReply(x)`).
+    async connect(params: unknown): Promise<RpcReply<ConnectResult>> {
       ctx.connectCalls++;
-      return connectResult;
+      ctx.connectParams = params;
+      return okReply(connectResult);
     },
     activeConnection(): ActiveConnectionInfo {
       return {
         mode: "ephemeral",
         connection: { engine: "postgres", host: "db.example.com:5432", database: "shop" },
+        hasTarget: true,
       };
     },
     async tableRows(): Promise<RpcReply<TableRowsResult>> {
@@ -226,6 +254,35 @@ describe("rpc dispatch", () => {
     }
   });
 
+  test("connect forwards its params VERBATIM to ctx.connect (the Story 10.4 connectionId seam)", async () => {
+    // Mirrors the `table.rows` contract: dispatch does no param validation of its own —
+    // the capability shape-checks the optional `connectionId` and forms its own reply.
+    const ctx = stubCtx();
+    await dispatch({ method: "connect", params: { connectionId: "conn-b" } }, ctx);
+    expect(ctx.connectCalls).toBe(1);
+    expect(ctx.connectParams).toEqual({ connectionId: "conn-b" });
+
+    // A paramless call still reaches the capability (with `undefined`), unchanged.
+    const bare = stubCtx();
+    await dispatch({ method: "connect" }, bare);
+    expect(bare.connectCalls).toBe(1);
+    expect(bare.connectParams).toBeUndefined();
+  });
+
+  test("connect carries the capability's error envelope through (unresolvable/malformed id)", async () => {
+    // The preformed handler is what makes a typed `not_found`/`bad_request` reachable at
+    // all for `connect` — an auto-`okReply` handler could only ever answer OK.
+    for (const code of ["bad_request", "not_found", "internal_error"] as const) {
+      const ctx: RpcContext = {
+        ...stubCtx(),
+        connect: async () => ({ ok: false, error: { code, message: `x ${code}` } }),
+      };
+      const reply = await dispatch({ method: "connect", params: { connectionId: 5 } }, ctx);
+      expect(reply.ok).toBe(false);
+      if (!reply.ok) expect(reply.error.code).toBe(code);
+    }
+  });
+
   test("connection.active dispatches to ctx.activeConnection and returns a credential-free {mode, connection}", async () => {
     const reply = await dispatch({ method: "connection.active" }, stubCtx());
 
@@ -234,6 +291,7 @@ describe("rpc dispatch", () => {
       expect(reply.result).toEqual({
         mode: "ephemeral",
         connection: { engine: "postgres", host: "db.example.com:5432", database: "shop" },
+        hasTarget: true,
       });
       // Credential-free boundary: the serialized reply carries no user/password/full-url.
       const serialized = JSON.stringify(reply);
@@ -299,6 +357,77 @@ describe("rpc dispatch — connections CRUD", () => {
     const reply = await dispatch({ method: "connections.edit", params: { name: "x" } }, stubCtx());
     expect(reply.ok).toBe(false);
     if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+  });
+
+  test("connections.add FORWARDS an optional schema (the handler whitelists key by key)", async () => {
+    const reply = await dispatch(
+      { method: "connections.add", params: { name: "prod", url: "postgres://h/db", schema: "reporting" } },
+      stubCtx(),
+    );
+    expect(reply.ok).toBe(true);
+    if (reply.ok) expect((reply.result as { schema?: string }).schema).toBe("reporting");
+  });
+
+  test("connections.add without a schema yields a summary with no `schema` key", async () => {
+    const reply = await dispatch(
+      { method: "connections.add", params: { name: "prod", url: "postgres://h/db" } },
+      stubCtx(),
+    );
+    expect(reply.ok).toBe(true);
+    if (reply.ok) {
+      expect(Object.keys(reply.result as object).sort()).toEqual(["engine", "host", "id", "name"]);
+    }
+  });
+
+  // `connections.list` is the only path that feeds the edit form's pre-filled `schema`,
+  // which is what makes a blanked field an unambiguous CLEAR (R1). A `list` that dropped
+  // the key would turn every subsequent save into a silent unpin.
+  test("connections.list carries the pinned schema (and omits it when unpinned)", async () => {
+    const ctx = stubCtx();
+    await dispatch(
+      { method: "connections.add", params: { name: "a", url: "postgres://h/a", schema: "reporting" } },
+      ctx,
+    );
+    await dispatch({ method: "connections.add", params: { name: "b", url: "postgres://h/b" } }, ctx);
+    const reply = await dispatch({ method: "connections.list" }, ctx);
+    expect(reply.ok).toBe(true);
+    if (!reply.ok) return;
+    const [pinned, plain] = reply.result as ReadonlyArray<Record<string, unknown>>;
+    expect(pinned?.schema).toBe("reporting");
+    expect(Object.keys(plain ?? {}).sort()).toEqual(["engine", "host", "id", "name"]);
+  });
+
+  test("connections.add/edit with a non-string schema → bad_request (shape check)", async () => {
+    const add = await dispatch(
+      { method: "connections.add", params: { name: "p", url: "postgres://h/db", schema: 7 } },
+      stubCtx(),
+    );
+    expect(add.ok).toBe(false);
+    if (!add.ok) expect(add.error.code).toBe("bad_request");
+
+    const edit = await dispatch(
+      { method: "connections.edit", params: { id: "x", schema: [] } },
+      stubCtx(),
+    );
+    expect(edit.ok).toBe(false);
+    if (!edit.ok) expect(edit.error.code).toBe("bad_request");
+  });
+
+  test("connections.edit forwards a BLANK schema (the clear signal) rather than dropping it", async () => {
+    const ctx = stubCtx();
+    const added = await dispatch(
+      { method: "connections.add", params: { name: "p", url: "postgres://h/db", schema: "reporting" } },
+      ctx,
+    );
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    const id = (added.result as { id: string }).id;
+
+    const cleared = await dispatch({ method: "connections.edit", params: { id, schema: "" } }, ctx);
+    expect(cleared.ok).toBe(true);
+    if (cleared.ok) {
+      expect(Object.keys(cleared.result as object).sort()).toEqual(["engine", "host", "id", "name"]);
+    }
   });
 
   test("connections.remove is an okReply {removed:true}", async () => {

@@ -12,6 +12,7 @@
  */
 
 import { parseChartSpec, type ChartSpec } from "./chart-spec.ts";
+import type { ReportSpec } from "./report-spec.ts";
 
 /* ------------------------------------------------------------------ *
  * Frozen-data schema — versioned, typed cell values
@@ -61,21 +62,47 @@ export type FrozenData = {
 /**
  * Strict ISO-8601 UTC pattern: `YYYY-MM-DDTHH:MM:SS(.sss)?Z`.
  * Only the trailing `Z` (Zulu / UTC) is accepted — numeric offsets are rejected
- * so there is exactly one canonical encoding on the wire.
+ * so there is exactly one canonical encoding on the wire. Milliseconds (`\.\d{1,3}`)
+ * are the canonical precision limit (DW-6); {@link normalizeIsoUtc} floors an
+ * over-precise instant down to this before {@link assertIsoUtc} ever sees it.
+ * Exported for the drift property test in `contract.test.ts` only.
  */
-const ISO_UTC_RE =
+export const ISO_UTC_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/;
+
+/**
+ * A `Z`-only, capture-grouped MIRROR of {@link ISO_UTC_RE} used solely by
+ * {@link normalizeIsoUtc} to split off the fractional-seconds field for truncation.
+ * It differs from the strict pattern in exactly one way — it admits any number of
+ * fractional digits (`\.(\d+)`) rather than 1-3 — so an over-precise instant can be
+ * matched and floored; it must NOT admit any new timezone form (still `Z`-only), so a
+ * non-UTC offset stays un-matched and falls through to {@link assertIsoUtc}'s verdict.
+ * Exported for the drift property test in `contract.test.ts` only.
+ */
+export const ISO_UTC_LENIENT_RE = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/;
+
+/**
+ * Build the error message for a rejected ISO input, shared by {@link assertIsoUtc} and
+ * {@link normalizeIsoUtc} so the whole defect class has one message shape. NEVER calls
+ * `JSON.stringify` on the raw value — a BigInt or a cyclic object (both reachable from an
+ * untrusted `postMessage` frame) would make it throw — and caps the echoed text at ~80
+ * chars so an unbounded untrusted string cannot be reflected whole into the message.
+ */
+function describeIsoInput(value: unknown): string {
+  const raw = typeof value === "string" ? value : String(value);
+  const echo = raw.length > 80 ? `${raw.slice(0, 80)}…` : raw;
+  return `Invalid ISO-8601 UTC date: ${JSON.stringify(echo)} (expected e.g. 2026-07-06T12:00:00Z)`;
+}
 
 /**
  * Assert that `iso` is a valid ISO-8601 UTC instant. Throws (never returns a
  * falsy value) so callers can rely on totality: after this returns, `iso` is a
- * canonical UTC string.
+ * canonical UTC string. Stays STRICT — a 4+-digit fractional field is non-canonical
+ * and rejected; canonicalizing precision is {@link normalizeIsoUtc}'s job, not this one.
  */
 export function assertIsoUtc(iso: string): void {
   if (typeof iso !== "string" || !ISO_UTC_RE.test(iso)) {
-    throw new TypeError(
-      `Invalid ISO-8601 UTC date: ${JSON.stringify(iso)} (expected e.g. 2026-07-06T12:00:00Z)`,
-    );
+    throw new TypeError(describeIsoInput(iso));
   }
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) {
@@ -89,6 +116,32 @@ export function assertIsoUtc(iso: string): void {
       `Non-canonical or invalid calendar date: ${JSON.stringify(iso)} (normalizes to ${roundTrip})`,
     );
   }
+}
+
+/**
+ * Canonicalize the *precision* of an ISO-8601 UTC instant to the frozen-date model's
+ * millisecond limit (DW-6): a fractional-seconds field with more than 3 digits is
+ * TRUNCATED (never rounded) to its first 3, so a Postgres/MySQL microsecond timestamp
+ * that reached this boundary — from a hand-edited Snapshot or a `postMessage` frame —
+ * is canonicalized instead of failing the whole payload. Everything else is delegated to
+ * {@link assertIsoUtc} for the verdict: a non-UTC offset, an impossible calendar date, an
+ * empty fractional part, and 0-3 in-policy digits behave exactly as before (an in-policy
+ * string is returned byte-identical, so this is idempotent and existing round-trip equality
+ * holds). Truncation is a `slice(0, 3)` on the captured DIGIT STRING — no arithmetic and no
+ * `Date` — so it cannot round and cannot carry into the seconds field: `…:59.999999Z` floors
+ * to `…:59.999Z` with the second unchanged, and the instant never moves forward in time. This
+ * canonicalizes precision ONLY, not spelling — `.5Z`/`.50Z`/`.500Z` stay three distinct
+ * in-policy strings, since the wire contract locks byte-identical passthrough for anything
+ * already within policy.
+ */
+export function normalizeIsoUtc(iso: string): string {
+  if (typeof iso !== "string") throw new TypeError(describeIsoInput(iso));
+  const m = ISO_UTC_LENIENT_RE.exec(iso);
+  const frac = m?.[2];
+  // No match, or already in policy → pass through and let assertIsoUtc render the verdict.
+  const out = m && frac !== undefined && frac.length > 3 ? `${m[1]}.${frac.slice(0, 3)}Z` : iso;
+  assertIsoUtc(out);
+  return out;
 }
 
 /**
@@ -146,7 +199,10 @@ function assertWellFormed(data: FrozenData): void {
 /**
  * Encode a {@link FrozenData} value into its canonical wire form. Pure and
  * total: validates every date cell is ISO-8601 UTC and throws on any invalid or
- * non-UTC date. `decode(encode(x))` deep-equals `x`.
+ * non-UTC date, while canonicalizing an over-precise date cell's precision to
+ * milliseconds (see {@link normalizeIsoUtc}). `decode(encode(x))` deep-equals `x`
+ * when every date cell is already within policy (≤3 fractional digits); an over-precise
+ * cell is floored, so the round-trip law holds from `encode(x)` onward.
  */
 export function encode(data: FrozenData): FrozenData {
   if (data.schemaVersion !== FROZEN_SCHEMA_VERSION) {
@@ -162,7 +218,9 @@ export function encode(data: FrozenData): FrozenData {
 
 /**
  * Decode a wire-form {@link FrozenData} back into the in-memory shape. Pure and
- * total: enforces the same ISO-8601 UTC invariant on every date cell.
+ * total: applies the same ISO-8601 UTC invariant on every date cell, canonicalizing an
+ * over-precise instant's precision down to milliseconds (see {@link normalizeIsoUtc})
+ * rather than only enforcing it.
  */
 export function decode(data: FrozenData): FrozenData {
   if (data.schemaVersion !== FROZEN_SCHEMA_VERSION) {
@@ -193,8 +251,10 @@ function encodeCell(cell: FrozenCell): FrozenCell {
     case "boolean":
       return { kind: "boolean", value: cell.value };
     case "date":
-      assertIsoUtc(cell.iso);
-      return { kind: "date", iso: cell.iso };
+      // Canonicalize precision (DW-6): an over-precise instant is floored to milliseconds
+      // rather than rejected; an in-policy `iso` comes back byte-identical. `normalizeIsoUtc`
+      // hands the result to `assertIsoUtc`, so a non-UTC / bad-calendar date still throws.
+      return { kind: "date", iso: normalizeIsoUtc(cell.iso) };
     default: {
       const _exhaustive: never = cell;
       throw new TypeError(`Unknown cell kind: ${JSON.stringify(_exhaustive)}`);
@@ -262,9 +322,9 @@ export type SchemaForeignKeyInfo = {
  * One table (or view) of the introspected schema. `schema` is the owning
  * namespace/database as the engine reports it; `name` and `columns` mirror the
  * live database verbatim, ordered as introspected (schema/table/ordinal).
- * `primaryKey` lists the primary-key column names in column order (empty when
- * the table has none) — the deterministic browse ORDER-BY key and the source of
- * the grid's PK key-icon (Story 3.2). `indexes` lists the table's indexes
+ * `primaryKey` lists the primary-key column names in key order (the PK's own
+ * column ordinal order, empty when the table has none) — the deterministic browse
+ * ORDER-BY key and the source of the grid's PK key-icon (Story 3.2). `indexes` lists the table's indexes
  * (Story 3.5), each with its ordered columns and uniqueness (empty when the table
  * has none) — mirroring how `primaryKey` is always present. `foreignKeys` lists the
  * table's outbound foreign keys (Story 4.1) — the ERD's edge source (empty when the
@@ -301,6 +361,9 @@ export type DatabaseSchema = {
  *  - `malformed-url` — a supported-scheme URL that `new URL()` cannot parse (a
  *    bad/out-of-range port or unparseable authority) — structurally rejected by
  *    {@link createDriver} before any socket opens; distinct from an unsupported scheme.
+ *  - `no-target` — no connection target is configured at all (`databaseUrl === null`).
+ *    The normal shape of a Persistent boot before any connection is saved — NOT a URL
+ *    problem, and distinct from `unsupported_scheme` (which is a genuinely bad scheme).
  */
 export type ConnectionFailureKind =
   | "host"
@@ -308,7 +371,8 @@ export type ConnectionFailureKind =
   | "network"
   | "unsupported_scheme"
   | "database-does-not-exist"
-  | "malformed-url";
+  | "malformed-url"
+  | "no-target";
 
 /**
  * The outcome of a `connect` RPC. This is a DOMAIN result carried inside a
@@ -323,6 +387,16 @@ export type ConnectResult =
       readonly failure: ConnectionFailureKind;
       readonly message: string;
     };
+
+/**
+ * Params for `connect` (Story 10.4). `connectionId` names a SAVED connection to open +
+ * introspect; absent/`null` ⇒ the boot connection (the byte-identical pre-10.4 call, which
+ * is what every current UI call site still sends). Only the opaque id crosses the loopback
+ * — the url/user/password are resolved in Core (AR-12) and never echoed back.
+ */
+export type ConnectRequest = {
+  readonly connectionId?: string | null;
+};
 
 /* ------------------------------------------------------------------ *
  * Browse-rows contract (Story 3.2) — Core-paginated, read-only SELECT
@@ -341,6 +415,14 @@ export type TableRowsRequest = {
   readonly table: string;
   readonly page?: number;
   readonly pageSize?: number;
+  /**
+   * The saved connection to browse (Story 10.4), resolved in Core through the same
+   * per-target pool `execute` uses; absent/`null` ⇒ the boot connection. Only the opaque
+   * id crosses the loopback — never a url or credential (AR-12). Note this is the THIRD
+   * `schema`-adjacent axis in one request: `schema` above qualifies the table NAME within
+   * the target, while `connectionId` selects WHICH database is introspected at all.
+   */
+  readonly connectionId?: string | null;
 };
 
 /**
@@ -373,6 +455,22 @@ export type ConnectionSummary = {
   readonly name: string;
   readonly host: string;
   readonly engine: string;
+  /**
+   * Optional pinned introspection scope (Story 10.2): the single schema introspection
+   * is restricted to WHEREVER this saved connection is resolved as a target (the
+   * per-connection resolver); absent means every non-system schema, the pre-10.2
+   * default. Since Story 10.4 every read path — `connect`, `table.rows`, and chat —
+   * resolves through that per-connection resolver, so a request carrying this record's
+   * `connectionId` DOES honor the pin. The boot connection (a CLI `--url`, i.e. no saved
+   * record) has no pin to honor and stays the default target for a request that sends no
+   * id — which is still every UI call site today; adopting the id in the tree and the
+   * tabs is Story 10.5 / 10.6. Distinct from the two
+   * other `schema` meanings in this file: {@link TableRowsRequest.schema} qualifies a
+   * single table name, and {@link ConnectResult.schema} IS the introspected catalog.
+   * Additive-optional and credential-free, so a UI that does not know the field still
+   * round-trips.
+   */
+  readonly schema?: string;
 };
 
 /**
@@ -400,12 +498,25 @@ export type ActiveConnectionInfo = {
     readonly host: string; // URL.host (host[:port]) — never userinfo
     readonly database?: string; // optional, non-sensitive (URL.pathname sans leading slash); NEVER user/password
   } | null;
+  /**
+   * Whether a boot target is CONFIGURED at all (Story 10.5). Deliberately a single
+   * boolean, not a tri-state: `connection` collapses "nothing configured" and
+   * "configured but not describable" (a url that parses with no host, e.g.
+   * `postgres:///shop`) into the same `null`, so the multi-root schema tree could not
+   * tell a genuinely-empty boot from a broken one and showed the calm empty-state for
+   * both. With this, `hasTarget && connection === null` renders the boot root in
+   * `error` (its own `connect` supplies the Core's engine-neutral verdict) while
+   * `!hasTarget` contributes no root. Credential-free: a bare yes/no about existence.
+   */
+  readonly hasTarget: boolean;
 };
 
 /** Params for `connections.add`. The url carries the credentials (UI→Core only). */
 export type AddConnectionParams = {
   readonly name: string;
   readonly url: string;
+  /** Optional pinned introspection scope (Story 10.2). Blank/absent ⇒ unpinned. */
+  readonly schema?: string;
 };
 
 /**
@@ -416,6 +527,13 @@ export type EditConnectionParams = {
   readonly id: string;
   readonly name?: string;
   readonly url?: string;
+  /**
+   * Optional pinned introspection scope (Story 10.2). Unlike `name`/`url`, a BLANK
+   * value is meaningful: it CLEARS the pin. `schema` rides on {@link ConnectionSummary},
+   * so the edit form pre-fills it and an emptied field is unambiguous user intent —
+   * whereas the credential-bearing url the UI never held stays "absent ⇒ keep".
+   */
+  readonly schema?: string;
 };
 
 /** Params for `connections.remove`. */
@@ -529,6 +647,21 @@ export type ChatContextSummary = {
 };
 
 /**
+ * The documented `POST /chat/stream` request body (Story 5.4; `connectionId` added by
+ * Story 10.4). `provider` selects the configured key, `message` is the user's question,
+ * and `connectionId` names the SAVED connection whose schema is introspected for the
+ * outbound context — absent/`null` ⇒ the boot connection, the byte-identical pre-10.4
+ * call the UI still makes. Targeting changes only WHICH schema is summarized: the payload
+ * stays schema-only (`rowSample: null`, AR-6/R5) and no url/credential ever leaves Core.
+ * Types-only — the Core still narrows the parsed body by hand (there is no validator lib).
+ */
+export type ChatStreamRequest = {
+  readonly provider: ProviderKind;
+  readonly message: string;
+  readonly connectionId?: string | null;
+};
+
+/**
  * One frame of the streaming chat response (Story 5.4) — the typed SSE wire shape
  * shared across Ring 1 (Core producer) and Ring 2 (UI consumer). A discriminated
  * union carried one-per-`data:` event over `POST /chat/stream`:
@@ -539,6 +672,10 @@ export type ChatContextSummary = {
  *  - `done` — the terminal frame: the Core-extracted `query` (pure fenced-block
  *    extraction over the fully-accumulated answer, `null` when none) plus the
  *    schema-only `context` summary — feeds the unchanged 5.3 run/confirm affordance.
+ *    Story 9.7 additively widens this frame with the Core-validated `report`: a
+ *    `ReportSpec` when the model emitted a well-formed ` ```report ` fence that passed
+ *    `parseReportSpec`, else `null` — the sole gate for the chat's "open in report tab"
+ *    affordance.
  *  - `error` — a redacted terminal failure (pre-flight validation OR a mid-stream
  *    provider throw). Carries a mapped {@link RpcErrorCode} + a terse message; the
  *    provider key NEVER appears here (redacted, stderr-only in Core).
@@ -547,7 +684,12 @@ export type ChatContextSummary = {
 export type ChatStreamChunk =
   | { readonly type: "text-delta"; readonly text: string }
   | { readonly type: "reasoning-delta"; readonly text: string }
-  | { readonly type: "done"; readonly query: string | null; readonly context: ChatContextSummary }
+  | {
+      readonly type: "done";
+      readonly query: string | null;
+      readonly report: ReportSpec | null;
+      readonly context: ChatContextSummary;
+    }
   | { readonly type: "error"; readonly code: RpcErrorCode; readonly message: string };
 
 /* ------------------------------------------------------------------ *
@@ -727,6 +869,24 @@ export type WorkspaceSnapshotTab = {
   readonly id: number;
   readonly kind: WorkspaceTabKind;
   readonly title: string;
+  /**
+   * Which connection this Tab was pointed at (Story 10.6) — an ADDITIVE optional field,
+   * so {@link WORKSPACE_SNAPSHOT_VERSION} stays `1` (a pre-10.6 snapshot simply has none
+   * and loads cleanly; bumping the version would DISCARD every persisted workspace).
+   * ABSENT or `null` ⇒ the boot/default target — the same convention
+   * {@link ConnectRequest.connectionId}, {@link TableRowsRequest.connectionId} and
+   * {@link ChatStreamRequest.connectionId} already spell out, so there is exactly one
+   * "default target" encoding across the codebase.
+   *
+   * It carries the OPAQUE saved-connection id ONLY (AR-12) — never a url, user, password
+   * or engine string, so the snapshot stays credential-free like every other field here.
+   * It is deliberately INDEPENDENT of the live table binding: `schema`/`name` still never
+   * persist (Story 3.2 stands), so a restored table Tab remembers WHICH database it was
+   * browsing while still reopening unbound. Because the connection may have been removed
+   * between two launches, the id is a HINT the render layer reconciles against the live
+   * `connections.list` — never something a loader may assume still resolves.
+   */
+  readonly connectionId?: string | null;
 };
 
 /**
@@ -759,6 +919,11 @@ export type ErdTabLayout = {
  * additive-optional posture as `erdLayouts` (a pre-8.5 v1 snapshot has none and loads
  * cleanly, no version bump). It carries NO key and NO row/chat content — chat messages
  * and per-Tab chat state still never touch disk.
+ *
+ * Per-tab `connectionId` (Story 10.6, see {@link WorkspaceSnapshotTab.connectionId}) is
+ * the third field in that same additive-optional family: it is written only when a Tab
+ * actually targets a SAVED connection, so a boot-only workspace still serializes exactly
+ * as it did pre-10.6 — and, like the two above, it costs no version bump.
  */
 export type WorkspaceSnapshot = {
   readonly version: 1;

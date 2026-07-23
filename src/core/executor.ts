@@ -25,7 +25,8 @@ import {
   type RpcReply,
   type SchemaTableInfo,
 } from "../shared/contract.ts";
-import type { ConnectionSeams, ResolvedConnection } from "./connection-targets.ts";
+import { NoConnectionTargetError } from "./connection.ts";
+import { targetError, type ConnectionSeams, type ResolvedConnection } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 
@@ -33,24 +34,62 @@ import { rowsToFrozenData } from "./frozen-map.ts";
 export const MAX_RESULT_ROWS = 1000;
 
 /**
- * The fixed, engine-blind allowlist of canonical column types the structured
- * `createTable` composer may emit. There is NO raw-text fallback — a type token not
- * in this set is a `bad_request` at validation, and an assertion at compose time.
+ * The engine-aware DDL map: each canonical column token → the exact DDL fragment
+ * that is VALID on that engine. Two tiers of validation hang off this one table:
+ *  1. shape gate — the union of all keys (`CREATE_TABLE_TYPES`), applied engine-blind
+ *     before any connection round-trip;
+ *  2. compose gate — per-engine lookup once the target engine is known, so MySQL never
+ *     composes DDL the engine would reject (bare `VARCHAR` needs a length; `UUID` has no
+ *     native MySQL type). A shape-valid token absent from the target engine's map is a
+ *     contract-level `bad_request` BEFORE any DDL runs — never an opaque engine
+ *     `internal_error`. There is NO raw-text fallback.
+ * `Record<DbEngine, …>` keeps this exhaustive: if `DbEngine` ever grows a third value the
+ * compiler forces a new engine map here rather than silently falling through.
+ */
+const CREATE_TABLE_TYPE_DDL: Record<DbEngine, Record<string, string>> = {
+  postgres: {
+    INTEGER: "INTEGER",
+    BIGINT: "BIGINT",
+    SMALLINT: "SMALLINT",
+    TEXT: "TEXT",
+    VARCHAR: "VARCHAR",
+    BOOLEAN: "BOOLEAN",
+    DATE: "DATE",
+    TIMESTAMP: "TIMESTAMP",
+    NUMERIC: "NUMERIC",
+    REAL: "REAL",
+    "DOUBLE PRECISION": "DOUBLE PRECISION",
+    UUID: "UUID",
+    JSON: "JSON",
+  },
+  // MySQL differs on exactly two tokens: bare `VARCHAR` is invalid (needs a length) so it
+  // renders `VARCHAR(255)`, and there is no native `UUID` type so the key is OMITTED —
+  // `UUID` is postgres-only and rejected on MySQL rather than silently remapped to CHAR(36).
+  mysql: {
+    INTEGER: "INTEGER",
+    BIGINT: "BIGINT",
+    SMALLINT: "SMALLINT",
+    TEXT: "TEXT",
+    VARCHAR: "VARCHAR(255)",
+    BOOLEAN: "BOOLEAN",
+    DATE: "DATE",
+    TIMESTAMP: "TIMESTAMP",
+    NUMERIC: "NUMERIC",
+    REAL: "REAL",
+    "DOUBLE PRECISION": "DOUBLE PRECISION",
+    JSON: "JSON",
+  },
+};
+
+/**
+ * The fixed, engine-blind shape allowlist the structured `createTable` composer accepts.
+ * Derived as the UNION of the per-engine map keys — single source of truth, so the shape
+ * gate can never drift from the engine-aware DDL map. A token not in this set is a
+ * `bad_request` at validation, and an assertion at compose time.
  */
 const CREATE_TABLE_TYPES: ReadonlySet<string> = new Set([
-  "INTEGER",
-  "BIGINT",
-  "SMALLINT",
-  "TEXT",
-  "VARCHAR",
-  "BOOLEAN",
-  "DATE",
-  "TIMESTAMP",
-  "NUMERIC",
-  "REAL",
-  "DOUBLE PRECISION",
-  "UUID",
-  "JSON",
+  ...Object.keys(CREATE_TABLE_TYPE_DDL.postgres),
+  ...Object.keys(CREATE_TABLE_TYPE_DDL.mysql),
 ]);
 
 /**
@@ -325,6 +364,63 @@ function toRowsResult(result: DriverQueryResult): ExecuteResult {
 }
 
 /**
+ * Bound the FETCH — not just the display slice — of an auto-classified raw SELECT read
+ * by appending a Core-computed `LIMIT` before the statement reaches `runReadOnly` (DW-36).
+ * Without this the driver (postgres.js / mysql2) buffers EVERY row into Core memory and
+ * only afterwards does `toRowsResult` slice to {@link MAX_RESULT_ROWS}, so a
+ * `SELECT * FROM huge_table` OOMs the Core process before the cap ever applies — the cap
+ * bounds the response payload, not the fetch.
+ *
+ * The bound is `MAX_RESULT_ROWS + 1`: the `+ 1` is the exact sentinel `toRowsResult` already
+ * reads to set `truncated`, so a bounded fetch of MAX+1 detects "there were more rows" the
+ * same way an unbounded fetch did — `toRowsResult` needs NO change.
+ *
+ * The bound is appended ONLY for a `SELECT` whose top-level words contain NONE of
+ * {@link NO_FETCH_BOUND_WORDS} — the conservative "provably safe to append `LIMIT`" set.
+ * When any appears the statement is returned verbatim and only the Core-side cap applies
+ * (byte-identical to today — safe, never a syntax error). The reasons, per word:
+ *  - `LIMIT` / `FETCH` — the statement already carries a row-count clause (`LIMIT n`,
+ *    SQL-standard `FETCH FIRST n ROWS ONLY`); appending a second is a syntax error, and a
+ *    user-supplied bound is left as the user's own choice.
+ *  - `UPDATE` / `SHARE` / `LOCK` — a row-locking tail (`FOR UPDATE`, `FOR SHARE`,
+ *    `FOR NO KEY UPDATE`, `FOR KEY SHARE`, MySQL `LOCK IN SHARE MODE`) must FOLLOW `LIMIT`;
+ *    appending `LIMIT` after it is a syntax error on both engines.
+ * A `SHOW` (verb !== `SELECT`) is likewise passed verbatim — it returns small fixed
+ * metadata and does not reliably accept a trailing `LIMIT`.
+ *
+ * KNOWN LIMITATIONS (the fetch stays unbounded — no worse than before this change, i.e.
+ * NOT a regression, just not covered): `words` is the flat `topLevelWords` output, which
+ * does NOT track parenthesis depth, so a `LIMIT`/`FETCH` inside a subquery or one arm of a
+ * `UNION` suppresses the outer bound (`(SELECT … LIMIT 5) UNION SELECT * FROM huge` is left
+ * unbounded); Postgres `LIMIT ALL` counts as a `LIMIT` yet means "no limit"; and an explicit
+ * large `LIMIT 500000` is honored as the user's bound. These exotic shapes fall back to the
+ * Core-side cap; the common `SELECT * FROM huge_table` (the OOM vector DW-36 targets) is bounded.
+ *
+ * The bound is a Core integer literal (never a value spliced from user text — same precedent
+ * as `table-rows.ts`), and the leading newline defeats a trailing `-- …` line comment that
+ * would otherwise swallow the appended clause.
+ */
+export function boundRawRead(stmt: string, verb: string | undefined, words: readonly string[]): string {
+  if (verb !== "SELECT" || words.some((w) => NO_FETCH_BOUND_WORDS.has(w))) return stmt;
+  return `${stmt}\nLIMIT ${MAX_RESULT_ROWS + 1}`;
+}
+
+/**
+ * Top-level words whose presence makes appending a trailing `LIMIT` either a syntax error
+ * or redundant, so {@link boundRawRead} leaves the statement verbatim: an existing row-count
+ * clause (`LIMIT`, `FETCH FIRST … ROWS`) and a row-locking tail (`FOR UPDATE`/`FOR SHARE`/
+ * MySQL `LOCK IN SHARE MODE`) that must itself follow `LIMIT`. Matching a rare unquoted
+ * identifier here only over-suppresses (falls back to the Core cap) — never breaks a query.
+ */
+const NO_FETCH_BOUND_WORDS: ReadonlySet<string> = new Set([
+  "LIMIT",
+  "FETCH",
+  "UPDATE",
+  "SHARE",
+  "LOCK",
+]);
+
+/**
  * Build the guarded executor over the injected seams. `execute` returns an ALREADY-
  * formed {@link RpcReply}: a protocol violation is a `bad_request` envelope; a domain
  * outcome (rows / ok / confirmation_required) rides inside `okReply`. A seam throw
@@ -334,13 +430,6 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   const { resolveConnection } = deps;
 
   const bad = (message: string): RpcReply<ExecuteResult> => errorReply("bad_request", message);
-
-  /** Map a failed target resolution to its typed wire reply (never echoes a url). */
-  function targetError(reason: "not-found" | "unavailable"): RpcReply<ExecuteResult> {
-    return reason === "not-found"
-      ? errorReply("not_found", "no connection with that id")
-      : errorReply("internal_error", "credential store is unavailable");
-  }
 
   /** `schema`-qualify + quote a table identifier (`"s"."t"` / `` `s`.`t` ``). */
   function qualified(quoteIdent: ConnectionSeams["quoteIdent"], schema: string | undefined, table: string): string {
@@ -377,7 +466,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     if (isRead) {
       // Auto-run inside an engine READ-ONLY transaction (rolled back): a hidden write
       // (volatile/writing function) then fails at the engine, never commits.
-      const result = await runReadOnly(stmt, []);
+      const result = await runReadOnly(boundRawRead(stmt, verb, words), []);
       return okReply(toRowsResult(result));
     }
 
@@ -390,6 +479,19 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       });
     }
     const result = await runQuery(stmt, []);
+    // DW-45: a confirmed raw statement is OPAQUE text — this file classifies it
+    // default-deny precisely because it refuses to guess what the statement does, so
+    // sniffing for a `CREATE`/`DROP`/`ALTER` verb here to decide whether the catalog
+    // changed would re-introduce exactly that guessing. Invalidate unconditionally on
+    // the mutating branch: under-invalidating re-serves a stale schema to the tree and
+    // the AI (the DW-45 bug), while over-invalidating costs ONE extra `listSchema` — five
+    // introspection queries on Postgres — charged to the next reader that actually needs
+    // the catalog, and only once no matter how many statements busted it in between
+    // (`getEngine` deliberately does not honor the stale flag, so consecutive statements
+    // do not each pay a refresh).
+    // Only AFTER a successful run (a throw skips it), and only on the seams we just
+    // mutated — no other target's memo is touched.
+    seams.invalidateSchema();
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 
@@ -516,22 +618,36 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
 
     const engine = await getEngine();
-    const defs = columns.defs.map((d) => {
+    // Compose the column fragments engine-aware: the shape gate above (union allowlist)
+    // proves the token is canonical, but a token can be shape-valid yet unsupported on THIS
+    // engine (e.g. UUID on MySQL). We build defs imperatively so such a token can short-
+    // circuit with a contract-level `bad_request` BEFORE any DDL runs — never an opaque
+    // engine `internal_error`.
+    const defs: string[] = [];
+    for (const d of columns.defs) {
       const type = d.type.trim().toUpperCase();
       // Invariant (never a raw-text fallback): validation already rejected an
       // out-of-allowlist type, so reaching compose with one is a bug, not user input.
       if (!CREATE_TABLE_TYPES.has(type)) {
         throw new Error(`invariant violation: unvalidated createTable type '${type}'`);
       }
-      return `${quoteIdent(d.name)} ${type}${d.notNull ? " NOT NULL" : ""}`;
-    });
+      const ddl = CREATE_TABLE_TYPE_DDL[engine][type];
+      // Shape-valid but no representation on this engine (UUID on MySQL): reject with an
+      // honest bad_request naming column/token/engine, before runQuery — not an engine error.
+      if (ddl === undefined) {
+        return bad(`column '${d.name}' type '${type}' is not supported on ${engine}`);
+      }
+      defs.push(`${quoteIdent(d.name)} ${ddl}${d.notNull ? " NOT NULL" : ""}`);
+    }
     if (pkCols.length > 0) {
       defs.push(`PRIMARY KEY (${pkCols.map((c) => quoteIdent(c)).join(", ")})`);
     }
     const sql = `CREATE TABLE ${qualified(quoteIdent, table.schema, table.table)} (${defs.join(", ")})`;
     const result = await runQuery(sql, []);
-    // engine is read for placeholder parity / future engine-specific DDL; unused here.
-    void engine;
+    // DW-45: the ONLY structured op that changes the catalog — the new table must appear
+    // in the next `getSchema` for this target instead of the memo taken at first connect.
+    // `insert`/`update`/`delete` change rows only, so they deliberately do NOT invalidate.
+    seams.invalidateSchema();
     return okReply({ status: "ok", rowsAffected: result.rowsAffected ?? 0 });
   }
 
@@ -579,23 +695,33 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     }
     const connectionId = (req.connectionId as string | null | undefined) ?? null;
 
-    if (req.shape === "raw") {
-      if (typeof req.sql !== "string") {
-        return bad("raw execute requires a string 'sql'");
+    // The driver-seam-executing region: a `NoConnectionTargetError` (no connection
+    // configured at all) is translated into a neutral `bad_request` "no active
+    // connection" reply — NOT the generic `internal_error`. Any OTHER seam throw
+    // (a genuine engine/driver bug) is re-thrown so `dispatch`'s catch-all still
+    // wraps it as `internal_error`.
+    try {
+      if (req.shape === "raw") {
+        if (typeof req.sql !== "string") {
+          return bad("raw execute requires a string 'sql'");
+        }
+        const resolved = resolveConnection(connectionId);
+        if (!resolved.ok) return targetError(resolved.reason);
+        return await executeRaw(resolved.seams, req.sql, confirmed);
       }
-      const resolved = resolveConnection(connectionId);
-      if (!resolved.ok) return targetError(resolved.reason);
-      return executeRaw(resolved.seams, req.sql, confirmed);
-    }
-    if (req.shape === "structured") {
-      if (typeof req.op !== "object" || req.op === null || Array.isArray(req.op)) {
-        return bad("structured execute requires an 'op' object");
+      if (req.shape === "structured") {
+        if (typeof req.op !== "object" || req.op === null || Array.isArray(req.op)) {
+          return bad("structured execute requires an 'op' object");
+        }
+        const resolved = resolveConnection(connectionId);
+        if (!resolved.ok) return targetError(resolved.reason);
+        return await executeStructured(resolved.seams, req.op as Record<string, unknown>, confirmed);
       }
-      const resolved = resolveConnection(connectionId);
-      if (!resolved.ok) return targetError(resolved.reason);
-      return executeStructured(resolved.seams, req.op as Record<string, unknown>, confirmed);
+      return bad("execute 'shape' must be 'raw' or 'structured'");
+    } catch (err) {
+      if (err instanceof NoConnectionTargetError) return bad("no active connection");
+      throw err; // genuine driver bug → dispatch → internal_error (unchanged)
     }
-    return bad("execute 'shape' must be 'raw' or 'structured'");
   }
 
   return { execute };

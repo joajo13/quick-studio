@@ -27,6 +27,10 @@ import {
   type HostMessageEvent,
   type PostMessageTarget,
 } from "./sandbox-host.ts";
+import {
+  UNUSABLE_SANDBOX_ORIGINS,
+  USABLE_SANDBOX_ORIGINS,
+} from "../../shared/sandbox-origin.fixtures.ts";
 
 const fixture: FrozenData = {
   schemaVersion: FROZEN_SCHEMA_VERSION,
@@ -154,5 +158,21 @@ describe("buildSandboxIframeAttrs", () => {
     }
     // A valid https origin is passed through verbatim.
     expect(buildSandboxIframeAttrs("https://127.0.0.1:5555").src).toBe("https://127.0.0.1:5555");
+  });
+
+  // The Ring 2 half of the cross-ring agreement (DW-2 review). The app shell's
+  // `frame-src` and this `src` must reach the SAME verdict for the same value, or the
+  // CSP refuses the frame the UI actually navigates to — a blank preview pane whose only
+  // explanation is a browser-console line. Both now call `isUsableSandboxOrigin`; this
+  // asserts it against the shared matrix, and `server.test.ts` asserts the other half.
+  // Before this, `sandbox-host.ts` gated on `^https?://` while `server.ts` demanded a
+  // host, so `"http://"` yielded `frame-src 'none'` and `src="http://"` simultaneously.
+  test("agrees with the shared usability gate on every origin in the matrix", () => {
+    for (const origin of USABLE_SANDBOX_ORIGINS) {
+      expect(buildSandboxIframeAttrs(origin).src).toBe(origin);
+    }
+    for (const origin of UNUSABLE_SANDBOX_ORIGINS) {
+      expect(buildSandboxIframeAttrs(origin).src).toBe("about:blank");
+    }
   });
 });

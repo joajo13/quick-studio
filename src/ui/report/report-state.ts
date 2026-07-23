@@ -21,6 +21,7 @@
 
 import type { FrozenData } from "../../shared/contract.ts";
 import type { ChartSpec } from "../../shared/chart-spec.ts";
+import type { ReportSpec } from "../../shared/report-spec.ts";
 
 /** How a query block's result renders: the read-only grid, or the in-app chart. */
 export type BlockView = "table" | "chart";
@@ -197,6 +198,39 @@ export function removeBlock(state: ReportState, id: number): ReportState {
 export function setReportTarget(state: ReportState, id: string | null): ReportState {
   if (state.targetConnectionId === id) return state;
   return { ...state, targetConnectionId: id };
+}
+
+/**
+ * Build a fresh {@link ReportState} from a chat-generated, Core-validated
+ * {@link ReportSpec} (Story 9.7) — the "open in report tab" seam. Folds the spec
+ * through the EXISTING reducers (no new state/render code): an optional non-empty
+ * `spec.title` becomes a LEADING prose block (`# {title}`), since `ReportState` has
+ * no title field of its own; each `prose` spec block becomes a prose block seeded
+ * with its markdown; each `query` spec block becomes a query block seeded with its
+ * SQL, UNRUN (`result: null`); a `chart` intent on a query block is applied via
+ * `setBlockChart` + `setBlockView(_, id, "chart")` so the render-time `mapChart`
+ * guard (`ReportTabView.tsx`) validates it once the block runs — a chart-less query
+ * block stays `view:"table"`, `chart:null`. Pure and total; reads `nextId` BEFORE
+ * each add to know the id the reducer is about to mint.
+ */
+export function reportStateFromSpec(spec: ReportSpec): ReportState {
+  let s = emptyReport();
+  if (spec.title !== undefined && spec.title.trim() !== "") {
+    const id = s.nextId;
+    s = updateProse(addProseBlock(s), id, `# ${spec.title}`);
+  }
+  for (const b of spec.blocks) {
+    const id = s.nextId;
+    if (b.kind === "prose") {
+      s = updateProse(addProseBlock(s), id, b.markdown);
+    } else {
+      s = updateQuerySql(addQueryBlock(s), id, b.sql);
+      if (b.chart !== undefined) {
+        s = setBlockView(setBlockChart(s, id, b.chart), id, "chart");
+      }
+    }
+  }
+  return s;
 }
 
 /**

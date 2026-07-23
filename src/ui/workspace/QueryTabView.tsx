@@ -381,7 +381,7 @@ export function QueryTabView({
         <div
           ref={editorRef}
           data-testid="sql-editor"
-          className="w-full overflow-hidden rounded-[var(--radius)] border border-[var(--border)] bg-[var(--background)] focus-within:border-[var(--coral-line)]"
+          className="w-full overflow-hidden bg-transparent"
         />
         <div className="flex items-center gap-2">
           <button

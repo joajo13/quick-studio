@@ -11,9 +11,11 @@
 
 import { describe, expect, test } from "bun:test";
 import type { DatabaseSchema, DbEngine } from "../shared/contract.ts";
+import { NoConnectionTargetError } from "./connection.ts";
 import type { ConnectionSeams } from "./connection-targets.ts";
 import type { DriverQueryResult } from "./driver.ts";
 import {
+  boundRawRead,
   createExecutor,
   firstKeyword,
   splitStatements,
@@ -62,14 +64,23 @@ function makeSeams(opts: {
   schema?: DatabaseSchema;
   queryResult?: DriverQueryResult;
   readOnlyResult?: DriverQueryResult;
+  /** When set, `runQuery` throws it — a failed mutation must NOT bust the memo. */
+  queryThrows?: unknown;
 } = {}) {
   const engine = opts.engine ?? "postgres";
   const schema = opts.schema ?? schemaFor(engine);
   const queryCalls: Capture[] = [];
   const readOnlyCalls: Capture[] = [];
+  // DW-45: counts the schema-memo busts this seam-set received, so the invalidation
+  // matrix (which branches bust, which must not) is directly observable per target.
+  const invalidations = { count: 0 };
   const seams: ConnectionSeams = {
     runQuery: async (sql, params) => {
       queryCalls.push({ sql, params });
+      // Presence, not truthiness: `queryThrows` is `unknown`, so a falsy sentinel
+      // (`0`, `""`) is a legitimate thing to throw — a truthy check would silently
+      // disable the seam and turn the failed-mutation cases into passing ones.
+      if (opts.queryThrows !== undefined) throw opts.queryThrows;
       return opts.queryResult ?? { columns: [], rows: [], rowsAffected: 1 };
     },
     runReadOnly: async (sql, params) => {
@@ -79,8 +90,12 @@ function makeSeams(opts: {
     getEngine: async () => engine,
     getSchema: async () => schema,
     quoteIdent: engine === "postgres" ? pgQuote : myQuote,
+    connect: async () => ({ status: "connected", schema }),
+    invalidateSchema: () => {
+      invalidations.count += 1;
+    },
   };
-  return { seams, queryCalls, readOnlyCalls };
+  return { seams, queryCalls, readOnlyCalls, invalidations };
 }
 
 function makeExecutor(opts: {
@@ -186,7 +201,8 @@ describe("raw path — reads run read-only", () => {
     expect(reply.ok).toBe(true);
     if (reply.ok) expect(reply.result.status).toBe("rows");
     expect(readOnlyCalls.length).toBe(1);
-    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM users");
+    // The auto-run raw SELECT is bounded at the fetch (DW-36): MAX_RESULT_ROWS + 1.
+    expect(readOnlyCalls[0]!.sql).toBe(`SELECT * FROM users\nLIMIT ${MAX_RESULT_ROWS + 1}`);
     expect(queryCalls.length).toBe(0);
   });
 
@@ -216,6 +232,117 @@ describe("raw path — reads run read-only", () => {
       expect(reply.result.data.rows.length).toBe(MAX_RESULT_ROWS);
       expect(reply.result.truncated).toBe(true);
     }
+  });
+});
+
+/* ---- Raw read fetch bound (DW-36) ------------------------------------ */
+
+describe("raw read fetch bound (DW-36)", () => {
+  const BOUND = MAX_RESULT_ROWS + 1;
+
+  test("unbounded SELECT gets a Core LIMIT appended before runReadOnly", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(readOnlyCalls[0]!.sql).toBe(`SELECT * FROM users\nLIMIT ${BOUND}`);
+  });
+
+  test("already-LIMITed SELECT is passed verbatim (user's own bound wins)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t LIMIT 5" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t LIMIT 5");
+  });
+
+  test("SHOW is a read but is passed verbatim (not a SELECT)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SHOW TABLES" });
+    expect(readOnlyCalls.length).toBe(1);
+    expect(readOnlyCalls[0]!.sql).toBe("SHOW TABLES");
+  });
+
+  test("trailing line comment: the appended LIMIT lands on a NEW line, not inside the comment", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t -- note" });
+    expect(readOnlyCalls[0]!.sql).toBe(`SELECT * FROM t -- note\nLIMIT ${BOUND}`);
+  });
+
+  test("inner-LIMIT-only SELECT is passed verbatim (a top-level LIMIT word is present)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM (SELECT a FROM t LIMIT 5) x" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM (SELECT a FROM t LIMIT 5) x");
+  });
+
+  test("row-locking SELECT ... FOR UPDATE is passed verbatim (a trailing LIMIT would be a syntax error)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t FOR UPDATE" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t FOR UPDATE");
+  });
+
+  test("mysql LOCK IN SHARE MODE is passed verbatim (locking tail must follow LIMIT)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor({ engine: "mysql" });
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t LOCK IN SHARE MODE" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t LOCK IN SHARE MODE");
+  });
+
+  test("postgres FETCH FIRST n ROWS ONLY is passed verbatim (a second row-count clause is illegal)", async () => {
+    const { exec, readOnlyCalls } = makeExecutor();
+    await exec.execute({ shape: "raw", sql: "SELECT * FROM t FETCH FIRST 10 ROWS ONLY" });
+    expect(readOnlyCalls[0]!.sql).toBe("SELECT * FROM t FETCH FIRST 10 ROWS ONLY");
+  });
+
+  test("truncation sentinel: a MAX+1-row fetch caps to MAX rows and sets truncated", async () => {
+    const rows = Array.from({ length: BOUND }, (_v, i) => [i]);
+    const { exec } = makeExecutor({ readOnlyResult: { columns: [{ name: "n" }], rows, rowsAffected: 0 } });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT n FROM big" });
+    expect(reply.ok).toBe(true);
+    if (reply.ok && reply.result.status === "rows") {
+      expect(reply.result.data.rows.length).toBe(MAX_RESULT_ROWS);
+      expect(reply.result.truncated).toBe(true);
+    }
+  });
+
+  test("exact fit: an exactly-MAX-row fetch returns all rows, truncated false", async () => {
+    const rows = Array.from({ length: MAX_RESULT_ROWS }, (_v, i) => [i]);
+    const { exec } = makeExecutor({ readOnlyResult: { columns: [{ name: "n" }], rows, rowsAffected: 0 } });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT n FROM big" });
+    expect(reply.ok).toBe(true);
+    if (reply.ok && reply.result.status === "rows") {
+      expect(reply.result.data.rows.length).toBe(MAX_RESULT_ROWS);
+      expect(reply.result.truncated).toBe(false);
+    }
+  });
+
+  test("mutation path: a confirmed raw DELETE reaches runQuery with NO LIMIT appended", async () => {
+    const { exec, queryCalls, readOnlyCalls } = makeExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "DELETE FROM users", confirmed: true });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls.length).toBe(1);
+    expect(queryCalls[0]!.sql).toBe("DELETE FROM users");
+    expect(readOnlyCalls.length).toBe(0);
+  });
+
+  // Direct units for the pure helper: `verb`/`words` arrive already upper-cased from
+  // topLevelWords, so callers pass "SELECT" (never a lowercase verb).
+  test("boundRawRead unit: SELECT with no LIMIT gets the bound; SHOW and LIMITed pass through", () => {
+    expect(boundRawRead("SELECT 1", "SELECT", ["SELECT"])).toBe(`SELECT 1\nLIMIT ${BOUND}`);
+    // mysql SHOW: not a SELECT → verbatim.
+    expect(boundRawRead("SHOW TABLES", "SHOW", ["SHOW", "TABLES"])).toBe("SHOW TABLES");
+    // Top-level LIMIT already present → verbatim.
+    expect(boundRawRead("SELECT * FROM t LIMIT 5", "SELECT", ["SELECT", "FROM", "T", "LIMIT"])).toBe(
+      "SELECT * FROM t LIMIT 5",
+    );
+    // A trailing line comment is defeated by the leading newline.
+    expect(boundRawRead("SELECT 1 -- note", "SELECT", ["SELECT"])).toBe(`SELECT 1 -- note\nLIMIT ${BOUND}`);
+    // A row-count or row-locking word makes a trailing LIMIT illegal → verbatim.
+    expect(boundRawRead("SELECT * FROM t FETCH FIRST 5 ROWS ONLY", "SELECT", ["SELECT", "FROM", "T", "FETCH", "FIRST", "ROWS", "ONLY"])).toBe(
+      "SELECT * FROM t FETCH FIRST 5 ROWS ONLY",
+    );
+    expect(boundRawRead("SELECT * FROM t FOR UPDATE", "SELECT", ["SELECT", "FROM", "T", "FOR", "UPDATE"])).toBe(
+      "SELECT * FROM t FOR UPDATE",
+    );
+    expect(boundRawRead("SELECT * FROM t LOCK IN SHARE MODE", "SELECT", ["SELECT", "FROM", "T", "LOCK", "IN", "SHARE", "MODE"])).toBe(
+      "SELECT * FROM t LOCK IN SHARE MODE",
+    );
   });
 });
 
@@ -702,6 +829,68 @@ describe("structured createTable — fixed allowlist, no raw-text fallback", () 
     });
     expect(badPk.ok).toBe(false);
   });
+
+  test("mysql renders bare VARCHAR as VARCHAR(255) (length required by the engine)", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "s", type: "VARCHAR" }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe("CREATE TABLE `t` (`s` VARCHAR(255))");
+  });
+
+  test("mysql UUID (no native type) → bad_request before any DDL runs", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "id", type: "UUID" }] },
+    });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+    expect(queryCalls.length).toBe(0);
+  });
+
+  test("postgres renders bare VARCHAR unchanged (unbounded)", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "postgres" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "s", type: "VARCHAR" }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe('CREATE TABLE "t" ("s" VARCHAR)');
+  });
+
+  test("postgres UUID stays valid and renders UUID", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "postgres" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "t", columns: [{ name: "id", type: "UUID" }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe('CREATE TABLE "t" ("id" UUID)');
+  });
+
+  test("mysql rejects an engine-unsupported token in ANY position (not just first) → no DDL runs", async () => {
+    // The reject fires per-column, so a supported column preceding an unsupported one must
+    // still short-circuit BEFORE runQuery — a structurally-valid request never composes DDL
+    // an engine would reject, regardless of where the offending column sits.
+    const { exec, queryCalls } = makeExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: {
+        kind: "createTable",
+        table: "t",
+        columns: [
+          { name: "ok", type: "INTEGER" },
+          { name: "id", type: "UUID" },
+        ],
+      },
+    });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+    expect(queryCalls.length).toBe(0);
+  });
 });
 
 /* ---- Path (a): un-widenable + request-shape validation --------------- */
@@ -770,7 +959,8 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
     const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users", connectionId: "conn-b" });
     expect(reply.ok && reply.result.status).toBe("rows");
     expect(target.readOnlyCalls.length).toBe(1);
-    expect(target.readOnlyCalls[0]!.sql).toBe("SELECT * FROM users");
+    // Fetch bound (DW-36) applies on the re-targeted read too.
+    expect(target.readOnlyCalls[0]!.sql).toBe(`SELECT * FROM users\nLIMIT ${MAX_RESULT_ROWS + 1}`);
     expect(boot.readOnlyCalls.length).toBe(0);
   });
 
@@ -819,5 +1009,196 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
     const reply = await exec.execute({ shape: "raw", sql: "SELECT 1", connectionId: "conn-b" });
     expect(reply.ok).toBe(false);
     if (!reply.ok) expect(reply.error.code).toBe("internal_error");
+  });
+
+  test("no connection target (seams throw NoConnectionTargetError) → bad_request 'no active connection', never internal_error", async () => {
+    // Mirror the real read-path seams over a null-url manager: every driver seam throws
+    // the typed NoConnectionTargetError. The executor must translate it into a neutral
+    // bad_request — NOT let it degrade into dispatch's internal_error catch-all.
+    const throwing: ConnectionSeams = {
+      runQuery: async () => {
+        throw new NoConnectionTargetError();
+      },
+      runReadOnly: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getEngine: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getSchema: async () => {
+        throw new NoConnectionTargetError();
+      },
+      quoteIdent: (ident) => `"${ident}"`,
+      connect: async () => {
+        throw new NoConnectionTargetError();
+      },
+      invalidateSchema: () => {},
+    };
+    const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: throwing }) });
+
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT 1" });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) {
+      expect(reply.error.code).toBe("bad_request");
+      expect(reply.error.code).not.toBe("internal_error");
+      expect(reply.error.message).toContain("no active connection");
+      // Neutral, credential-free envelope — no URL/host/user/password ever crosses.
+      const serialized = JSON.stringify(reply.error);
+      expect(serialized).not.toContain("postgres://");
+      expect(serialized).not.toContain("password");
+    }
+  });
+
+  test("no connection target on the STRUCTURED path too → bad_request 'no active connection', never internal_error", async () => {
+    // The structured path resolves the engine/schema seam (getEngine / getSchema via
+    // resolveSinglePkTable) BEFORE any quoteIdent — so the typed NoConnectionTargetError
+    // fires first and must be translated to bad_request, exactly like the raw path.
+    // This guards the load-bearing seam ORDER: if a future refactor moved quoteIdent
+    // (a generic Error) ahead of the async seam, the null-url case would regress to
+    // internal_error. This test locks that ordering in.
+    const throwing: ConnectionSeams = {
+      runQuery: async () => {
+        throw new NoConnectionTargetError();
+      },
+      runReadOnly: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getEngine: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getSchema: async () => {
+        throw new NoConnectionTargetError();
+      },
+      quoteIdent: (ident) => `"${ident}"`,
+      connect: async () => {
+        throw new NoConnectionTargetError();
+      },
+      invalidateSchema: () => {},
+    };
+    const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: throwing }) });
+
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "insert", table: "users", columns: [{ column: "name", value: "ada" }] },
+    });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) {
+      expect(reply.error.code).toBe("bad_request");
+      expect(reply.error.code).not.toBe("internal_error");
+      expect(reply.error.message).toContain("no active connection");
+      const serialized = JSON.stringify(reply.error);
+      expect(serialized).not.toContain("postgres://");
+      expect(serialized).not.toContain("password");
+    }
+  });
+});
+
+/* ---- DW-45: schema-memo invalidation after a schema-mutating execute -- */
+
+/**
+ * The memo `connection.ts` takes at first connect is only correct until something
+ * changes the catalog. The executor is the one place that knows a mutation actually
+ * COMMITTED, so it fires `invalidateSchema()` on the resolved seams — and nowhere else.
+ * This battery pins BOTH halves: every branch that must bust, and every branch that must
+ * not (an over-eager bust would re-introspect on every read; an under-eager one is the
+ * DW-45 bug — a stale "N tables" context served to the tree and the AI).
+ */
+describe("execute invalidates the target's schema memo (DW-45)", () => {
+  /** An executor over ONE captured seam-set, exposing its invalidation counter. */
+  function makeInvalidatingExecutor(opts: { engine?: DbEngine; queryThrows?: unknown } = {}) {
+    const s = makeSeams(opts);
+    const exec = createExecutor({ resolveConnection: () => ({ ok: true, seams: s.seams }) });
+    return { exec, ...s };
+  }
+
+  test("a CONFIRMED raw mutation busts the memo exactly once", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "DROP TABLE users", confirmed: true });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(invalidations.count).toBe(1);
+  });
+
+  test("an auto-classified READ never busts the memo", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT * FROM users" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("an UNCONFIRMED mutation (confirmation_required) never busts the memo — nothing ran", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({ shape: "raw", sql: "DROP TABLE users" });
+    expect(reply.ok && reply.result.status).toBe("confirmation_required");
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("a successful createTable busts the memo (the new table must appear in the next read)", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "notes", columns: [{ name: "id", type: "INTEGER", primaryKey: true }] },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(invalidations.count).toBe(1);
+  });
+
+  test("a REJECTED createTable (unsupported type on this engine) never busts the memo", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor({ engine: "mysql" });
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "createTable", table: "notes", columns: [{ name: "id", type: "UUID" }] },
+    });
+    expect(reply.ok).toBe(false);
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("insert / update / delete change ROWS, not the catalog — none busts the memo", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor();
+    const replies = [
+      await exec.execute({
+        shape: "structured",
+        op: { kind: "insert", table: "users", columns: [{ column: "name", value: "ada" }] },
+      }),
+      await exec.execute({
+        shape: "structured",
+        op: { kind: "update", table: "users", set: [{ column: "name", value: "ada" }], pk: { column: "id", value: 1 } },
+      }),
+      await exec.execute({
+        shape: "structured",
+        op: { kind: "delete", table: "users", pk: { column: "id", value: 1 } },
+        confirmed: true,
+      }),
+    ];
+    for (const reply of replies) expect(reply.ok && reply.result.status).toBe("ok");
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("a mutation whose runQuery THROWS never busts the memo (nothing committed)", async () => {
+    const { exec, invalidations } = makeInvalidatingExecutor({ queryThrows: new Error("deadlock detected") });
+    await expect(exec.execute({ shape: "raw", sql: "DROP TABLE users", confirmed: true })).rejects.toThrow();
+    expect(invalidations.count).toBe(0);
+  });
+
+  test("a TARGETED mutation busts the target's memo only — the boot memo is untouched", async () => {
+    // The scoping guarantee: the executor holds one resolve's seams, so it structurally
+    // cannot flush another connection's memo (nor the whole pool).
+    const boot = makeSeams();
+    const target = makeSeams();
+    const exec = createExecutor({
+      resolveConnection: (id) =>
+        id === null || id === undefined
+          ? { ok: true, seams: boot.seams }
+          : { ok: true, seams: target.seams },
+    });
+
+    const reply = await exec.execute({
+      shape: "raw",
+      sql: "CREATE TABLE notes (id integer)",
+      confirmed: true,
+      connectionId: "conn-b",
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(target.invalidations.count).toBe(1);
+    expect(boot.invalidations.count).toBe(0);
   });
 });

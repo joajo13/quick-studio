@@ -8,8 +8,14 @@
  *
  * Contract ({@link loadOrCreateStoreKey} is total — never throws):
  *  - `found` + decodes to exactly 32 bytes  → `loaded`.
- *  - `found` + does NOT decode to 32 bytes  → `key-invalid` (an empty or
- *    wrong-length AES key is never usable; we refuse rather than guess).
+ *  - `found` + decodes to a NON-EMPTY wrong length  → `key-invalid` (a wrong-length
+ *    AES key signals corruption of a possibly-real key; we refuse rather than
+ *    silently overwrite it).
+ *  - `found` + empty key (`""` or any value that base64-decodes to ZERO bytes,
+ *    e.g. `" "`/`"="`)  → treated as effectively not-found and routed to the
+ *    re-create branch below (DW-12): an empty AES-256 key can never be valid, so
+ *    rather than dead-end on `key-invalid` we generate and store a fresh key and
+ *    return `created` (or `unavailable` if the store write can't be reached).
  *  - `not-found`                            → generate a 32-byte CSPRNG key,
  *    store it (base64) and return it as `created`.
  *  - `unavailable`                          → propagate unchanged; this is the
@@ -97,16 +103,27 @@ export function loadOrCreateStoreKey(
 
   if (got.outcome === "found") {
     const key = decodeKey(got.value);
-    if (key === null) {
+    if (key !== null) {
+      return { outcome: "loaded", key };
+    }
+    // `decodeKey` returned null: the value is not a 32-byte key. Distinguish an
+    // EMPTY key from a wrong-length one by its decoded byte length (DW-12). An
+    // empty key — the literal "" or any value that base64-decodes to zero bytes
+    // (e.g. " ", "=", a stray newline) — can never be a valid AES-256 key, so it
+    // is treated as effectively not-found and falls through to the re-create
+    // branch below rather than dead-ending on `key-invalid`. A NON-EMPTY value
+    // that decodes to the wrong length is corruption of a possibly-real key and
+    // still returns `key-invalid` (we refuse rather than silently overwrite it).
+    if (Buffer.from(got.value, "base64").length > 0) {
       return {
         outcome: "key-invalid",
         detail: `keychain key does not decode to ${KEY_LENGTH_BYTES} bytes`,
       };
     }
-    return { outcome: "loaded", key };
+    // Decodes to zero bytes → empty key → fall through to re-create.
   }
 
-  // not-found → generate a fresh CSPRNG key and persist it (base64).
+  // not-found (or found-but-empty) → generate a fresh CSPRNG key and persist it (base64).
   const key = randomBytes(KEY_LENGTH_BYTES);
   const set = deps.setSecret(
     STORE_KEY_SERVICE,

@@ -50,7 +50,7 @@ describe("streamChat", () => {
     const fetchImpl = sseFetch([
       frame({ type: "reasoning-delta", text: "think" }),
       frame({ type: "text-delta", text: "hi" }),
-      frame({ type: "done", query: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } }),
+      frame({ type: "done", query: null, report: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } }),
       // Anything after `done` must never be delivered.
       frame({ type: "text-delta", text: "LATE" }),
     ]);
@@ -58,7 +58,7 @@ describe("streamChat", () => {
     expect(got).toEqual([
       { type: "reasoning-delta", text: "think" },
       { type: "text-delta", text: "hi" },
-      { type: "done", query: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } },
+      { type: "done", query: null, report: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } },
     ]);
   });
 
@@ -92,12 +92,12 @@ describe("streamChat", () => {
       "data: \n\n", // SSE keep-alive: empty payload — JSON.parse("") must NOT be reached
       frame({ type: "text-delta", text: "hi" }),
       "data:   \n\n", // whitespace-only payload — also a keep-alive, not a chunk
-      frame({ type: "done", query: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } }),
+      frame({ type: "done", query: null, report: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } }),
     ]);
     await streamChat("anthropic", "q", (c) => got.push(c), { fetchImpl });
     expect(got).toEqual([
       { type: "text-delta", text: "hi" },
-      { type: "done", query: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } },
+      { type: "done", query: null, report: null, context: { policy: "schema-only", tables: 1, rowsIncluded: 0 } },
     ]);
   });
 

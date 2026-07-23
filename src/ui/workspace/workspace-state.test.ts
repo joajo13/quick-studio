@@ -11,12 +11,15 @@ import {
   bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
+  isTabConnectionMissing,
+  openOrFocusCreateTable,
   openOrFocusSettings,
   openTab,
   restoreErdLayouts,
   restoreLastProvider,
   restoreWorkspace,
   sanitizePanelSizes,
+  setTabConnection,
   toWorkspaceSnapshot,
   type WorkspaceState,
 } from "./workspace-state.ts";
@@ -75,6 +78,21 @@ describe("openTab", () => {
     expect(a.tabs).toHaveLength(0);
     expect(a.activeTabId).toBeNull();
     expect(b).not.toBe(a);
+  });
+
+  test("opening a report mints exactly state.nextId and activates it — the App open seam invariant", () => {
+    // App.onOpenReport reads `id = workspace.nextId` to predict the tab openTab will mint,
+    // then seeds reportStates[id]. This test PINS that coupling: for the non-singleton
+    // `report` kind, the opened tab's id === the prior nextId and becomes active. If this
+    // ever breaks (e.g. report becomes a singleton or id logic changes), the App seed would
+    // land on the wrong id and the report tab would mount empty — so keep this green.
+    const before = openMany("table", "chat"); // arbitrary non-empty state; nextId === 3
+    const predicted = before.nextId;
+    const after = openTab(before, "report");
+    const opened = after.tabs.find((t) => t.kind === "report");
+    expect(opened?.id).toBe(predicted);
+    expect(after.activeTabId).toBe(predicted);
+    expect(after.nextId).toBe(predicted + 1);
   });
 });
 
@@ -196,6 +214,132 @@ describe("openOrFocusSettings (Story 8.6 — singleton)", () => {
     s = openTab(s, "settings"); // second call focuses, does not append
     expect(settingsTabs()).toHaveLength(1);
     expect(s.nextId).toBe(nextIdAfterOpen); // no id burned on the focus path
+  });
+});
+
+describe("openOrFocusCreateTable (Story 9.4 — singleton)", () => {
+  test("opens a single active create-table tab when none exists (title 'New Table', no suffix)", () => {
+    const s = openOrFocusCreateTable(openMany("table", "query")); // ids 1,2 → create-table id 3
+    expect(s.tabs).toHaveLength(3);
+    const created = s.tabs[2]!;
+    expect(created).toEqual({ id: 3, kind: "create-table", title: "New Table" });
+    expect(s.activeTabId).toBe(3);
+    expect(s.nextId).toBe(4);
+  });
+
+  test("focuses the existing create-table tab instead of opening a second (no duplicate)", () => {
+    let s = openOrFocusCreateTable(openMany("table", "query")); // create-table id 3, active
+    s = activateTab(s, 1); // switch away from create-table
+    const before = s;
+    s = openOrFocusCreateTable(s); // click create again
+    expect(s.tabs.filter((t) => t.kind === "create-table")).toHaveLength(1);
+    expect(s.tabs).toHaveLength(before.tabs.length); // no new tab
+    expect(s.activeTabId).toBe(3); // the existing create-table tab is focused
+    expect(s.nextId).toBe(before.nextId); // no id burned on the focus path (draft is NOT preserved here — the switch-away unmounted the panel)
+  });
+
+  test("is a no-op when the create-table tab is already active", () => {
+    const s = openOrFocusCreateTable(openMany("table")); // create-table active
+    expect(openOrFocusCreateTable(s)).toBe(s); // identical reference — true no-op
+  });
+
+  test("does not mutate the input state", () => {
+    const a = openMany("table");
+    const b = openOrFocusCreateTable(a);
+    expect(a.tabs).toHaveLength(1);
+    expect(b).not.toBe(a);
+  });
+
+  test("openTab('create-table') routes through the singleton seam (no duplicate 'New Table 2')", () => {
+    // The widened UI enum type-accepts "create-table"; openTab must not mint a numeric-suffixed
+    // duplicate — it delegates to openOrFocusCreateTable (open-then-focus, never two).
+    let s = openTab(openMany("table"), "create-table"); // opens the one create-table tab (id 2)
+    const createTabs = () => s.tabs.filter((t) => t.kind === "create-table");
+    expect(createTabs()).toHaveLength(1);
+    expect(createTabs()[0]?.title).toBe("New Table");
+    const nextIdAfterOpen = s.nextId;
+    s = openTab(s, "create-table"); // second call focuses, does not append
+    expect(createTabs()).toHaveLength(1);
+    expect(s.nextId).toBe(nextIdAfterOpen); // no id burned on the focus path
+  });
+});
+
+describe("create-table tab NON-persistence (Story 9.4)", () => {
+  test("toWorkspaceSnapshot DROPS a create-table tab (never reaches disk)", () => {
+    let state = openMany("table"); // id 1
+    state = openOrFocusCreateTable(state); // create-table id 2, active
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    // The create-table tab is filtered out; only the persisted document tab survives.
+    // (`snapshot.tabs.kind` is typed `WorkspaceTabKind`, which cannot even be compared to
+    // "create-table" — tsc itself proves the drop; the `toEqual` confirms it at runtime.)
+    expect(snapshot.tabs).toEqual([{ id: 1, kind: "table", title: "Table 1" }]);
+    // The active tab WAS the (now-dropped) create-table tab, so toWorkspaceSnapshot
+    // reconciles activeTabId to the first surviving tab — it must never emit a dangling id.
+    expect(snapshot.activeTabId).toBe(1);
+    expect(restoreWorkspace(snapshot).activeTabId).toBe(1);
+  });
+
+  test("toWorkspaceSnapshot reconciles activeTabId when create-table is active (no dangling id → Core save accepts)", () => {
+    // Regression (Story 9.4): dropping the active create-table tab must not leave
+    // activeTabId pointing at an id that is absent from snapshot.tabs. Core's save
+    // validator rejects such a snapshot (activeTabId must be a present tab id), which
+    // would fail workspace.save for as long as create-table is the active tab.
+    let state = openMany("table", "query"); // ids 1, 2
+    state = openOrFocusCreateTable(state); // create-table id 3, active
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    const ids = snapshot.tabs.map((t) => t.id);
+    expect(ids).toEqual([1, 2]); // create-table dropped
+    // The reconciled activeTabId is one of the surviving ids (Core's "present tab id" rule).
+    expect(snapshot.activeTabId).toBe(1);
+  });
+
+  test("toWorkspaceSnapshot emits activeTabId:null when create-table is the only tab (Core's empty-tabs rule)", () => {
+    // The empty-workspace variant: with create-table as the sole tab, the filtered tabs
+    // are empty, so activeTabId MUST be null — Core rejects a non-null activeTabId with
+    // no tabs.
+    const state = openOrFocusCreateTable(emptyWorkspace()); // create-table is the only tab, active
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    expect(snapshot.tabs).toEqual([]);
+    expect(snapshot.activeTabId).toBeNull();
+  });
+});
+
+describe("TableRef NON-persistence stands, tab-level connectionId now persists (Story 10.6)", () => {
+  test("toWorkspaceSnapshot emits the TAB's connectionId but still never the table ref", () => {
+    // Story 10.5 pinned that NOTHING connection-shaped reached disk, because the id lived
+    // only on the (never-persisted) `table` ref. Story 10.6 LANDED the persistence — but
+    // only for the tab-level mirror: `table` (schema/name) is still dropped verbatim, so
+    // Story 3.2's "the open-table binding does not survive a restart" is untouched. This
+    // test now pins BOTH halves so neither can regress into the other.
+    const CONNECTION_ID = "b7e6f1c2-0000-4aaa-9bbb-deadbeefcafe";
+    let state = openMany("table"); // table tab id 1, active
+    state = bindTableToActiveTab(state, {
+      schema: "public",
+      name: "orders",
+      connectionId: CONNECTION_ID,
+    });
+    // The binding really is on the in-memory state — otherwise the assertions below
+    // would pass vacuously.
+    expect(state.tabs[0]?.table?.connectionId).toBe(CONNECTION_ID);
+    // …and the tab-level mirror was written alongside it.
+    expect(state.tabs[0]?.connectionId).toBe(CONNECTION_ID);
+
+    const snapshot = toWorkspaceSnapshot(state, [30, 70]);
+    // The persisted tab carries id/kind/title + the connection id — and NO `table` key,
+    // so schema/name never reach disk (the field-by-field map is what guarantees it).
+    expect(snapshot.tabs).toEqual([
+      { id: 1, kind: "table", title: "orders", connectionId: CONNECTION_ID },
+    ]);
+    expect(snapshot.tabs[0]).not.toHaveProperty("table");
+    // The claim is about the emitted tab's SHAPE, so assert the key set itself: a
+    // "the serialized JSON does not contain 'public'" check would pass or fail on the
+    // fixture's schema NAME, not on whether the ref was dropped.
+    expect(Object.keys(snapshot.tabs[0]!).sort()).toEqual([
+      "connectionId",
+      "id",
+      "kind",
+      "title",
+    ]);
   });
 });
 
@@ -498,7 +642,9 @@ describe("bindTableToActiveTab (Story 3.2)", () => {
   test("opens a new active table tab when no tab is active", () => {
     const s = bindTableToActiveTab(emptyWorkspace(), REF);
     expect(s.tabs).toHaveLength(1);
-    expect(s.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders", table: REF });
+    // `connectionId: null` is the tab-level mirror of `ref.connectionId` (Story 10.6);
+    // REF carries none, so this bind targets the boot/default connection.
+    expect(s.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders", table: REF, connectionId: null });
     expect(s.activeTabId).toBe(1);
     expect(s.nextId).toBe(2);
   });
@@ -507,7 +653,7 @@ describe("bindTableToActiveTab (Story 3.2)", () => {
     let s = openTab(emptyWorkspace(), "table"); // "Table 1", active, unbound
     s = bindTableToActiveTab(s, REF);
     expect(s.tabs).toHaveLength(1); // reused, not appended
-    expect(s.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders", table: REF });
+    expect(s.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders", table: REF, connectionId: null });
     // Rebind to another table reuses the same tab and renames again.
     const REF2 = { schema: "public", name: "users" };
     s = bindTableToActiveTab(s, REF2);
@@ -520,7 +666,7 @@ describe("bindTableToActiveTab (Story 3.2)", () => {
     let s = openTab(emptyWorkspace(), "query"); // active is a query tab
     s = bindTableToActiveTab(s, REF);
     expect(s.tabs).toHaveLength(2);
-    expect(s.tabs[1]).toEqual({ id: 2, kind: "table", title: "orders", table: REF });
+    expect(s.tabs[1]).toEqual({ id: 2, kind: "table", title: "orders", table: REF, connectionId: null });
     expect(s.activeTabId).toBe(2);
   });
 
@@ -562,5 +708,284 @@ describe("sanitizePanelSizes (DW-23)", () => {
 
   test("an empty split falls back to defaults", () => {
     expect(sanitizePanelSizes([], DEFAULTS)).toEqual([20, 80]);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Story 10.6 — the tab-level connectionId: bind, persist, restore, reassign
+ * ------------------------------------------------------------------ */
+
+const CONN = "conn-2";
+
+describe("bindTableToActiveTab mirrors ref.connectionId onto the tab (Story 10.6)", () => {
+  test("the NEW-tab branch records the saved connection id", () => {
+    const s = bindTableToActiveTab(emptyWorkspace(), {
+      schema: "public",
+      name: "orders",
+      connectionId: CONN,
+    });
+    expect(s.tabs[0]?.connectionId).toBe(CONN);
+    expect(s.tabs[0]?.table?.connectionId).toBe(CONN);
+  });
+
+  test("the REBIND branch overwrites a previous id (never drifts from the live ref)", () => {
+    let s = bindTableToActiveTab(emptyWorkspace(), {
+      schema: "public",
+      name: "orders",
+      connectionId: CONN,
+    });
+    expect(s.tabs[0]?.connectionId).toBe(CONN);
+    // Rebinding the SAME (active) table tab to a boot-root table must not leave `conn-2`
+    // behind — otherwise the tab would persist an id it no longer reads from.
+    s = bindTableToActiveTab(s, { schema: "public", name: "users", connectionId: null });
+    expect(s.tabs).toHaveLength(1);
+    expect(s.tabs[0]?.connectionId).toBeNull();
+  });
+
+  test("an absent ref.connectionId is recorded as null (the boot/default target)", () => {
+    const fromNewTab = bindTableToActiveTab(emptyWorkspace(), { schema: "public", name: "orders" });
+    expect(fromNewTab.tabs[0]?.connectionId).toBeNull();
+    // …and the same on the rebind branch.
+    const rebound = bindTableToActiveTab(openTab(emptyWorkspace(), "table"), {
+      schema: "public",
+      name: "orders",
+    });
+    expect(rebound.tabs[0]?.connectionId).toBeNull();
+  });
+
+  test("a BLANK ref.connectionId is normalised to null, never persisted as-is", () => {
+    // This is the PRIMARY writer of the field (a click in the tree), so it needs the same
+    // guard as the reassign seam: `ConnectionSummary.id` is only `typeof`-checked on the way
+    // in, and Core's save boundary rejects a present-but-blank `connectionId` outright — one
+    // blank id reaching a tab would fail EVERY subsequent autosave, silently.
+    for (const blank of ["", "   ", "\t\n"]) {
+      const fromNewTab = bindTableToActiveTab(emptyWorkspace(), {
+        schema: "public",
+        name: "orders",
+        connectionId: blank,
+      });
+      expect(fromNewTab.tabs[0]?.connectionId).toBeNull();
+      // …and on the rebind branch, where a stale good id would otherwise be replaced by junk.
+      const rebound = bindTableToActiveTab(
+        bindTableToActiveTab(emptyWorkspace(), {
+          schema: "public",
+          name: "orders",
+          connectionId: CONN,
+        }),
+        { schema: "public", name: "users", connectionId: blank },
+      );
+      expect(rebound.tabs[0]?.connectionId).toBeNull();
+    }
+  });
+});
+
+describe("toWorkspaceSnapshot — connectionId is emitted only when a saved connection is targeted", () => {
+  test("a saved-connection table tab persists its id", () => {
+    const s = bindTableToActiveTab(emptyWorkspace(), {
+      schema: "public",
+      name: "orders",
+      connectionId: CONN,
+    });
+    expect(toWorkspaceSnapshot(s, [20, 80]).tabs[0]).toEqual({
+      id: 1,
+      kind: "table",
+      title: "orders",
+      connectionId: CONN,
+    });
+  });
+
+  test("a boot-bound (null) and a never-bound tab emit NO connectionId key at all", () => {
+    // Boot-bound: the tab-level value is `null`, which must not reach disk — `null` and
+    // absent are read identically, so writing it would only break the byte-identical
+    // guarantee for the ephemeral single-connection case.
+    const bootBound = bindTableToActiveTab(emptyWorkspace(), { schema: "public", name: "orders" });
+    const bootTab = toWorkspaceSnapshot(bootBound, [20, 80]).tabs[0]!;
+    expect("connectionId" in bootTab).toBe(false);
+
+    // Never bound: a plain `openTab` table + a query tab, neither of which has the field.
+    const neverBound = openMany("table", "query");
+    for (const t of toWorkspaceSnapshot(neverBound, [20, 80]).tabs) {
+      expect("connectionId" in t).toBe(false);
+    }
+    // Byte-identical to a pre-10.6 snapshot.
+    expect(JSON.stringify(toWorkspaceSnapshot(neverBound, [20, 80]))).not.toContain("connectionId");
+  });
+
+  test("the table ref itself is still never emitted, id or no id", () => {
+    const s = bindTableToActiveTab(emptyWorkspace(), {
+      schema: "public",
+      name: "orders",
+      connectionId: CONN,
+    });
+    expect(toWorkspaceSnapshot(s, [20, 80]).tabs[0]).not.toHaveProperty("table");
+  });
+});
+
+describe("connectionId round-trip: bind → toWorkspaceSnapshot → restoreWorkspace", () => {
+  test("the id survives a relaunch while the table binding does not (Story 3.2 stands)", () => {
+    const bound = bindTableToActiveTab(emptyWorkspace(), {
+      schema: "public",
+      name: "orders",
+      connectionId: CONN,
+    });
+    const restored = restoreWorkspace(toWorkspaceSnapshot(bound, [20, 80]));
+    expect(restored.tabs).toHaveLength(1);
+    expect(restored.tabs[0]?.id).toBe(1);
+    expect(restored.tabs[0]?.kind).toBe("table");
+    expect(restored.tabs[0]?.title).toBe("orders");
+    expect(restored.tabs[0]?.connectionId).toBe(CONN);
+    expect(restored.tabs[0]?.table).toBeUndefined();
+    expect(restored.activeTabId).toBe(1);
+  });
+});
+
+describe("restoreWorkspace — connectionId (Story 10.6)", () => {
+  test("a pre-10.6 snapshot restores every tab with connectionId undefined and nothing else changed", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [25, 75],
+      tabs: [
+        { id: 1, kind: "table", title: "Table 1" },
+        { id: 2, kind: "query", title: "Query 2" },
+        { id: 3, kind: "erd", title: "ERD 3" },
+      ],
+      activeTabId: 2,
+      nextId: 4,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.tabs).toHaveLength(3);
+    expect(state.tabs.map((t) => t.kind)).toEqual(["table", "query", "erd"]);
+    expect(state.tabs.map((t) => t.title)).toEqual(["Table 1", "Query 2", "ERD 3"]);
+    expect(state.tabs.map((t) => t.id)).toEqual([1, 2, 3]);
+    expect(state.activeTabId).toBe(2);
+    expect(state.nextId).toBe(4);
+    for (const t of state.tabs) {
+      expect(t.connectionId).toBeUndefined();
+      expect("connectionId" in t).toBe(false); // the key is OMITTED, not set to null
+    }
+  });
+
+  test("a hand-edited connectionId is sanitized to an absent key without dropping the tab", () => {
+    // The store deliberately does not gate this field (gating there is all-or-nothing over
+    // `tabs`), so `restoreWorkspace` is the sanitizer of record. Every bad value below must
+    // yield a tab that still restores, minus the field.
+    for (const bad of [42, "", "   ", "\t\n", {}, null, true, []]) {
+      const snapshot = {
+        version: 1,
+        panelSizes: [20, 80],
+        tabs: [{ id: 1, kind: "table", title: "orders", connectionId: bad }],
+        activeTabId: 1,
+        nextId: 2,
+      } as unknown as WorkspaceSnapshot;
+      const state = restoreWorkspace(snapshot);
+      expect(state.tabs).toHaveLength(1);
+      expect(state.tabs[0]).toEqual({ id: 1, kind: "table", title: "orders" });
+      expect("connectionId" in state.tabs[0]!).toBe(false);
+      expect(state.activeTabId).toBe(1);
+    }
+  });
+
+  test("a well-formed id is carried verbatim, alongside tabs that have none", () => {
+    const snapshot: WorkspaceSnapshot = {
+      version: 1,
+      panelSizes: [20, 80],
+      tabs: [
+        { id: 1, kind: "table", title: "orders", connectionId: CONN },
+        { id: 2, kind: "query", title: "Query 2" },
+      ],
+      activeTabId: 1,
+      nextId: 3,
+    };
+    const state = restoreWorkspace(snapshot);
+    expect(state.tabs[0]?.connectionId).toBe(CONN);
+    expect(state.tabs[1]?.connectionId).toBeUndefined();
+  });
+});
+
+describe("setTabConnection (Story 10.6 reassign)", () => {
+  const bound = (): WorkspaceState => {
+    let s = bindTableToActiveTab(emptyWorkspace(), {
+      schema: "public",
+      name: "orders",
+      connectionId: CONN,
+    });
+    s = openTab(s, "query"); // a sibling that must be untouched
+    return s;
+  };
+
+  test("sets the id and CLEARS the stale table binding", () => {
+    const s = setTabConnection(bound(), 1, "conn-9");
+    expect(s.tabs[0]?.connectionId).toBe("conn-9");
+    // The old ref pointed at a table in a DIFFERENT database — reusing it would browse
+    // (and potentially write to) rows the user never picked.
+    expect(s.tabs[0]?.table).toBeUndefined();
+    expect("table" in s.tabs[0]!).toBe(false);
+    expect(s.tabs[0]?.title).toBe("orders"); // title/kind/id/position are preserved
+    expect(s.tabs[0]?.kind).toBe("table");
+  });
+
+  test("accepts null (back to the boot/default target)", () => {
+    const s = setTabConnection(bound(), 1, null);
+    expect(s.tabs[0]?.connectionId).toBeNull();
+  });
+
+  test("leaves every sibling tab reference-identical", () => {
+    const before = bound();
+    const after = setTabConnection(before, 1, "conn-9");
+    expect(after.tabs[1]).toBe(before.tabs[1]!);
+    expect(after.activeTabId).toBe(before.activeTabId);
+    expect(after.nextId).toBe(before.nextId);
+  });
+
+  test("normalises a blank id to null so it can never poison a later save", () => {
+    // `ConnectionSummary.id` is only `typeof`-checked where it enters the UI, so a
+    // hand-edited registry can produce `id: ""`. Core's save boundary rejects a PRESENT
+    // but empty `connectionId`, which would make EVERY subsequent `workspace.save` fail
+    // with `bad_request` — silently, since a failed save has no UI surface.
+    expect(setTabConnection(bound(), 1, "").tabs[0]?.connectionId).toBeNull();
+    expect(setTabConnection(bound(), 1, "   ").tabs[0]?.connectionId).toBeNull();
+    // …and the normalised value is what reaches the snapshot: `null` is dropped entirely,
+    // which is exactly how a boot-bound tab serializes.
+    const snapshot = toWorkspaceSnapshot(setTabConnection(bound(), 1, ""), [20, 80]);
+    expect(snapshot.tabs[0]).not.toHaveProperty("connectionId");
+  });
+
+  test("an unknown tab id returns the SAME state reference (no re-render churn)", () => {
+    const before = bound();
+    expect(setTabConnection(before, 999, "conn-9")).toBe(before);
+  });
+
+  test("the reassigned id is what the next save persists", () => {
+    const s = setTabConnection(bound(), 1, "conn-9");
+    expect(toWorkspaceSnapshot(s, [20, 80]).tabs[0]).toEqual({
+      id: 1,
+      kind: "table",
+      title: "orders",
+      connectionId: "conn-9",
+    });
+  });
+});
+
+describe("isTabConnectionMissing (Story 10.6)", () => {
+  const tab = (connectionId?: string | null) =>
+    ({ id: 1, kind: "table" as const, title: "orders", connectionId });
+
+  test("an unknown live set (null) NEVER flags a tab", () => {
+    // The `connections.list` read is in flight or failed — a read that never answered
+    // must not accuse a tab of pointing at a deleted connection.
+    expect(isTabConnectionMissing(tab(CONN), null)).toBe(false);
+    expect(isTabConnectionMissing(tab(null), null)).toBe(false);
+    expect(isTabConnectionMissing(tab(undefined), null)).toBe(false);
+  });
+
+  test("a boot/default tab (null or undefined) is never missing, even against an empty set", () => {
+    expect(isTabConnectionMissing(tab(null), new Set())).toBe(false);
+    expect(isTabConnectionMissing(tab(undefined), new Set())).toBe(false);
+  });
+
+  test("a present id is not missing; an absent one is", () => {
+    expect(isTabConnectionMissing(tab(CONN), new Set([CONN, "conn-1"]))).toBe(false);
+    expect(isTabConnectionMissing(tab(CONN), new Set(["conn-1"]))).toBe(true);
+    expect(isTabConnectionMissing(tab(CONN), new Set())).toBe(true);
   });
 });

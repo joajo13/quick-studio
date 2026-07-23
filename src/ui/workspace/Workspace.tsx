@@ -13,12 +13,22 @@
  * oblivious to run-mode, exactly like the rest of the UI ring.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Panel, PanelGroup, PanelResizeHandle } from "react-resizable-panels";
-import type { ErdTabLayout, ExposureInfo, ProviderKind, SchemaIndexInfo, SchemaTableInfo } from "../../shared/contract.ts";
-import { CreateTablePanel } from "../schema/CreateTablePanel.tsx";
+import type {
+  ActiveConnectionInfo,
+  ConnectionSummary,
+  ErdTabLayout,
+  ExposureInfo,
+  ListConnectionsResult,
+  ProviderKind,
+  SchemaIndexInfo,
+  SchemaTableInfo,
+} from "../../shared/contract.ts";
+import { rpc } from "../rpc/client.ts";
 import { SchemaTree } from "../schema/SchemaTree.tsx";
 import type { ChatState } from "./chat-model.ts";
+import type { ReportSpec } from "../../shared/report-spec.ts";
 import type { ReportState, ReportStateUpdate } from "../report/report-state.ts";
 import { TabBar } from "./TabBar.tsx";
 import { TabContent } from "./TabContent.tsx";
@@ -36,6 +46,9 @@ const LAUNCH_LABEL: Readonly<Record<TabKind, string>> = {
   // `settings` is a system singleton tab, not a launcher-rail kind — the rail loop
   // iterates LAUNCHER_KINDS, so this entry only satisfies the Record's exhaustiveness.
   settings: "Settings",
+  // `create-table` is a UI-only singleton tab reached via the rail's dedicated create
+  // toggle (not the LAUNCHER_KINDS loop), so this entry is filler for Record exhaustiveness.
+  "create-table": "New Table",
 };
 
 /** Per-kind rail icon (also reused by `TabBar`'s per-tab leading icon). */
@@ -75,9 +88,16 @@ const KIND_ICON: Readonly<Record<TabKind, React.JSX.Element>> = {
   // gear entry only satisfies the Record's exhaustiveness. The rail's own Settings toggle
   // renders its gear inline below, and the tab strip's leading icon lives in TabBar.
   settings: (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
       <circle cx="12" cy="12" r="3" />
-      <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" />
+    </svg>
+  ),
+  // `create-table` is not a launcher-rail kind (the rail loop iterates LAUNCHER_KINDS); its
+  // own rail toggle renders the `+` glyph inline below. This entry is filler for exhaustiveness.
+  "create-table": (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M12 5v14M5 12h14" />
     </svg>
   ),
 };
@@ -95,15 +115,17 @@ function LauncherRail({
   onOpen,
   settingsActive,
   onOpenSettings,
-  createOpen,
-  onToggleCreate,
+  createTableActive,
+  onOpenCreateTable,
 }: {
   onOpen: (kind: TabKind) => void;
   /** Whether the Settings tab is the active tab (drives the toggle's `aria-pressed`). */
   settingsActive: boolean;
   onOpenSettings: () => void;
-  createOpen: boolean;
-  onToggleCreate: () => void;
+  /** Whether the create-table tab is the active tab (drives the toggle's `aria-pressed`). */
+  createTableActive: boolean;
+  /** Open the create-table tab, or focus it if already open (open-or-focus singleton). */
+  onOpenCreateTable: () => void;
 }): React.JSX.Element {
   return (
     <nav aria-label="Open a new tab" className="flex h-full flex-col items-center gap-0.5 bg-background py-2.5">
@@ -133,17 +155,19 @@ function LauncherRail({
 
       <div className="flex-1" />
 
-      {/* Create-table control (Story 3.4): a rail toggle mirroring Settings, pinned
-          just above it. Opens the CreateTablePanel. */}
+      {/* Create-table control (Story 3.4 / 9.4): a rail toggle mirroring Settings, pinned
+          just above it. Opens the create-table tab, or focuses it if one is already open
+          (open-or-focus singleton). `aria-pressed` reflects that the create-table tab is
+          the active view. */}
       <button
         type="button"
         aria-label="Create table"
-        aria-pressed={createOpen}
+        aria-pressed={createTableActive}
         data-testid="create-table-toggle"
         title="Create table"
-        onClick={onToggleCreate}
+        onClick={onOpenCreateTable}
         className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition-colors hover:bg-accent hover:text-foreground ${
-          createOpen ? "bg-accent text-foreground" : "text-muted-foreground"
+          createTableActive ? "bg-accent text-foreground" : "text-muted-foreground"
         }`}
       >
         <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className="h-[18px] w-[18px]">
@@ -165,9 +189,9 @@ function LauncherRail({
           settingsActive ? "bg-accent text-foreground" : "text-muted-foreground"
         }`}
       >
-        <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} className="h-[18px] w-[18px]">
+        <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" className="h-[18px] w-[18px]">
+          <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
           <circle cx="12" cy="12" r="3" />
-          <path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1" />
         </svg>
       </button>
     </nav>
@@ -204,6 +228,7 @@ export function Workspace({
   state,
   onOpen,
   onOpenSettings,
+  onOpenCreateTable,
   onActivate,
   onClose,
   onActivateTable,
@@ -218,6 +243,7 @@ export function Workspace({
   lastProvider,
   reportStates,
   onReportStateChange,
+  onOpenReport,
   erdLayouts,
   onErdLayoutChange,
   onStop,
@@ -230,17 +256,24 @@ export function Workspace({
   extraTables,
   schemas,
   onTableCreated,
+  onReassignConnection,
 }: {
   state: WorkspaceState;
   onOpen: (kind: TabKind) => void;
   /** Open the Settings tab, or focus it if already open (open-or-focus singleton). */
   onOpenSettings: () => void;
+  /** Open the create-table tab, or focus it if already open (open-or-focus singleton). */
+  onOpenCreateTable: () => void;
   onActivate: (id: number) => void;
   onClose: (id: number) => void;
-  /** Route a schema-tree table activation into the workspace reducer (Story 3.2). */
-  onActivateTable: (table: SchemaTableInfo) => void;
-  /** Fired once when the schema tree resolves the live schema. */
-  onSchemaLoaded: (tables: ReadonlyArray<SchemaTableInfo>) => void;
+  /**
+   * Route a schema-tree table activation into the workspace reducer (Story 3.2), now
+   * carrying the owning root's target (`null` = the boot root) so the bound tab reads
+   * and writes against the database the user clicked in (Story 10.5).
+   */
+  onActivateTable: (table: SchemaTableInfo, connectionId: string | null) => void;
+  /** Fired once PER ROOT when the schema tree resolves that root's live schema. */
+  onSchemaLoaded: (tables: ReadonlyArray<SchemaTableInfo>, connectionId: string | null) => void;
   /** PK column names of the active table tab's bound table (grid key-icon). */
   primaryKeys: ReadonlyArray<string>;
   /** Introspected indexes of the active table tab's bound table (Story 3.5 sub-view). */
@@ -261,6 +294,8 @@ export function Workspace({
   reportStates: ReadonlyMap<number, ReportState>;
   /** Update the report state for report Tab `id`. */
   onReportStateChange: (id: number, next: ReportStateUpdate) => void;
+  /** Open a chat-generated ReportSpec as a new Report tab (Story 9.7). */
+  onOpenReport?: (spec: ReportSpec) => void;
   /** Persisted ERD layouts keyed by stringified tab id (Story 4.2). */
   erdLayouts: Readonly<Record<string, ErdTabLayout>>;
   /** Report an ERD tab's captured geometry up for the debounced persist. */
@@ -281,20 +316,108 @@ export function Workspace({
   schemas: ReadonlyArray<string>;
   /** Append a freshly-created table to the App-level list (tree + PK lookup). */
   onTableCreated: (table: SchemaTableInfo) => void;
+  /**
+   * Point a tab at a different saved connection (Story 10.6) — fired by the
+   * "Reasignar conexión…" affordance on a tab whose connection was removed. `null` is a
+   * first-class choice, not a degenerate one: it means the boot/default target, the same
+   * convention `ExecuteRequest.connectionId` uses, and it is the ONLY escape for a
+   * workspace whose saved connections were all deleted but which was relaunched with a
+   * boot `--url`.
+   */
+  onReassignConnection?: (tabId: number, connectionId: string | null) => void;
 }): React.JSX.Element {
   const activeTab =
     state.tabs.find((t) => t.id === state.activeTabId) ?? null;
   const activeTable =
     activeTab !== null && activeTab.kind === "table" ? (activeTab.table ?? null) : null;
 
-  // The create-table surface (Story 3.4) is an overlay over the main Panel — it is
-  // React-memory-only (not part of the persisted Workspace snapshot). Settings is no
-  // longer an overlay: it is a normal singleton tab (Story 8.6), so no settings flag
-  // lives here anymore.
-  const [createOpen, setCreateOpen] = useState(false);
-  const toggleCreate = (): void => {
-    setCreateOpen((v) => !v);
-  };
+  // Connection-registry revision (Story 10.5): bumped by every successful add/edit/remove
+  // in the Settings tab body, read by the schema tree as a cue to re-read `connections.list`
+  // and reconcile its roots. It lives HERE — the nearest common ancestor of the tree and the
+  // Settings tab, both of which are permanent members of this one React tree — rather than in
+  // App, so no unrelated shell state has to thread through two more props. A monotonic counter
+  // (not a boolean/flag) so back-to-back mutations each register as their own change.
+  const [registryRevision, setRegistryRevision] = useState(0);
+
+  // The connection the mutation behind the CURRENT `registryRevision` repointed (a new url
+  // and/or a changed pinned schema), or `null` for an add, a remove or a name-only edit.
+  // Set in the same commit as the bump, so the tree's refresh always reads the id belonging
+  // to the mutation it is reconciling. It exists because an edit keeps the record's id: the
+  // root survives reconciliation, and without this it would keep serving the cached catalog
+  // of the database it used to point at, with no path anywhere in the tree to refetch it.
+  const [repointedConnectionId, setRepointedConnectionId] = useState<string | null>(null);
+
+  // The LIVE saved-connection set (Story 10.6) — the only rpc this shell makes. `null` means
+  // "not known yet" (in flight, or the read failed), which `isTabConnectionMissing` treats as
+  // "never flag a tab": a registry read that never answered must not accuse a restored tab of
+  // pointing at a deleted connection. It lives HERE for the same reason `registryRevision`
+  // does — Workspace is the nearest common ancestor of the tab bodies and the Settings tab —
+  // and it is keyed on that revision, so an add/edit/remove in Settings reconciles the
+  // unavailable state without an app restart, exactly like the schema tree's roots do.
+  const [connections, setConnections] = useState<ReadonlyArray<ConnectionSummary> | null>(null);
+
+  // Whether a boot/default target is CONFIGURED (`ActiveConnectionInfo.hasTarget`, Story 10.5's
+  // "a boot target exists" predicate — deliberately a bare yes/no, since `connection` collapses
+  // "nothing configured" and "configured but not describable" into the same `null`). It is read
+  // in the SAME round-trip as the registry because the reassign picker needs BOTH: without it, a
+  // workspace saved against `conn-2` whose saved connections were then all deleted, relaunched
+  // with a boot `--url`, would show a DISABLED "Reasignar conexión…" plus "no hay conexiones
+  // guardadas" — while a perfectly usable boot connection sits right there — and the only way
+  // out of that tab would be to close it.
+  const [hasBootTarget, setHasBootTarget] = useState(false);
+
+  // The `registryRevision` whose failed registry read has already been retried once (see the
+  // effect below). Storing the REVISION rather than a bare counter is what makes the budget
+  // genuinely one-shot PER REVISION: a plain `attempt` flag is only ever set, never reset, so
+  // the second and every later revision would inherit a spent budget and get no retry at all.
+  // Writing it re-enters the effect (it is a dependency), which is how the retry actually
+  // refetches; `null` means "this revision has a retry available".
+  const [retriedRevision, setRetriedRevision] = useState<number | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    // Both reads in ONE round-trip (the idiom `SchemaTree.tsx`'s mount effect already uses):
+    // the picker's two data sources must not arrive in two renders, or it would briefly offer
+    // "no hay conexiones guardadas" while the boot entry was still pending.
+    void Promise.all([
+      rpc<ListConnectionsResult>("connections.list"),
+      rpc<ActiveConnectionInfo>("connection.active"),
+    ]).then(([listReply, activeReply]) => {
+      if (!alive) return;
+      // On `!ok` keep whatever we already had (including the initial `null`): downgrading a
+      // known-good set to `null` on a transient failure would clear a legitimately-shown
+      // unavailable state, and inventing an EMPTY set would flag every saved-connection tab.
+      if (listReply.ok) setConnections(listReply.result);
+      // Same rule for the boot half: a failed `connection.active` means "unknown", never
+      // "gone", so a previously-proven boot entry is never taken back off the picker.
+      if (activeReply.ok) setHasBootTarget(activeReply.result.hasTarget);
+      if ((!listReply.ok || !activeReply.ok) && retriedRevision !== registryRevision) {
+        // Exactly ONE retry per revision, never a poll. Without it a single transient failure
+        // at boot leaves `connections === null` — i.e. the whole missing-connection feature
+        // silently off — until the user happens to mutate the registry in Settings, which is
+        // the only other thing that bumps `registryRevision`. It is bounded at one because a
+        // Core that cannot answer a local loopback registry read is a dead app, not a flaky
+        // network: that condition is already surfaced by the connection indicator, and
+        // hammering it would only add noise to a failure the user can already see.
+        //
+        // EITHER half failing arms it, not just the list: `hasBootTarget` starts `false` and
+        // is only ever raised on `activeReply.ok`, so it conflates "unknown" with "definitely
+        // none" — and an unrecovered `connection.active` therefore reproduces the exact dead
+        // end the second read exists to prevent (a disabled "Reasignar conexión…" plus "no
+        // hay conexiones guardadas" while a usable boot target sits right there).
+        retry = setTimeout(() => setRetriedRevision(registryRevision), 2000);
+      }
+    });
+    return () => {
+      alive = false;
+      if (retry !== undefined) clearTimeout(retry);
+    };
+  }, [registryRevision, retriedRevision]);
+
+  // Both the create-table (Story 9.4) and Settings (Story 8.6) surfaces are now normal
+  // singleton tabs — no overlay flag lives here anymore. Their rail toggles route through
+  // the workspace reducer's open-or-focus seams.
 
   return (
     <div className="flex h-full flex-col bg-background text-foreground">
@@ -307,17 +430,10 @@ export function Workspace({
             <div className="shrink-0" style={{ width: "52px" }}>
               <LauncherRail
                 onOpen={onOpen}
-                settingsActive={activeTab?.kind === "settings" && !createOpen}
-                onOpenSettings={() => {
-                  // Opening/focusing Settings must dismiss the create-table overlay (which
-                  // otherwise keeps covering the pane) — restoring the mutual exclusion the
-                  // old `toggleSettings`'s `setCreateOpen(false)` provided before Settings
-                  // became a tab. Without this the Settings click appears inert.
-                  setCreateOpen(false);
-                  onOpenSettings();
-                }}
-                createOpen={createOpen}
-                onToggleCreate={toggleCreate}
+                settingsActive={activeTab?.kind === "settings"}
+                onOpenSettings={onOpenSettings}
+                createTableActive={activeTab?.kind === "create-table"}
+                onOpenCreateTable={onOpenCreateTable}
               />
             </div>
             <div className="min-w-0 flex-1">
@@ -326,6 +442,8 @@ export function Workspace({
                 onActivate={onActivateTable}
                 onSchemaLoaded={onSchemaLoaded}
                 extraTables={extraTables}
+                registryRevision={registryRevision}
+                repointedConnectionId={repointedConnectionId}
               />
             </div>
           </div>
@@ -335,64 +453,72 @@ export function Workspace({
 
         <Panel defaultSize={panelSizes[1] ?? 80} minSize={30}>
           {/* Chrome-style shell: a transparent .topbar hosting the Tab strip + new-tab
-              "+" (hidden while the create-table overlay fills the pane, exactly as the Tab
-              strip itself did before), and a rounded, detached `.content-panel` below it
-              that always hosts the neutral status bar (connection + Stop stay reachable
-              whether the Tabs — Settings now among them — or the Create overlay is showing). */}
+              "+", and a rounded, detached `.content-panel` below it that always hosts the
+              neutral status bar (connection + Stop stay reachable). Both Settings and
+              create-table are now normal tabs in the strip, so the strip always renders. */}
           <div className="flex h-full flex-col bg-background">
-            {!createOpen ? (
-              <div className="flex shrink-0 items-end gap-0.5 pt-[5px] pr-2 pb-0 pl-1.5">
-                <div className="min-w-0 flex-1 self-end">
-                  <TabBar state={state} onActivate={onActivate} onClose={onClose} />
-                </div>
-                <button
-                  type="button"
-                  title="New tab"
-                  aria-label="New tab"
-                  onClick={() =>
-                    // The `+` duplicates the active tab's kind — but never Settings (a
-                    // singleton). When Settings is active, fall back to a document kind.
-                    onOpen(activeTab && activeTab.kind !== "settings" ? activeTab.kind : LAUNCHER_KINDS[0]!)
-                  }
-                  className="mx-[2px] grid h-9 w-[34px] shrink-0 place-items-center self-end rounded-[10px] p-0 text-[19px] font-normal leading-none text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-                >
-                  +
-                </button>
+            <div className="flex shrink-0 items-end gap-0.5 pt-[5px] pr-2 pb-0 pl-1.5">
+              <div className="min-w-0 flex-1 self-end">
+                <TabBar state={state} onActivate={onActivate} onClose={onClose} />
               </div>
-            ) : null}
+              <button
+                type="button"
+                title="New tab"
+                aria-label="New tab"
+                onClick={() =>
+                  // The `+` duplicates the active tab's kind — but never a singleton
+                  // (Settings or create-table). When one of those is active, fall back
+                  // to a document kind so `+` never mints a second singleton tab.
+                  onOpen(
+                    activeTab && activeTab.kind !== "settings" && activeTab.kind !== "create-table"
+                      ? activeTab.kind
+                      : LAUNCHER_KINDS[0]!,
+                  )
+                }
+                className="mx-[2px] grid h-9 w-[34px] shrink-0 place-items-center self-end rounded-[10px] p-0 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+              >
+                <svg aria-hidden viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" className="h-[18px] w-[18px]">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
+            </div>
 
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-t-xl bg-card">
               <div className="min-h-0 flex-1 overflow-auto">
-                {createOpen ? (
-                  <CreateTablePanel
-                    schemas={schemas}
-                    onCreated={onTableCreated}
-                    onClose={() => setCreateOpen(false)}
-                  />
-                ) : (
-                  <TabContent
-                    tab={activeTab}
-                    onCloseTab={onClose}
-                    primaryKeys={primaryKeys}
-                    indexes={indexes}
-                    tables={allTables}
-                    queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
-                    onQueryDraftChange={(sql) => {
-                      if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
-                    }}
-                    chatState={activeTab !== null ? chatStates.get(activeTab.id) : undefined}
-                    onChatStateChange={(next) => {
-                      if (activeTab !== null) onChatStateChange(activeTab.id, next);
-                    }}
-                    lastProvider={lastProvider}
-                    reportState={activeTab !== null ? reportStates.get(activeTab.id) : undefined}
-                    onReportStateChange={(next) => {
-                      if (activeTab !== null) onReportStateChange(activeTab.id, next);
-                    }}
-                    erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
-                    onErdLayoutChange={onErdLayoutChange}
-                  />
-                )}
+                <TabContent
+                  tab={activeTab}
+                  onCloseTab={onClose}
+                  primaryKeys={primaryKeys}
+                  indexes={indexes}
+                  tables={allTables}
+                  schemas={schemas}
+                  onTableCreated={onTableCreated}
+                  onRegistryChanged={(repointed) => {
+                    // Both setters land in ONE commit, so the tree's revision-keyed effect
+                    // never sees a bump paired with the previous mutation's id.
+                    setRepointedConnectionId(repointed ?? null);
+                    setRegistryRevision((n) => n + 1);
+                  }}
+                  queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
+                  onQueryDraftChange={(sql) => {
+                    if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);
+                  }}
+                  chatState={activeTab !== null ? chatStates.get(activeTab.id) : undefined}
+                  onChatStateChange={(next) => {
+                    if (activeTab !== null) onChatStateChange(activeTab.id, next);
+                  }}
+                  lastProvider={lastProvider}
+                  reportState={activeTab !== null ? reportStates.get(activeTab.id) : undefined}
+                  onReportStateChange={(next) => {
+                    if (activeTab !== null) onReportStateChange(activeTab.id, next);
+                  }}
+                  onOpenReport={onOpenReport}
+                  erdLayout={activeTab !== null ? erdLayouts[String(activeTab.id)] : undefined}
+                  onErdLayoutChange={onErdLayoutChange}
+                  connections={connections}
+                  hasBootTarget={hasBootTarget}
+                  onReassignConnection={onReassignConnection}
+                />
               </div>
 
               {/* Neutral status bar (prototype `.statusbar`): the proven connection
@@ -405,7 +531,7 @@ export function Workspace({
                   type="button"
                   onClick={onStop}
                   disabled={stopping}
-                  className="ml-auto rounded-md px-2.5 py-1 font-mono text-[11px] text-red-400 transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
+                  className="ml-auto rounded-md px-2.5 py-1 font-mono text-[11px] text-err transition-colors hover:bg-err-soft disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-transparent"
                 >
                   {stopping ? "Stopping…" : "Stop"}
                 </button>

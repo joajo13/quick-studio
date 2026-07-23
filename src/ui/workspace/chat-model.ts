@@ -17,6 +17,7 @@ import type {
   FrozenData,
   ProviderKind,
 } from "../../shared/contract.ts";
+import type { ReportSpec } from "../../shared/report-spec.ts";
 
 /**
  * One entry in the message log. An assistant answer carries its schema-only
@@ -28,6 +29,11 @@ import type {
  * `reasoning` (Story 5.4) is the model's accumulated thinking channel — rendered in a
  * visually distinct secondary treatment, or `null` when the provider emitted none (an
  * empty channel is never an error). It is session-only, never persisted to disk.
+ *
+ * `report` (Story 9.7) is the Core-validated `ReportSpec` extracted from a ` ```report `
+ * fence, or `null` when the answer carried none / it failed `parseReportSpec`. The UI
+ * never derives it itself (AR-3 mirrored for reports) — it is whatever Core's `done`
+ * chunk carried, rendered as a single "open in report tab" action.
  */
 export type ChatMessage =
   | { readonly role: "user"; readonly text: string }
@@ -36,6 +42,7 @@ export type ChatMessage =
       readonly text: string;
       readonly query: string | null;
       readonly reasoning: string | null;
+      readonly report: ReportSpec | null;
       readonly context: ChatContextSummary;
     };
 
@@ -112,8 +119,9 @@ export function appendUserMessage(state: ChatState, text: string): ChatState {
 
 /**
  * Append an assistant answer (with its extracted `query`, its streamed `reasoning`,
- * and the schema-only context) to the log. `reasoning` is `null` when the provider
- * emitted no thinking channel.
+ * its Core-validated `report`, and the schema-only context) to the log. `reasoning`
+ * is `null` when the provider emitted no thinking channel; `report` is `null` when
+ * the answer carried no valid ` ```report ` spec.
  */
 export function appendAnswer(
   state: ChatState,
@@ -121,10 +129,11 @@ export function appendAnswer(
   context: ChatContextSummary,
   query: string | null,
   reasoning: string | null,
+  report: ReportSpec | null,
 ): ChatState {
   return {
     ...state,
-    messages: [...state.messages, { role: "assistant", text, query, reasoning, context }],
+    messages: [...state.messages, { role: "assistant", text, query, reasoning, report, context }],
   };
 }
 

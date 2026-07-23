@@ -10,10 +10,22 @@
  * native throw escape.
  *
  * Contract (the signal Story 2.3's passphrase fallback keys off):
- *  - A missing entry is a first-class `not-found` result, never a throw.
+ *  - A missing entry is a first-class `not-found` result, signalled STRUCTURALLY,
+ *    never a throw and never by parsing message text. The observed
+ *    `@napi-rs/keyring` contract is that a miss is a null-ish return, not an
+ *    exception: `Entry.getPassword()` returns `null` for a missing credential and
+ *    `Entry.deletePassword()` returns `false`. So `not-found` is precisely the
+ *    `null`/`false` return — locale-independent and reword-proof (DW-10).
  *  - An unreachable backend (e.g. headless Linux with no Secret Service / D-Bus)
  *    is a first-class `unavailable` result, never a throw and NEVER a silent
- *    plaintext fallback — the caller decides what to do (Story 2.3).
+ *    plaintext fallback — the caller decides what to do (Story 2.3). Because a miss
+ *    surfaces as a null-ish return (above), a *thrown* native error is never a
+ *    missing entry — it is always a genuine backend failure, so EVERY throw
+ *    classifies as `unavailable`. `@napi-rs/keyring` flattens every native keyring
+ *    kind (NoEntry, PlatformFailure, …) into a generic `Error` with
+ *    `code:"GenericFailure"` — the kind lives only inside the message Display, so
+ *    there are no typed error codes to key off at the JS boundary and no reason to
+ *    inspect the message: any throw is `unavailable`, the fail-safe direction.
  *  - A caller programming error — an empty (`""`) or blank (whitespace-only)
  *    `service` or `account` — is a first-class `invalid-argument` result,
  *    DISTINCT from `unavailable`. It is a surfaced bug, NOT a missing-backend
@@ -63,20 +75,6 @@ export type KeychainOutcome =
   | KeychainGetResult["outcome"]
   | KeychainDeleteResult["outcome"];
 
-/**
- * Substrings that identify a "no such credential" native error, in case a
- * platform's binding throws NoEntry instead of returning a null-ish value
- * (Linux Secret Service returns null on miss; other backends may differ). These
- * are matched case-insensitively against the thrown error's message. Anything
- * that does NOT match is treated as a backend-unavailable condition.
- */
-const NOT_FOUND_MARKERS: ReadonlyArray<string> = [
-  "no matching entry",
-  "no entry",
-  "not found",
-  "element not found", // Windows Credential Manager wording
-];
-
 /** Cap on a `detail` string so a verbose native/D-Bus error can't bloat a caller's log. */
 const MAX_DETAIL_LEN = 200;
 
@@ -114,25 +112,9 @@ export function formatErrorDetail(err: unknown, secret?: string): string {
 }
 
 /**
- * True when a thrown native error means "no such credential" rather than "backend
- * down". Pure. NOTE (Story 2.1 / AR-20): this English substring heuristic is a
- * provisional hedge for backends that throw NoEntry (e.g. Windows Credential
- * Manager) instead of returning null. It is locale-fragile and must be replaced
- * with typed error codes once real per-platform error shapes are observed in CI /
- * Story 2.2 — see the decision record and deferred-work ledger. The classifier
- * fails safe: anything not recognized as not-found is treated as `unavailable`,
- * so an unknown error triggers the passphrase fallback rather than silently
- * masquerading as an empty entry.
- */
-export function isNotFoundError(err: unknown): boolean {
-  const msg = formatErrorDetail(err).toLowerCase();
-  return NOT_FOUND_MARKERS.some((m) => msg.includes(m));
-}
-
-/**
- * Validate the caller-supplied identifiers. Pure and deterministic (no locale
- * heuristics, unlike {@link isNotFoundError}): returns a secret-free reason
- * string naming the offending identifier when `service` or `account` is not a
+ * Validate the caller-supplied identifiers. Pure and deterministic: returns a
+ * secret-free reason string naming the offending identifier when `service` or
+ * `account` is not a
  * string (e.g. `null`/`undefined` from an untyped/IPC/JSON caller) or is empty
  * (`""`) or blank (whitespace-only, i.e. `.trim().length === 0`), else `null`.
  * The non-string check runs FIRST so the subsequent `.trim()` can never throw —
@@ -187,9 +169,17 @@ export function setSecret(
 
 /**
  * Retrieve the value stored under `(service, account)`. Returns `found` with the
- * value, `not-found` if there is no such entry (a null-ish, non-error outcome),
- * `invalid-argument` if `service`/`account` is missing/empty/blank, or
- * `unavailable` if the backend could not be reached. Never throws.
+ * value, `not-found` if there is no such entry, `invalid-argument` if
+ * `service`/`account` is missing/empty/blank, or `unavailable` if the backend
+ * could not be reached. Never throws.
+ *
+ * Classification is STRUCTURAL, never message-text based: `@napi-rs/keyring`'s
+ * `Entry.getPassword()` returns `null` for a missing credential (it does not throw
+ * NoEntry), so `not-found` is exactly the null-ish return. Every throw is therefore
+ * a genuine backend failure — the binding flattens all native kinds into a generic
+ * `Error{code:"GenericFailure"}`, so there is nothing typed to distinguish and no
+ * reason to parse the Display — and classifies as `unavailable`, the fail-safe
+ * direction that triggers Story 2.3's passphrase fallback.
  */
 export function getSecret(service: string, account: string): KeychainGetResult {
   const bad = validateIdentifiers(service, account);
@@ -198,11 +188,9 @@ export function getSecret(service: string, account: string): KeychainGetResult {
   try {
     value = openEntry(service, account).getPassword();
   } catch (err) {
-    // Some bindings throw NoEntry instead of returning null; treat that as a
-    // clean not-found, everything else as an unreachable backend.
-    if (isNotFoundError(err)) {
-      return { outcome: "not-found" };
-    }
+    // A miss is the `null` return (below), never a throw — so any throw is a
+    // genuine backend failure. Classify structurally as `unavailable`; no
+    // message-text heuristic is consulted.
     return { outcome: "unavailable", detail: formatErrorDetail(err) };
   }
   if (value === null || value === undefined) {
@@ -217,6 +205,12 @@ export function getSecret(service: string, account: string): KeychainGetResult {
  * `invalid-argument` if `service`/`account` is missing/empty/blank, or
  * `unavailable` if the backend could not be reached. Never throws — safe to call
  * unconditionally as a cleanup step.
+ *
+ * Classification is STRUCTURAL, never message-text based: `@napi-rs/keyring`'s
+ * `Entry.deletePassword()` returns `false` when there was nothing to remove (it
+ * does not throw NoEntry), so `not-found` is exactly the `false` return. Every
+ * throw is a genuine backend failure — the binding flattens all native kinds into
+ * a generic `Error{code:"GenericFailure"}` — and classifies as `unavailable`.
  */
 export function deleteSecret(
   service: string,
@@ -228,9 +222,8 @@ export function deleteSecret(
     const removed = openEntry(service, account).deletePassword();
     return removed ? { outcome: "deleted" } : { outcome: "not-found" };
   } catch (err) {
-    if (isNotFoundError(err)) {
-      return { outcome: "not-found" };
-    }
+    // A "nothing to remove" is the `false` return (above), never a throw — so any
+    // throw is a genuine backend failure. Classify structurally as `unavailable`.
     return { outcome: "unavailable", detail: formatErrorDetail(err) };
   }
 }

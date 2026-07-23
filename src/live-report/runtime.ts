@@ -209,9 +209,16 @@ export type BlockSlot = {
 export type LiveHost = {
   /** Show a top-level status/fallback (trusted constant HTML). */
   readonly setStatus: (html: string) => void;
-  /** Render the connection picker; `onPick(id|null)` re-queries all blocks against the pick. */
+  /**
+   * Render the connection picker — REPLACEABLE: this MAY be re-invoked on every run (initial
+   * load, picker pick, Refresh) and each call must REPLACE any prior picker rather than stack a
+   * new one. `selectedId` is the current pick (`null` = the Default/launch connection) and the
+   * rebuilt picker MUST visually reflect it. `onPick(id|null)` re-queries all blocks against the
+   * new pick.
+   */
   readonly renderPicker: (
     connections: ReadonlyArray<ConnectionSummary>,
+    selectedId: string | null,
     onPick: (connectionId: string | null) => void,
   ) => void;
   /** Render the Refresh control; `onRefresh()` re-queries all blocks against the current pick. */
@@ -305,9 +312,13 @@ export async function loadConnections(deps: LiveDeps): Promise<ReadonlyArray<Con
  * Drive a validated {@link LiveReportDoc} into `host` over the injected `deps`:
  *  - no token → the inert {@link NEEDS_QS_HTML} state; prose/empty blocks still render (no fetch),
  *    query blocks show the same inert note, and NO `/rpc` fetch is attempted;
- *  - else fetch `connections.list` (failure → {@link CANNOT_REACH_HTML}), render the picker
- *    (default `null` + each summary) + a Refresh control, and run every query block against the
- *    current pick, each block isolated; empty report → an affordance.
+ *  - else build the ordered block slots and wire Refresh ONCE, then run `runAll` — the single
+ *    re-entrant driver. Every run (initial, picker pick, Refresh) re-lists `connections.list`
+ *    under a run-generation guard: on success it clears the {@link CANNOT_REACH_HTML} banner
+ *    (only if one was shown) and rebuilds the picker to reflect the fresh connections and the
+ *    current pick, then re-queries every query block against that pick; on failure it (re)shows
+ *    the banner, rebuilds a Default-only picker, and surfaces the per-block
+ *    {@link CANNOT_REACH_BLOCK_NOTE} without issuing `execute`. Empty report → an affordance.
  * Pure over its injected host + deps.
  */
 export async function runLiveReport(doc: LiveReportDoc, deps: LiveDeps, host: LiveHost): Promise<void> {
@@ -338,18 +349,13 @@ export async function runLiveReport(doc: LiveReportDoc, deps: LiveDeps, host: Li
 
   // A `connections.list` failure no longer hides the whole document behind a wall (Patch C):
   // prose/empty blocks STILL render, a top-level "cannot reach" note sits above them, and each
-  // query block surfaces its own inline error. Fall through with `connections = []` so the
-  // picker shows Default only and Refresh can retry once the Core is back.
-  const loaded = await loadConnections(deps);
-  const connectionsFailed = loaded === null;
-  const connections = loaded ?? [];
-  if (connectionsFailed) host.setStatus(CANNOT_REACH_HTML);
-
+  // query block surfaces its own inline error. The picker shows Default only and Refresh (via
+  // `runAll`) can retry once the Core is back.
   if (doc.blocks.length === 0) {
     host.addBlock().appendNote(EMPTY_REPORT_NOTE);
   }
 
-  // Build the ordered block slots once; prose/empty render immediately, query blocks re-query.
+  // Build the ordered block slots ONCE; prose/empty render immediately, query blocks re-query.
   const querySlots: Array<{ readonly block: LiveQueryBlock; readonly slot: BlockSlot }> = [];
   for (const block of doc.blocks) {
     const slot = host.addBlock();
@@ -369,19 +375,70 @@ export async function runLiveReport(doc: LiveReportDoc, deps: LiveDeps, host: Li
     }
   }
 
-  // The current viewer pick (default `null` = the boot/launch connection).
+  // The current viewer pick (default `null` = the boot/launch connection). Preserved across
+  // reloads — a FAILED reload (DW-52) NEVER resets it, so a down→up cycle returns to the same
+  // pick; a SUCCESSFUL reload reconciles it against the fresh list (a pick that vanished falls
+  // back to Default rather than becoming a phantom id — see `runAll`).
   let current: string | null = null;
+  // Whether the last run showed the top-level "cannot reach" banner, so a recovery clears ONLY a
+  // banner that was actually shown (never a spurious empty `setStatus` on an otherwise-normal run).
+  let statusFailed = false;
 
-  // Run-generation guard (Patch B): only the LATEST run may render into a slot. Two overlapping
-  // re-queries (rapid picker changes / Refresh) each capture a generation; a superseded run's
-  // appends are dropped by `runBlock`'s `isCurrent` gate, so blocks never double-append or land a
-  // connection the picker no longer shows. Each block stays isolated (a throw in one never drops
-  // the others — `runBlock` is internally guarded, and this belt-and-suspenders catch covers any
-  // surprise), and the catch is itself gated so a superseded throw appends nothing.
+  // The picker/Refresh callback: adopt the pick and re-run. Hoisted so the (replaceable) picker
+  // is rebuilt with the SAME callback on every run (failure and success paths alike).
+  const onPick = (pick: string | null): void => {
+    current = pick;
+    void runAll();
+  };
+
+  // Run-generation guard (Patch B + DW-52): `runAll` is the single re-entrant driver, wired to
+  // both the picker and Refresh AND kicked off once for the initial load. Every run re-lists
+  // `connections.list`, so a recovered Core is picked up on the next user-initiated run (a Refresh
+  // or a picker change — there is NO auto-poll) without a full page reload. Only the LATEST run
+  // may mutate the top-level status, the picker, or any block slot: each run captures a generation
+  // and gates every post-`await` mutation with `isCurrent()`, so a superseded run (rapid picker
+  // changes / Refresh) mutates nothing. The picker rebuild and the failed-path block loop are
+  // synchronous after the sole `await loadConnections` + `isCurrent()` check, so no newer run can
+  // interleave between them.
   let latestRun = 0;
   const runAll = async (): Promise<void> => {
     const myRun = ++latestRun;
     const isCurrent = (): boolean => myRun === latestRun;
+
+    const loaded = await loadConnections(deps);
+    if (!isCurrent()) return; // superseded — a newer run owns the UI; append/mutate nothing.
+
+    // Core unreachable: (re)show the banner and rebuild a Default-only picker. The pick is kept
+    // INTERNALLY (never reset here) so a down→up cycle returns to it; the picker shows Default
+    // because the pick's option is absent. Never re-query a Core we know is down — clear each
+    // query slot first (so a previously-rendered table is not left stale beneath the note), then
+    // surface the inline "cannot reach" note. Refresh re-issues `runAll` once the Core is back.
+    if (loaded === null) {
+      host.setStatus(CANNOT_REACH_HTML);
+      statusFailed = true;
+      host.renderPicker([], current, onPick);
+      for (const { slot } of querySlots) {
+        slot.clear();
+        slot.appendError(CANNOT_REACH_BLOCK_NOTE);
+      }
+      return;
+    }
+
+    // Recovered / healthy. Clear the banner that a prior failed run had shown. Reconcile the pick
+    // against the fresh list: a pick that is no longer offered (a connection deleted while the
+    // report was open) falls back to Default, so `execute` never targets a phantom id and the
+    // rebuilt picker's selection matches what actually runs.
+    if (statusFailed) {
+      host.setStatus("");
+      statusFailed = false;
+    }
+    if (current !== null && !loaded.some((c) => c.id === current)) current = null;
+    host.renderPicker(loaded, current, onPick);
+
+    // Re-query every query block against the current pick, each block isolated (a throw in one
+    // never drops the others — `runBlock` is internally guarded, and this belt-and-suspenders
+    // catch covers any surprise), and the catch is itself gated so a superseded throw appends
+    // nothing.
     await Promise.all(
       querySlots.map(async ({ block, slot }) => {
         try {
@@ -393,23 +450,9 @@ export async function runLiveReport(doc: LiveReportDoc, deps: LiveDeps, host: Li
     );
   };
 
-  host.renderPicker(connections, (pick) => {
-    current = pick;
-    void runAll();
-  });
   host.renderRefresh(() => {
     void runAll();
   });
-
-  // Core unreachable (Patch C): the prose/empty blocks above already rendered; give each query
-  // block its own inline "cannot reach" error rather than re-querying a Core we know is down.
-  // Refresh re-issues `runAll`, which retries `execute` per block once the Core is back.
-  if (connectionsFailed) {
-    for (const { slot } of querySlots) {
-      slot.appendError(CANNOT_REACH_BLOCK_NOTE);
-    }
-    return;
-  }
 
   await runAll();
 }
@@ -439,24 +482,26 @@ export async function mountLiveReport(rawJson: string | null, deps: LiveDeps, ho
  * DOM seam (never run under bun test)
  * ------------------------------------------------------------------ */
 
-/** Wire a real document + `window.__QS_TOKEN__` + same-origin fetch, then mount. */
-export function bootstrap(doc: Document, win: Window & typeof globalThis): void {
-  const mount = doc.getElementById("__qs_report");
-  if (mount === null) return;
-
-  // A top-level controls bar (picker + refresh), prepended so it stays above the block list.
-  const controls = doc.createElement("div");
-  controls.className = "qs-controls";
-  const status = doc.createElement("p");
-  status.className = "qs-status";
-  mount.appendChild(controls);
-  mount.appendChild(status);
-
-  const host: LiveHost = {
+/**
+ * Build the real-DOM {@link LiveHost} over the pre-created controls/status/mount elements.
+ * Extracted from {@link bootstrap} so the replaceable-picker contract (DW-52) is testable over a
+ * minimal fake `Document` without jsdom — `renderPicker` REPLACES (never stacks) the prior picker
+ * and reflects the current pick, falling back to Default when the pick has no matching option.
+ */
+export function makeDomHost(
+  doc: Document,
+  mount: HTMLElement,
+  controls: HTMLElement,
+  pickerSlot: HTMLElement,
+  status: HTMLElement,
+): LiveHost {
+  return {
     setStatus: (html) => {
       status.innerHTML = html;
     },
-    renderPicker: (connections, onPick) => {
+    renderPicker: (connections, selectedId, onPick) => {
+      // Replace (never stack): a re-invocation clears the prior picker before rebuilding.
+      pickerSlot.innerHTML = "";
       const label = doc.createElement("label");
       label.textContent = "connection ";
       const select = doc.createElement("select");
@@ -471,11 +516,16 @@ export function bootstrap(doc: Document, win: Window & typeof globalThis): void 
         opt.textContent = conn.name;
         select.appendChild(opt);
       }
+      // Reflect the current pick AFTER the options are built. Setting `value` to an id with no
+      // matching `<option>` leaves `selectedIndex` at -1 (a BLANK control), so fall back to the
+      // Default option — the picker is never blank and its selection matches what actually runs.
+      select.value = selectedId ?? "";
+      if (select.selectedIndex < 0) select.value = "";
       select.addEventListener("change", () => {
         onPick(select.value === "" ? null : select.value);
       });
       label.appendChild(select);
-      controls.appendChild(label);
+      pickerSlot.appendChild(label);
     },
     renderRefresh: (onRefresh) => {
       const button = doc.createElement("button");
@@ -517,6 +567,27 @@ export function bootstrap(doc: Document, win: Window & typeof globalThis): void 
       };
     },
   };
+}
+
+/** Wire a real document + `window.__QS_TOKEN__` + same-origin fetch, then mount. */
+export function bootstrap(doc: Document, win: Window & typeof globalThis): void {
+  const mount = doc.getElementById("__qs_report");
+  if (mount === null) return;
+
+  // A top-level controls bar (picker + refresh), prepended so it stays above the block list.
+  const controls = doc.createElement("div");
+  controls.className = "qs-controls";
+  // A dedicated picker slot created FIRST so the (replaceable) picker always precedes Refresh,
+  // even though `renderPicker` may be re-invoked after Refresh is already wired (DW-52).
+  const pickerSlot = doc.createElement("span");
+  pickerSlot.className = "qs-picker-slot";
+  controls.appendChild(pickerSlot);
+  const status = doc.createElement("p");
+  status.className = "qs-status";
+  mount.appendChild(controls);
+  mount.appendChild(status);
+
+  const host: LiveHost = makeDomHost(doc, mount, controls, pickerSlot, status);
 
   const rawJson = doc.getElementById("__qs_livereport")?.textContent ?? null;
   const token = typeof win.__QS_TOKEN__ === "string" ? win.__QS_TOKEN__ : null;

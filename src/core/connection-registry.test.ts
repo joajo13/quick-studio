@@ -510,3 +510,187 @@ describe("connection-registry — close (DW-14)", () => {
     expect(fake.closeCalls()).toBe(0);
   });
 });
+
+describe("connection-registry — optional pinned schema (Story 10.2)", () => {
+  test("add without a schema: the summary carries NO `schema` key at all", () => {
+    const dir = makeTempDir();
+    const reg = persistentRegistry(dir);
+    const added = reg.add({ name: "unpinned", url: "postgres://u:p@h/db" });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    // The back-compat invariant: an unpinned connection's summary shape is
+    // byte-identical to pre-10.2 — a `schema: undefined` key would break it.
+    expect(Object.keys(added.value).sort()).toEqual(["engine", "host", "id", "name"]);
+  });
+
+  test("add with a schema: trimmed, persisted, and echoed on the summary", () => {
+    const dir = makeTempDir();
+    const reg1 = persistentRegistry(dir);
+    const added = reg1.add({ name: "pinned", url: "postgres://u:p@h/db", schema: "  reporting  " });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(added.value.schema).toBe("reporting");
+
+    // Survives a relaunch over the same app dir + key.
+    const list = persistentRegistry(dir).list();
+    expect(list.ok).toBe(true);
+    if (list.ok) expect(list.value[0]?.schema).toBe("reporting");
+  });
+
+  test("add with a blank/whitespace schema is treated as unset (no key stored)", () => {
+    const dir = makeTempDir();
+    const reg = persistentRegistry(dir);
+    const added = reg.add({ name: "blank", url: "postgres://u:p@h/db", schema: "   " });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(Object.keys(added.value).sort()).toEqual(["engine", "host", "id", "name"]);
+  });
+
+  test("add with a non-string schema → bad_request (field=schema)", () => {
+    const dir = makeTempDir();
+    const reg = persistentRegistry(dir);
+    const added = reg.add({
+      name: "bad",
+      url: "postgres://u:p@h/db",
+      schema: 7 as unknown as string,
+    });
+    expect(added.ok).toBe(false);
+    if (added.ok) return;
+    expect(added.code).toBe("bad_request");
+    expect(added.detail).toBe("field=schema");
+  });
+
+  test("edit sets a schema on a previously unpinned connection", () => {
+    const dir = makeTempDir();
+    const reg = persistentRegistry(dir);
+    const added = reg.add({ name: "svc", url: "postgres://u:p@h/db" });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+
+    const edited = reg.edit({ id: added.value.id, schema: "reporting" });
+    expect(edited.ok).toBe(true);
+    if (!edited.ok) return;
+    expect(edited.value.schema).toBe("reporting");
+    expect(edited.value.name).toBe("svc"); // name + url untouched
+    expect(edited.value.host).toBe("h");
+  });
+
+  test("edit with a BLANK schema CLEARS the pin (R1) — the key is dropped entirely", () => {
+    const dir = makeTempDir();
+    const reg1 = persistentRegistry(dir);
+    const added = reg1.add({ name: "svc", url: "postgres://u:p@h/db", schema: "reporting" });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+
+    const cleared = reg1.edit({ id: added.value.id, schema: "  " });
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(Object.keys(cleared.value).sort()).toEqual(["engine", "host", "id", "name"]);
+    // Persisted, not just reported: the reopened store has no `schema` either.
+    const list = persistentRegistry(dir).list();
+    expect(list.ok).toBe(true);
+    if (list.ok) expect(list.value[0]?.schema).toBeUndefined();
+  });
+
+  test("edit omitting `schema` KEEPS the existing pin (absent ≠ blank)", () => {
+    const dir = makeTempDir();
+    const reg = persistentRegistry(dir);
+    const added = reg.add({ name: "svc", url: "postgres://u:p@h/db", schema: "reporting" });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+
+    const renamed = reg.edit({ id: added.value.id, name: "renamed" });
+    expect(renamed.ok).toBe(true);
+    if (renamed.ok) expect(renamed.value.schema).toBe("reporting");
+  });
+
+  test("a schema-ONLY edit actually writes (it is not swallowed by the empty-patch fast path)", () => {
+    const fake = fakeStore([{ id: "c1", name: "svc", url: "postgres://u:p@h/db" }]);
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => ({ outcome: "opened", store: fake.store }),
+    });
+    const edited = reg.edit({ id: "c1", schema: "reporting" });
+    expect(edited.ok).toBe(true);
+    expect(fake.saveCalls()).toBe(1);
+    // A truly empty patch still short-circuits without a write.
+    expect(reg.edit({ id: "c1" }).ok).toBe(true);
+    expect(fake.saveCalls()).toBe(1);
+  });
+
+  test("a blank schema on an already-unpinned record is a no-write no-op", () => {
+    const fake = fakeStore([{ id: "c1", name: "svc", url: "postgres://u:p@h/db" }]);
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => ({ outcome: "opened", store: fake.store }),
+    });
+    // Clearing a pin that is not there rebuilds a byte-identical record — no reason to
+    // re-encrypt and flush the store. (Blank on a PINNED record still writes; covered above.)
+    const edited = reg.edit({ id: "c1", schema: "   " });
+    expect(edited.ok).toBe(true);
+    if (edited.ok) expect(edited.value.schema).toBeUndefined();
+    expect(fake.saveCalls()).toBe(0);
+  });
+
+  test("edit with a non-string schema → bad_request, no write", () => {
+    const fake = fakeStore([{ id: "c1", name: "svc", url: "postgres://u:p@h/db" }]);
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => ({ outcome: "opened", store: fake.store }),
+    });
+    const edited = reg.edit({ id: "c1", schema: 7 as unknown as string });
+    expect(edited.ok).toBe(false);
+    if (!edited.ok) expect(edited.code).toBe("bad_request");
+    expect(fake.saveCalls()).toBe(0);
+  });
+
+  test("getStoredUrl carries the pinned schema (and omits it when unpinned)", () => {
+    const fake = fakeStore([
+      { id: "pinned", name: "a", url: "postgres://u:p@h/a", schema: "reporting" },
+      { id: "plain", name: "b", url: "postgres://u:p@h/b" },
+    ]);
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => ({ outcome: "opened", store: fake.store }),
+    });
+    const pinned = reg.getStoredUrl("pinned");
+    expect(pinned.kind).toBe("found");
+    if (pinned.kind === "found") expect(pinned.schema).toBe("reporting");
+    const plain = reg.getStoredUrl("plain");
+    expect(plain.kind).toBe("found");
+    if (plain.kind === "found") expect(plain.schema).toBeUndefined();
+  });
+
+  // `list` is the ONLY path that feeds `ConnectionSummary.schema` to the UI, and the
+  // whole "blank clears the pin" asymmetry (R1) rests on the edit form being able to
+  // PRE-FILL from it. If `list` ever dropped the key, every edit save would read as a
+  // deliberate clear and silently unpin every connection — so it is pinned here, not
+  // just on the `add`/`edit` replies.
+  test("list carries a pinned schema, and an unpinned row keeps the pre-10.2 key set", () => {
+    const fake = fakeStore([
+      { id: "pinned", name: "a", url: "postgres://u:p@h/a", schema: "reporting" },
+      { id: "plain", name: "b", url: "postgres://u:p@h/b" },
+    ]);
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => ({ outcome: "opened", store: fake.store }),
+    });
+    const list = reg.list();
+    expect(list.ok).toBe(true);
+    if (!list.ok) return;
+    expect(list.value[0]?.schema).toBe("reporting");
+    expect(Object.keys(list.value[1] ?? {}).sort()).toEqual(["engine", "host", "id", "name"]);
+  });
+
+  test("a malformed-url record still degrades safely WITH its schema (safeSummary arm)", () => {
+    const fake = fakeStore([{ id: "c1", name: "legacy", url: "not a url", schema: "reporting" }]);
+    const reg = createConnectionRegistry({
+      openStore: (): OpenResult => ({ outcome: "opened", store: fake.store }),
+    });
+    const list = reg.list();
+    expect(list.ok).toBe(true);
+    if (!list.ok) return;
+    expect(list.value[0]).toEqual({
+      id: "c1",
+      name: "legacy",
+      host: "",
+      engine: "",
+      schema: "reporting",
+    });
+  });
+});

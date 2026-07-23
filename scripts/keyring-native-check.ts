@@ -63,6 +63,26 @@ try {
     process.exit(1);
   }
 
+  if (REQUIRE_ROUNDTRIP) {
+    // DW-10 per-platform proof: on a leg with a real backend (round-trip just
+    // succeeded), a miss must surface as a structural `not-found` (the binding's
+    // null return), NOT a thrown error routed to `unavailable`. A fresh account
+    // that was never stored is a guaranteed miss. If this platform's keychain
+    // throws on a miss instead, the null-vs-throw contract DW-10 relies on is
+    // violated — fail the leg loudly here.
+    const neverStored = `absent-${crypto.randomUUID()}`;
+    const miss = getSecret(SERVICE, neverStored);
+    console.log(`native-check: getSecret(never-stored) -> ${miss.outcome}`);
+    if (miss.outcome !== "not-found") {
+      console.error(
+        `native-check: FAILED — a never-stored account returned "${miss.outcome}", ` +
+          `expected "not-found". This platform surfaces a miss as a throw, breaking ` +
+          `the DW-10 structural not-found contract.`,
+      );
+      process.exit(1);
+    }
+  }
+
   // The native addon loaded and every call returned a typed result. Whether the
   // platform round-tripped or reported unavailable, the distribution path works.
   console.log("native-check: OK — @napi-rs/keyring loaded from the compiled binary");

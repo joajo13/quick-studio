@@ -34,8 +34,16 @@ import { createPostgresDriver } from "./driver-postgres.ts";
 export type Driver = {
   /** Open and liveness-verify the connection. Rejects with {@link DriverConnectionError}. */
   connect(): Promise<void>;
-  /** Introspect the live connection into the neutral schema shape. */
-  listSchema(): Promise<DatabaseSchema>;
+  /**
+   * Introspect the live connection into the neutral schema shape. `schema` (Story
+   * 10.2) optionally PINS the introspection to a single server-side schema: each
+   * adapter narrows the scope predicate of every introspection query to it, bound as
+   * a query parameter (never spliced into the SQL text), so no metadata is fetched
+   * for out-of-scope tables. OMITTING it preserves the pre-10.2 engine default —
+   * Postgres every non-`pg_*`/`information_schema` schema, MySQL the URL's own
+   * database when it has one, else every non-system schema.
+   */
+  listSchema(schema?: string): Promise<DatabaseSchema>;
   /**
    * Run a row-returning query and yield its rows as ordered arrays plus the
    * ordered column descriptors — the one engine-neutral read seam (Story 3.2).
@@ -101,13 +109,23 @@ export type IntrospectedColumn = {
   readonly column: string;
   readonly dataType: string;
   readonly nullable: boolean;
-  /**
-   * Whether this column participates in the table's primary key (Story 3.2). Each
-   * adapter flags it from the engine's key metadata; {@link assembleSchema} folds
-   * the flagged column names (in column order) into `SchemaTableInfo.primaryKey`.
-   * Optional so pre-3.2 call sites still type-check — absent is treated as `false`.
-   */
-  readonly isPrimaryKey?: boolean;
+};
+
+/**
+ * A single introspected primary-key column, flattened and engine-neutral (DW-31).
+ * Each adapter maps its engine's PK constraint metadata (Postgres/MySQL
+ * `key_column_usage`) into ONE row per (table, PK column), pre-ordered by schema ->
+ * table -> the key's OWN `ordinal_position` (the column's position WITHIN the PK
+ * constraint, not the table ordinal), so {@link assembleSchema} folds them into
+ * `SchemaTableInfo.primaryKey` preserving the key's own column order — mirroring the
+ * {@link IntrospectedForeignKey}/{@link IntrospectedIndex} folds. A composite PK
+ * arrives as several rows for one table, in key order.
+ */
+export type IntrospectedPrimaryKey = {
+  readonly schema: string;
+  readonly table: string;
+  /** One PK column; rows arrive in key-position order (the PK's own ordinal). */
+  readonly column: string;
 };
 
 /**
@@ -154,18 +172,20 @@ export type IntrospectedForeignKey = {
 
 /**
  * Fold a pre-ordered flat list of {@link IntrospectedColumn} (and, optionally,
- * {@link IntrospectedIndex} and {@link IntrospectedForeignKey} rows) into the grouped
- * neutral {@link DatabaseSchema}. Preserves input order for tables, columns, indexes,
- * index columns, and foreign keys (the adapters order by schema/table/ordinal, by
- * index/position, and by constraint/position), so the wire shape mirrors the live
- * database's own ordering. Index and FK rows are grouped by name within their table,
- * exactly as PK columns are folded. Pure.
+ * {@link IntrospectedIndex}, {@link IntrospectedForeignKey}, and
+ * {@link IntrospectedPrimaryKey} rows) into the grouped neutral {@link DatabaseSchema}.
+ * Preserves input order for tables, columns, primary-key columns, indexes, index
+ * columns, and foreign keys (the adapters order by schema/table/ordinal, by the PK's
+ * own key position, by index/position, and by constraint/position), so the wire shape
+ * mirrors the live database's own ordering. Index, FK, and PK rows are grouped within
+ * their table and only DECORATE tables the column query already produced. Pure.
  */
 export function assembleSchema(
   engine: DbEngine,
   columns: readonly IntrospectedColumn[],
   indexes: readonly IntrospectedIndex[] = [],
   foreignKeys: readonly IntrospectedForeignKey[] = [],
+  primaryKeys: readonly IntrospectedPrimaryKey[] = [],
 ): DatabaseSchema {
   const tables: SchemaTableInfo[] = [];
   // Insertion-ordered index from "schema table" to the mutable columns array
@@ -205,10 +225,19 @@ export function assembleSchema(
 
   for (const col of columns) {
     const entry = ensureEntry(col.schema, col.table);
-    // `pk` is the SAME array stored (read-only) on the table; PK column names are
-    // pushed in column order as we fold, so `primaryKey` mirrors the key order.
     entry.cols.push({ name: col.column, dataType: col.dataType, nullable: col.nullable });
-    if (col.isPrimaryKey === true) entry.pk.push(col.column);
+  }
+
+  // Fold PK rows (DW-31): `entry.pk` is the SAME array stored (read-only) on the
+  // table; PK column names are pushed in ARRIVAL order — and the adapters pre-order
+  // the PK rows by the key's OWN `ordinal_position` — so `primaryKey` mirrors the
+  // key's own column order rather than table-column order. Like indexes/FKs, PK rows
+  // only DECORATE tables produced by column introspection: a PK row for a relation the
+  // column query never listed is dropped rather than materializing a phantom table.
+  for (const pk of primaryKeys) {
+    const entry = index.get(`${pk.schema} ${pk.table}`);
+    if (entry === undefined) continue;
+    entry.pk.push(pk.column);
   }
 
   // Fold index rows the same way: grouped by index name within the table, columns
@@ -304,6 +333,10 @@ const NEUTRAL_MESSAGE: Readonly<Record<ConnectionFailureKind, string>> = {
   // A supported-scheme URL that `new URL()` cannot parse (bad/out-of-range port,
   // unparseable authority). Structural — the raw URL is never echoed.
   "malformed-url": "the database URL is malformed",
+  // No connection target configured at all (`databaseUrl === null`). A driver never
+  // produces this (it is emitted by `doConnect` before any driver exists); the entry
+  // exists only to keep this map exhaustive over ConnectionFailureKind.
+  "no-target": "no connection target configured",
 };
 
 /**
@@ -425,8 +458,9 @@ export function toDriverConnectionError(err: unknown): DriverConnectionError {
  * `close()` → `Core.stop()` INDEFINITELY and leak the port (DW-20). It is scoped
  * to `listSchema` ONLY and never touches the browse `query`/`queryReadOnly` paths.
  *
- * The value is deliberately GENEROUS (not the 5s teardown bound): the four
- * `information_schema`/system-catalog queries — including the postgres
+ * The value is deliberately GENEROUS (not the 5s teardown bound): the
+ * `information_schema`/system-catalog introspection queries (four on MySQL, five on
+ * postgres — the latter adds a server-version probe) — including the postgres
  * `pg_index`/`pg_constraint` lateral-unnest joins — can legitimately take several
  * seconds on a very large catalog, and a false timeout would misreport a healthy
  * database as unreachable (`network`) with no way to recover. 30s comfortably

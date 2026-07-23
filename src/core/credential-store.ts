@@ -105,6 +105,13 @@ export type StoredConnection = {
   readonly id: string;
   readonly name: string;
   readonly url: string;
+  /**
+   * Optional pinned introspection scope (Story 10.2). Additive: no record written
+   * before 10.2 carries the key, so it round-trips as `undefined` with NO
+   * {@link STORE_SCHEMA_VERSION} bump (a bump would classify every existing v1 store
+   * `schema-unknown` and lose the user's saved connections).
+   */
+  readonly schema?: string;
 };
 
 /** The decrypted on-disk payload shape. */
@@ -225,7 +232,10 @@ function isStorePayload(value: unknown): value is StorePayload {
 /**
  * Type guard: a decrypted `connections` element is a well-formed
  * {@link StoredConnection} (non-null object with string `id`/`name`/`url`). Guards
- * against `records.set(rec.id, ...)` running with `rec.id === undefined`.
+ * against `records.set(rec.id, ...)` running with `rec.id === undefined`. The
+ * optional `schema` (Story 10.2) is accepted as absent OR a string — absent keeps
+ * every pre-10.2 record loading unchanged, and the string check stops a corrupt/
+ * hand-edited store from binding a non-string into the introspection SQL.
  */
 function isStoredConnection(value: unknown): value is StoredConnection {
   if (typeof value !== "object" || value === null) return false;
@@ -233,7 +243,8 @@ function isStoredConnection(value: unknown): value is StoredConnection {
   return (
     typeof v.id === "string" &&
     typeof v.name === "string" &&
-    typeof v.url === "string"
+    typeof v.url === "string" &&
+    (v.schema === undefined || typeof v.schema === "string")
   );
 }
 

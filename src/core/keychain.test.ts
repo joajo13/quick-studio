@@ -20,7 +20,6 @@ import {
   deleteSecret,
   formatErrorDetail,
   getSecret,
-  isNotFoundError,
   setSecret,
   validateIdentifiers,
   type KeychainGetResult,
@@ -68,6 +67,10 @@ describe("keychain wrapper — typed, never-throwing surface", () => {
 });
 
 describe("keychain wrapper — round-trip OR unavailable (both green)", () => {
+  // NOTE (DW-10): not-found is now classified STRUCTURALLY — it is the null/false
+  // return from the binding (`getPassword()` → null, `deletePassword()` → false),
+  // never a message-text heuristic. A thrown native error is always `unavailable`.
+  // These round-trip/never-stored tests exercise that structural path directly.
   test("stores, retrieves, and deletes a secret when the backend is available", () => {
     const set = setSecret(SERVICE, ACCOUNT, SECRET);
 
@@ -112,36 +115,6 @@ describe("keychain wrapper — round-trip OR unavailable (both green)", () => {
     const del = deleteSecret(SERVICE, neverStored);
     expect(["not-found", "unavailable"]).toContain(del.outcome);
   });
-});
-
-describe("error classification — the not-found vs unavailable linchpin", () => {
-  // A thrown NoEntry-style error must map to not-found; anything else must fall
-  // through to unavailable (the fail-safe direction that triggers Story 2.3's
-  // passphrase fallback rather than masquerading as an empty entry). This is the
-  // branch a working backend's null-return path never exercises.
-  const notFoundMessages = [
-    "No matching entry found in secure storage",
-    "no entry",
-    "Element not found.", // Windows Credential Manager wording
-    "NOT FOUND", // case-insensitive
-  ];
-  for (const msg of notFoundMessages) {
-    test(`classifies "${msg}" as not-found`, () => {
-      expect(isNotFoundError(new Error(msg))).toBe(true);
-    });
-  }
-
-  const unavailableMessages = [
-    "Failed to connect to the D-Bus session bus",
-    "The name org.freedesktop.secrets was not provided",
-    "Platform secure storage failure",
-    "", // empty / unknown → must fail safe to unavailable
-  ];
-  for (const msg of unavailableMessages) {
-    test(`classifies "${msg}" as unavailable (not not-found)`, () => {
-      expect(isNotFoundError(new Error(msg))).toBe(false);
-    });
-  }
 });
 
 describe("validateIdentifiers — pure, deterministic identifier guard", () => {

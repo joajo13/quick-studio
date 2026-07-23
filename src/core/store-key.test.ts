@@ -69,14 +69,38 @@ describe("loadOrCreateStoreKey — typed failure arms via injected deps", () => 
     expect(r.outcome).toBe("key-invalid");
   });
 
-  test("an empty found value → key-invalid", () => {
-    const deps: StoreKeyDeps = {
-      getSecret: (): KeychainGetResult => ({ outcome: "found", value: "" }),
-      setSecret: (): KeychainSetResult => ({ outcome: "stored" }),
-      deleteSecret: () => ({ outcome: "not-found" }),
-    };
-    expect(loadOrCreateStoreKey(deps).outcome).toBe("key-invalid");
-  });
+  // An empty stored value can never be a valid AES-256 key, so it is treated as
+  // effectively not-found and routed to the re-create branch (DW-12): a fresh
+  // 32-byte key is generated and stored, NOT a dead-end key-invalid. "Empty" means
+  // decodes to ZERO bytes — the literal "" or any value that base64-decodes to
+  // nothing (whitespace / stray padding) — so all of these self-heal identically.
+  const emptyKeyValues: ReadonlyArray<{ readonly label: string; readonly value: string }> = [
+    { label: 'literal ""', value: "" },
+    { label: "whitespace-only", value: "   " },
+    { label: "stray padding", value: "=" },
+    { label: "newline", value: "\n" },
+  ];
+  for (const c of emptyKeyValues) {
+    test(`a found ${c.label} value → created (empty key re-created, DW-12)`, () => {
+      // Sanity: the value truly decodes to zero bytes (an empty key).
+      expect(Buffer.from(c.value, "base64").length).toBe(0);
+      let stored: string | undefined;
+      const deps: StoreKeyDeps = {
+        getSecret: (): KeychainGetResult => ({ outcome: "found", value: c.value }),
+        setSecret: (_s, _a, value): KeychainSetResult => {
+          stored = value;
+          return { outcome: "stored" };
+        },
+        deleteSecret: () => ({ outcome: "not-found" }),
+      };
+      const r = loadOrCreateStoreKey(deps);
+      expect(r.outcome).toBe("created");
+      if (r.outcome === "created") expect(r.key.length).toBe(KEY_LENGTH_BYTES);
+      // The persisted value is base64 of a fresh 32-byte key, never the empty value.
+      expect(stored).toBeDefined();
+      expect(Buffer.from(stored!, "base64").length).toBe(KEY_LENGTH_BYTES);
+    });
+  }
 
   test("keychain unavailable on get → unavailable (Story 2.3 hook)", () => {
     const deps: StoreKeyDeps = {

@@ -1023,3 +1023,233 @@ So that writing queries feels like a proper SQL editor.
 **Given** a schema/table/column prefix
 **When** I press Ctrl+Space (or continue typing)
 **Then** matching schemas/tables/columns from the loaded schema are suggested and insert on select; ⌘↵ still runs and the guarded-execute RPC behavior is unchanged
+
+## Epic 9: Polish, Chat-Driven Reports & Workspace Ergonomics
+
+> **Post-redesign iteration.** Epics 7–8 brought the UI to the neutral language and restored artifact fidelity; this epic acts on a fresh round of hands-on feedback from running the app. Three visual-polish items (9.1–9.3) were hand-tuned live and committed as the fixed visual direction — the loop implements the remaining feature and structural work (9.4–9.7) against that look rather than guessing it. The neutral prototypes remain the visual source of truth. shadcn/ui + Radix (from 8.1) and the existing neutral tokens are the component baseline; no coral, no new palette.
+
+### Story 9.1: Shell control icons — centered glyphs + a real Settings gear
+
+As a user,
+I want the tab close, new-tab, and Settings controls to look correct,
+So that the chrome reads as finished rather than slightly off.
+
+**Acceptance Criteria:**
+
+**Given** the tab strip and the rail
+**When** I view the close (`×`), new-tab (`+`), and Settings controls
+**Then** the close and new-tab glyphs are centered SVGs (not off-center text characters) and the Settings control shows a real lucide cog — NOT the previous circle-plus-rays mark that read as a sun — on both the rail toggle and the Settings tab's leading icon
+
+> Status: DONE (hand-tuned visual pass, committed). The loop only verifies/regression-tests this; no re-implementation.
+
+### Story 9.2: Report view — shadcn controls across the toolbar and blocks
+
+As a user,
+I want the Report view's controls to match the rest of the app,
+So that it doesn't look like a different, rougher screen.
+
+**Acceptance Criteria:**
+
+**Given** a Report tab
+**When** I view the toolbar (target picker + export/add buttons) and each block's controls (run, table/chart toggle, chart mark/x/y/series pickers, reorder/remove)
+**Then** every native `<select>` is a shadcn `Select` and every button is a shadcn `Button`, consistent in height, spacing, and treatment with the rest of the app — no bespoke mono/ink classes, no browser-default select chrome
+
+> Status: DONE (hand-tuned visual pass, committed). Radix Select forbids empty item values, so `__default__`/`__none__` sentinels map to null/"". The loop only verifies/regression-tests this.
+
+### Story 9.3: Borderless SQL console
+
+As a user,
+I want the query editor to blend into its panel,
+So that the console feels integrated, not boxed-in.
+
+**Acceptance Criteria:**
+
+**Given** the Query tab's SQL editor
+**When** I view it
+**Then** the editor has no border/rounded/background box (`recuadro`) — it sits directly on the card surface and reads as part of the panel — while CodeMirror highlighting, autocomplete, ⌘↵ run, and the guarded-execute RPC are unchanged
+
+> Status: DONE (hand-tuned visual pass, committed). The loop only verifies/regression-tests this.
+
+### Story 9.4: Create Table as a tab
+
+As a user,
+I want New Table to open as a normal tab,
+So that I can move between it and my work without an overlay hiding the tab strip.
+
+**Acceptance Criteria:**
+
+**Given** the rail's Create-table control
+**When** I click it
+**Then** a Create-table surface opens as a normal tab in the strip (routed through the same tab model as every other tab — open/activate/close/persist), NOT as an overlay that hides the tab strip and the new-tab `+`
+
+**Given** the CreateTablePanel's behavior (schema pickers, DDL compose, the create RPC, its confirm/guard flow, testids, and `role="alert"` lines)
+**When** it is relocated into a tab body
+**Then** all of it is preserved verbatim — this is a relocation (overlay → tab), mirroring how Settings moved in Story 8.6, not a rewrite
+
+**Given** the create flow completes (a table is created) or is closed
+**When** it resolves
+**Then** the tab closes (or stays, per the least-surprising choice) through the normal `closeTab` path and the created table is reflected in the schema tree
+
+### Story 9.5: ERD hover — column detail, PK/FK, and relationship highlight
+
+As a user,
+I want hovering a table in the ERD to show something useful,
+So that the diagram is explorable, not just a static picture.
+
+**Acceptance Criteria:**
+
+**Given** the ERD
+**When** I hover a table node
+**Then** its connected relationships/edges are visually highlighted (the related tables stand out from the rest) AND a tooltip/panel shows the table's columns with their types and PK/FK badges — resolving the current "empty" hover feel
+
+**Given** the hover ends
+**When** the pointer leaves the node
+**Then** the highlight and tooltip clear cleanly (no stale highlight if the node set changes mid-hover), and existing ERD pan/zoom/layout-persist behavior is unchanged
+
+### Story 9.6: Persist AI provider API keys across sessions
+
+As a user,
+I want my AI provider API key to be remembered,
+So that I don't have to re-enter it every time.
+
+**Acceptance Criteria:**
+
+**Given** I have entered and saved an AI provider API key in persistent mode
+**When** I close and reopen the app (persistent mode)
+**Then** the provider key is restored from the encrypted provider-key store (never plaintext, never logged) and the provider shows as configured without re-entry — the credential trust boundary (Ring 1, keychain/passphrase-derived key) is preserved
+
+**Given** the Settings AI-providers surface
+**When** a key is already persisted
+**Then** it clearly indicates the provider is configured (masked, never revealing the key) with an explicit remove/replace affordance, and the schema-only exposure note is preserved
+
+### Story 9.7: Generate reports from the chat (open, view, and edit)
+
+As a user,
+I want to ask the chat to build a report and then open, view, and edit it,
+So that I can go from a question to an editable report without hand-assembling blocks.
+
+**Acceptance Criteria:**
+
+**Given** the AI chat with a connected provider
+**When** I ask it to build a report (e.g. "make a report of revenue by country")
+**Then** the chat produces a report the Core assembles into a Report tab (prose + query blocks) that opens for viewing — the Core stays the sole Provider caller and sole risk gate (schema-only context by default; SQL runs through the guarded executor), and no data leaves the machine
+
+**Given** a chat-generated report is open in a Report tab
+**When** I edit it
+**Then** I can re-run its queries and edit its prose/charts with the SAME full editing affordances as a hand-built report (Story 9.2's shadcn controls), and the result exports via the existing snapshot/live-report paths
+
+**Given** the chat cannot produce a valid report (provider error, empty result, malformed spec)
+**When** it fails
+**Then** it degrades with a clear message and opens nothing half-built — never a partial or broken Report tab
+
+---
+
+## Epic 10: Multi-Connection Workspace (DBeaver-style multi-root tree)
+
+**Goal.** Make quick-studio genuinely multi-connection. Today the app is single-connection: the boot connection manager is created once in `startCore` and its URL is a closure-captured `const` (`src/core/connection.ts`), immutable for the whole session — no RPC swaps it. In persistent mode (which boots with no URL) you can *save* connections but not *browse* them: the tree dies with `unsupported_scheme: no connection target configured`. The multi-target pool already exists (`src/core/connection-targets.ts` — a lazy, cached, registry-invalidated manager per id) but only Reports consumes it via `connectionId`; everything else (tableRows, chat, the schema tree) is clamped to the boot manager. This epic propagates `connectionId` from the UI down to the seams that already exist, and turns the schema sidebar into a DBeaver-style multi-root tree (one collapsible root per saved connection, introspected lazily on expand).
+
+**Visual/interaction source of truth:** `_bmad-output/planning-artifacts/epic-10-multi-connection-tree.mockup.html` (interactive — hand-tuned and approved). The mock is authoritative for the tree's states (idle / loading / ready / error per root), the lazy-introspect-on-expand behavior, the "Sin conexión activa" empty-state, and the "conexión no disponible" restored-tab state.
+
+**Hard invariant (AR-12) — must not break.** Only the opaque `connectionId` crosses the loopback RPC. The URL, user, and password stay in Ring 1 (Core) and are resolved there via `connectionTargets.resolve(id)`. The boot manager stays the default target (`id = null`), so ephemeral mode is byte-for-byte unchanged.
+
+**Out of scope:** cross-connection joins/queries — each tab runs against exactly one connection.
+
+### Story 10.1: Classify "no connection target" as its own failure (retire the misleading error)
+
+As a user,
+I want the app to tell me plainly that there is no connection yet (and not throw a scary internal error when I try to use it),
+So that an empty persistent-mode boot reads as "add a connection", not "something broke".
+
+**Acceptance Criteria:**
+
+**Given** a persistent-mode boot with no connection target configured
+**When** the schema tree loads
+**Then** it shows a calm empty-state ("Sin conexión activa" + a hint to add one in Settings), driven by a dedicated `no-target` `ConnectionFailureKind` — NOT the `unsupported_scheme` bucket (whose message wrongly points at the URL scheme) and NOT the red `connection error` alert. The interim message-string match in `SchemaTree.tsx` (shipped live) is replaced by this typed kind.
+
+**Given** no connection target is configured
+**When** an RPC that needs a live connection runs (`execute`, `table.rows`, schema fetch)
+**Then** it returns a typed, neutral "no connection" outcome the UI can render as "sin conexión" — instead of throwing `connection unavailable` and being wrapped as the generic `internal_error: RPC handler failed`. Credential neutrality is preserved (no URL/creds in any message).
+
+### Story 10.2: Optional per-connection schema scope
+
+As a user,
+I want to pin a connection to a specific schema,
+So that a database with thousands of tables only introspects the schema I care about.
+
+**Acceptance Criteria:**
+
+**Given** the saved-connection record and the Settings connection form
+**When** I add or edit a connection
+**Then** I can optionally set a `schema` (a new optional `schema?: string` field on `ConnectionSummary` + the store + the form); omitting it keeps today's behavior (all non-system-catalog tables)
+
+**Given** a connection with a pinned `schema`
+**When** it is introspected
+**Then** `listSchema()` applies the filter IN-QUERY across all four Postgres introspection queries (columns, PKs, indexes, FKs — `driver-postgres.ts`) and their MySQL equivalents (`driver-mysql.ts`), so metadata for thousands of out-of-scope tables is never fetched (no post-fetch trim)
+
+### Story 10.3: Align privileged introspection with visible tables
+
+As a user connecting with a restricted database role,
+I want the tree to show only the tables I can actually read,
+So that I never see phantom tables I have no access to.
+
+**Acceptance Criteria:**
+
+**Given** a Postgres connection whose credentials have limited privileges
+**When** the schema is introspected
+**Then** the index queries (which today hit `pg_class`/`pg_index`, `driver-postgres.ts`) are aligned with `information_schema`'s privilege-filtered visibility, so a restricted user never sees index/table metadata for tables their `information_schema` view already hides — no phantom tables
+
+**Given** credentials insufficient to introspect at all, or a requested schema that does not exist / is not visible
+**When** the connection's root is expanded
+**Then** that root shows the classified error inline (see 10.5) and the failure is engine-neutral (no raw driver text) — the other roots keep working
+
+### Story 10.4: Core resolves every read path by connectionId
+
+As the system,
+I want every read path (schema, table rows, chat) to resolve its target by `connectionId`,
+So that the workspace can browse any saved connection, not just the boot one.
+
+**Acceptance Criteria:**
+
+**Given** the read RPCs `connect` and `table.rows`
+**When** they are called with an optional `connectionId`
+**Then** the Core resolves the live manager via `connectionTargets.resolve(connectionId)` (instead of touching the boot `connectionManager` directly) for `tableRows`, `connect`/`getSchema`, and the chat responder; only the opaque id crosses the loopback (AR-12), the URL is resolved in Core
+
+**Given** an RPC with no `connectionId` (or `connectionId = null`)
+**When** it resolves
+**Then** it falls back to the boot manager as the default target, so ephemeral mode (positional URL) is completely unchanged and every existing test stays green
+
+### Story 10.5: Multi-root schema tree
+
+As a user with several saved connections,
+I want a collapsible tree with one root per connection,
+So that I can browse them all from one sidebar, like DBeaver.
+
+**Acceptance Criteria:**
+
+**Given** N saved connections
+**When** the workspace opens
+**Then** the schema sidebar renders N collapsible root nodes (one per connection, with name + engine + host + a status dot), and roots render immediately WITHOUT introspecting — no boot-time handshake storm (20 connections must not mean 20 handshakes at startup)
+
+**Given** a collapsed connection root
+**When** I expand it
+**Then** it introspects LAZILY at that moment (via 10.4's `connectionId` RPCs), showing an `idle → loading → ready` progression; expanded, it lists tables grouped by schema, and tables expand to columns with type-dots + PK exactly as the single-root tree does today
+
+**Given** one connection fails to introspect (bad creds, unreachable, missing schema)
+**When** its root is expanded
+**Then** that root shows the classified error inline with a retry affordance, and every OTHER root stays fully usable — a single failing connection can never tank the whole tree
+
+### Story 10.6: Tabs carry their connection (and survive its removal)
+
+As a user,
+I want each tab to remember which connection it belongs to,
+So that restoring my session reopens each tab against the right database.
+
+**Acceptance Criteria:**
+
+**Given** a table/query tab opened from a connection root
+**When** it is created and the workspace is persisted
+**Then** its `TableRef` carries a `connectionId` (added to `workspace-state.ts`) and that id is persisted in the `WorkspaceSnapshot`, so on restore each tab knows which connection to reopen against
+
+**Given** a restored tab whose connection no longer exists (it was removed)
+**When** the session is restored
+**Then** the tab lands in a "conexión no disponible" state with a reassign affordance — it must NEVER crash the workspace restore or tank the other tabs

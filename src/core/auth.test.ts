@@ -1,5 +1,5 @@
-import { describe, expect, test } from "bun:test";
-import { mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
+import { describe, expect, spyOn, test } from "bun:test";
+import { mintCspNonce, mintSessionToken, validateOrigin, validateToken } from "./auth.ts";
 import { deriveOpenUrl } from "./binding.ts";
 
 describe("mintSessionToken", () => {
@@ -12,6 +12,65 @@ describe("mintSessionToken", () => {
     const seen = new Set<string>();
     for (let i = 0; i < 100; i++) seen.add(mintSessionToken());
     expect(seen.size).toBe(100);
+  });
+});
+
+describe("mintCspNonce (DW-2)", () => {
+  test("produces 128-bit (32 hex char) lowercase-hex nonces", () => {
+    const n = mintCspNonce();
+    // Load-bearing: the value is interpolated raw into BOTH a `'nonce-…'` CSP source
+    // token and an HTML attribute. Restricting it to lowercase hex means no character
+    // it can ever contain (`;`, space, `"`, `<`) could terminate either context.
+    expect(n).toMatch(/^[0-9a-f]{32}$/);
+    expect(n.length).toBe(32);
+  });
+
+  test("100 draws in one process yield 100 distinct values", () => {
+    // A predictable nonce is a full CSP bypass: an injected `<script nonce="…">` that
+    // guessed it would execute with the shell's ambient authority. This does NOT prove
+    // the source is a CSPRNG — no non-repeating source could fail it, and 100 draws from
+    // 128 bits would collide only by miracle. What it DOES catch is the realistic
+    // regression: a value hoisted to module scope, memoized, or otherwise minted once
+    // and handed out again. Per-BOOT freshness is a separate claim, and it is asserted
+    // where two real boots exist, in `server.test.ts`.
+    const seen = new Set<string>();
+    for (let i = 0; i < 100; i++) seen.add(mintCspNonce());
+    expect(seen.size).toBe(100);
+  });
+
+  test("two consecutive calls differ — the mint is not a cached constant", () => {
+    expect(mintCspNonce()).not.toBe(mintCspNonce());
+  });
+});
+
+describe("both mints draw from the CSPRNG, not Math.random", () => {
+  // The one property no shape or uniqueness assertion above can reach. Swapping
+  // `crypto.getRandomValues` for `Math.floor(Math.random() * 256)` inside the shared
+  // `randomHex` keeps every hex shape, every length and every distinctness check green
+  // while degrading BOTH secrets at once — and `tsc` does not pin it either, since the
+  // replacement typechecks. The sharing that makes a hardening fix reach both mints
+  // makes an anti-hardening change reach both too, so the source needs its own guard.
+  //
+  // A spy, deliberately, rather than an injected RNG parameter: an injection seam on a
+  // security primitive is a way to pass a weak RNG in production, which is a worse trade
+  // than observing the global the module already uses.
+  test("mintSessionToken and mintCspNonce both call crypto.getRandomValues", () => {
+    const spy = spyOn(crypto, "getRandomValues");
+    try {
+      const token = mintSessionToken();
+      const nonce = mintCspNonce();
+      expect(spy).toHaveBeenCalledTimes(2);
+      // And the widths reach the CSPRNG itself, not just the hex encoder: 32 bytes for
+      // the token, 16 for the nonce. A shortened draw padded out to the right hex width
+      // would pass every other test in this file.
+      const widths = spy.mock.calls.map((args) => (args[0] as Uint8Array).length);
+      expect(widths).toEqual([32, 16]);
+      // Sanity: the spy passed the real implementation through, so these are real values.
+      expect(token).toMatch(/^[0-9a-f]{64}$/);
+      expect(nonce).toMatch(/^[0-9a-f]{32}$/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 

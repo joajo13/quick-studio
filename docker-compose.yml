@@ -50,7 +50,7 @@ services:
     command: >
       sh -c "bun install &&
              bun run build &&
-             socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:6060 &
+             (socat TCP-LISTEN:8080,fork,reuseaddr TCP:127.0.0.1:6060 &) &&
              exec bun run bin/quick-studio.ts postgres://demo:demo@db:5432/demo"
 
 volumes:

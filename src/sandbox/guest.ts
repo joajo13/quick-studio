@@ -20,6 +20,7 @@
 
 import {
   SANDBOX_PROTOCOL_VERSION,
+  decode,
   isSandboxInbound,
   type SandboxOutbound,
   type SandboxRenderDoc,
@@ -101,7 +102,11 @@ export function createGuestRouter(deps: GuestRouterDeps): GuestRouter {
       const px = deps.render({
         markdown: event.data.markdown,
         chart: event.data.chart,
-        data: event.data.data,
+        // Hand `render` the CANONICALIZED data (DW-6): `isSandboxInbound` already proved this
+        // `decode` succeeds and discarded its result, so re-decoding here floors an over-precise
+        // date cell to milliseconds instead of drawing the microsecond string verbatim. The call
+        // is inside the existing try/catch, so it adds no new failure mode.
+        data: decode(event.data.data),
       });
       deps.postToParent({ type: "ready", protocolVersion: SANDBOX_PROTOCOL_VERSION }, target);
       deps.postToParent({ type: "height", protocolVersion: SANDBOX_PROTOCOL_VERSION, px }, target);

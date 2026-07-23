@@ -12,9 +12,10 @@
  *  - **Lazy + cached by id:** a target manager is created on first `resolve(id)` and
  *    memoized, so N re-runs of the same Report reuse ONE live connection.
  *  - **Cache self-invalidation (revocation-correct):** every `resolve` of a cached id
- *    re-reads `getStoredUrl(id)`. If the stored url now DIFFERS (the connection was
- *    repointed in Settings) the stale manager is closed+evicted and re-opened at the
- *    new url; if it is now absent (the connection was removed) the manager is
+ *    re-reads `getStoredUrl(id)`. If the stored url OR pinned schema now DIFFERS (the
+ *    connection was repointed or re-scoped in Settings) the stale manager is
+ *    closed+evicted and re-opened at the new url/scope; if it is now absent (the
+ *    connection was removed) the manager is
  *    closed+evicted and `not-found` is returned. The registry is the single source of
  *    truth — a cached manager can never keep serving a revoked/edited connection for
  *    the rest of the session.
@@ -27,21 +28,41 @@
  *    (leaked) target. The boot manager is owned/closed by the caller (`server.ts`).
  */
 
-import type { DatabaseSchema, DbEngine } from "../shared/contract.ts";
+import { errorReply, type ConnectResult, type DatabaseSchema, type DbEngine, type RpcReply } from "../shared/contract.ts";
 import type { ConnectionManager } from "./connection.ts";
 import type { DriverQueryResult } from "./driver.ts";
 
 /**
- * The five side-effecting seams the guarded executor is built over, bound to ONE
- * connection (the boot manager, or a resolved target). Mirrors the executor's former
- * fixed dep set — now produced per-`resolve` so targeting lives in one place.
+ * The side-effecting seams a Core read path is built over, bound to ONE connection (the
+ * boot manager, or a resolved target). Mirrors the executor's former fixed dep set — now
+ * produced per-`resolve` so targeting lives in one place. Story 10.4 widened it past the
+ * executor: `connect` (so `table.rows`/`connect` can open a resolved target) and
+ * `invalidateSchema` (so a mutation can bust exactly the memo it just invalidated).
  */
 export type ConnectionSeams = {
   readonly runQuery: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
   readonly runReadOnly: (sql: string, params: ReadonlyArray<unknown>) => Promise<DriverQueryResult>;
+  /**
+   * The target's engine. Read off the memo the connection's first open already populated
+   * and never RE-introspected: the engine is fixed by the connection's url scheme, so it
+   * cannot go stale when a DDL runs and this seam deliberately ignores `invalidateSchema`.
+   * (Opening a cold target still introspects once, as any seam on it would.)
+   */
   readonly getEngine: () => Promise<DbEngine>;
   readonly getSchema: () => Promise<DatabaseSchema>;
   readonly quoteIdent: (ident: string) => string;
+  /**
+   * Open (once) + introspect THIS target, resolving the same neutral {@link ConnectResult}
+   * the boot manager already returns — a classified driver failure is a `status:"failed"`
+   * payload, never a throw, so no failure-shape logic is duplicated outside `connection.ts`.
+   */
+  readonly connect: () => Promise<ConnectResult>;
+  /**
+   * Mark THIS target's memoized schema stale (DW-45) so its next `getSchema`/`connect`
+   * re-introspects. Scoped by construction: a caller holding one resolve's seams cannot
+   * flush another target's memo (nor the whole pool).
+   */
+  readonly invalidateSchema: () => void;
 };
 
 /**
@@ -50,7 +71,12 @@ export type ConnectionSeams = {
  * valid target during a transient store failure is not misreported as unknown.
  */
 export type StoredUrlLookup =
-  | { readonly kind: "found"; readonly url: string }
+  | {
+      readonly kind: "found";
+      readonly url: string;
+      /** The record's pinned introspection scope (Story 10.2), absent when unpinned. */
+      readonly schema?: string;
+    }
   | { readonly kind: "not-found" }
   | { readonly kind: "unavailable"; readonly detail: string };
 
@@ -65,8 +91,11 @@ export type ConnectionTargetsDeps = {
   readonly bootManager: ConnectionManager;
   /** Core-internal id→url resolution (backed by the same credential store the registry uses). */
   readonly getStoredUrl: (id: string) => StoredUrlLookup;
-  /** Lazily construct a connection manager for a target url (driver opens on first use). */
-  readonly createManager: (url: string) => ConnectionManager;
+  /**
+   * Lazily construct a connection manager for a target url (driver opens on first
+   * use), scoped to the record's pinned `schema` when it has one (Story 10.2).
+   */
+  readonly createManager: (url: string, schema?: string) => ConnectionManager;
 };
 
 /** The live resolver handle returned by {@link createConnectionTargets}. */
@@ -85,10 +114,32 @@ function seamsFor(manager: ConnectionManager): ConnectionSeams {
   return {
     runQuery: (sql, params) => manager.query(sql, params),
     runReadOnly: (sql, params) => manager.queryReadOnly(sql, params),
-    getEngine: async () => (await manager.getSchema()).engine,
+    // 1:1, like every other seam — and deliberately NOT `(await manager.getSchema()).engine`:
+    // that routed the engine through the memoized (and now bustable) catalog, so every
+    // statement following a schema-mutating one paid a full re-introspection to learn a value
+    // fixed by the connection's url scheme. `manager.getEngine()` reads it off the already-
+    // populated memo without honoring the stale flag, so only the FIRST open pays.
+    getEngine: () => manager.getEngine(),
     getSchema: () => manager.getSchema(),
     quoteIdent: (ident) => manager.quoteIdent(ident),
+    connect: () => manager.connect(),
+    invalidateSchema: () => manager.invalidateSchema(),
   };
+}
+
+/**
+ * Map a failed {@link ConnectionTargets.resolve} onto its typed wire reply. Lives HERE,
+ * beside the `reason` union it translates, so every targeted RPC (`execute`,
+ * `table.rows`, `connect`, …) shares ONE mapping instead of copy-pasting the
+ * `not-found → not_found` / `unavailable → internal_error` convention until it drifts.
+ * Credential-neutral by construction: neither branch echoes an id, a url, or the store's
+ * own detail. `RpcReply<never>` is assignable into any `RpcReply<T>` position, so callers
+ * need no generic argument.
+ */
+export function targetError(reason: "not-found" | "unavailable"): RpcReply<never> {
+  return reason === "not-found"
+    ? errorReply("not_found", "no connection with that id")
+    : errorReply("internal_error", "credential store is unavailable");
 }
 
 /**
@@ -99,8 +150,16 @@ function seamsFor(manager: ConnectionManager): ConnectionSeams {
 export function createConnectionTargets(deps: ConnectionTargetsDeps): ConnectionTargets {
   const { bootManager, getStoredUrl, createManager } = deps;
 
-  /** A cached target manager + the url it was opened with (for self-invalidation). */
-  type Cached = { readonly manager: ConnectionManager; readonly url: string };
+  /**
+   * A cached target manager + the url AND pinned schema it was opened with (for
+   * self-invalidation). The schema is part of the identity because a manager memoizes
+   * its introspected schema at the scope it was built with (Story 10.2).
+   */
+  type Cached = {
+    readonly manager: ConnectionManager;
+    readonly url: string;
+    readonly schema: string | undefined;
+  };
   const cache = new Map<string, Cached>();
   // Latched by `closeAll()`: after shutdown begins, no target is opened or served.
   let closed = false;
@@ -137,16 +196,19 @@ export function createConnectionTargets(deps: ConnectionTargetsDeps): Connection
 
       const existing = cache.get(connectionId);
       if (existing !== undefined) {
-        if (existing.url === lookup.url) {
-          // Cache hit, url unchanged — reuse the live manager.
+        if (existing.url === lookup.url && existing.schema === lookup.schema) {
+          // Cache hit, url AND pinned scope unchanged — reuse the live manager.
           return { ok: true, seams: seamsFor(existing.manager) };
         }
-        // Repointed in Settings: close+evict the stale manager, re-open at the new url.
+        // Repointed OR re-scoped in Settings: close+evict the stale manager and re-open
+        // at the new url/scope. The schema comparison is REQUIRED — a manager memoizes
+        // its introspected schema, so url-only equality would keep serving the old scope
+        // for the rest of the session after a Settings schema edit (Story 10.2).
         evict(connectionId, existing);
       }
 
-      const manager = createManager(lookup.url);
-      cache.set(connectionId, { manager, url: lookup.url });
+      const manager = createManager(lookup.url, lookup.schema);
+      cache.set(connectionId, { manager, url: lookup.url, schema: lookup.schema });
       return { ok: true, seams: seamsFor(manager) };
     },
 

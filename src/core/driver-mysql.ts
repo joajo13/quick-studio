@@ -24,6 +24,7 @@ import {
   type IntrospectedColumn,
   type IntrospectedForeignKey,
   type IntrospectedIndex,
+  type IntrospectedPrimaryKey,
 } from "./driver.ts";
 
 /** One row of the MySQL `information_schema.columns` introspection query. */
@@ -62,11 +63,6 @@ type MysqlFkRow = {
   readonly referenced_table_name: string;
   readonly referenced_column_name: string;
 };
-
-/** Set-membership key for a PK column: `schema table column`. */
-function pkKey(schema: string, table: string, column: string): string {
-  return `${schema} ${table} ${column}`;
-}
 
 /**
  * Bound on graceful teardown (ms). Mirrors the postgres adapter's
@@ -158,6 +154,33 @@ export function buildMysqlConfig(url: string): ConnectionOptions {
   return { uri: u.toString(), multipleStatements: false };
 }
 
+/**
+ * The scope predicate + bound params shared by all four introspection queries
+ * (Story 10.2). Precedence (R2): a pinned `schema` WINS over the URL's own database,
+ * so a connection saved with a pin introspects that schema regardless of the path
+ * segment; with neither, the server's system schemas are excluded — today's behavior,
+ * unchanged. A blank/whitespace pin counts as unset at the driver boundary, and a pin
+ * that survives is bound TRIMMED (defensive; the registry already trims, but binding a
+ * raw `"  reporting  "` would match zero tables). Every value is a `?` placeholder —
+ * a schema name is never string-spliced into the SQL. Returns a FRESH array per call (mysql2 consumes
+ * it positionally); each call site copies it into a mutable one at the driver
+ * boundary, exactly as {@link execMysql} does. Exported pure so the precedence is
+ * unit-testable without a live mysql (same precedent as {@link buildMysqlConfig}).
+ */
+export function mysqlSchemaScope(
+  schema: string | undefined,
+  database: string | null,
+): { readonly where: string; readonly params: readonly string[] } {
+  const pin = schema === undefined || schema.trim().length === 0 ? null : schema.trim();
+  const target = pin ?? database;
+  return target !== null
+    ? { where: "table_schema = ?", params: [target] }
+    : {
+        where: `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`,
+        params: [...SYSTEM_SCHEMAS],
+      };
+}
+
 /** Extract the target database name from the URL path (`/db` → `db`), or `null`. */
 function databaseOf(url: string): string | null {
   try {
@@ -193,7 +216,7 @@ export function createMysqlDriver(url: string): Driver {
       }
     },
 
-    async listSchema(): Promise<DatabaseSchema> {
+    async listSchema(schema?: string): Promise<DatabaseSchema> {
       if (connection === null) {
         // Programming error, not a domain failure — surfaces as `internal_error`.
         // Kept OUTSIDE the classified wrap below so it still throws as a bug rather
@@ -206,39 +229,39 @@ export function createMysqlDriver(url: string): Driver {
       // The 4 introspection queries + fold, extracted so `withTimeout` can bound the
       // whole thing (DW-20) and the catch below can classify any failure (DW-19).
       const introspect = async (): Promise<DatabaseSchema> => {
-      // Scope to the URL's database when present; otherwise exclude the server's
-      // system schemas. Parameterized so the database name is never string-spliced.
-      const where =
-        database !== null
-          ? "table_schema = ?"
-          : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
-      const params = database !== null ? [database] : [...SYSTEM_SCHEMAS];
+      // Scope to the pinned schema, else the URL's database, else exclude the server's
+      // system schemas — see {@link mysqlSchemaScope}. Parameterized so neither name
+      // is ever string-spliced.
+      const { where, params } = mysqlSchemaScope(schema, database);
       const [rows] = await conn.query(
         `SELECT table_schema, table_name, column_name, data_type, is_nullable
          FROM information_schema.columns
          WHERE ${where}
          ORDER BY table_schema, table_name, ordinal_position`,
-        params,
+        [...params],
       );
 
       // Primary-key columns from KEY_COLUMN_USAGE (`constraint_name = 'PRIMARY'` is
       // MySQL's fixed PK constraint name), scoped the same way as the columns query.
-      const pkWhere =
-        database !== null
-          ? "table_schema = ?"
-          : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
-      const pkParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
+      // ORDERED by `ordinal_position` — the column's position WITHIN the PK constraint
+      // (key order), not the table ordinal — so `assembleSchema` folds
+      // `SchemaTableInfo.primaryKey` in the key's own column order: a composite PK `(b, a)`
+      // stays `["b","a"]` even when `a` sits earlier in the table (DW-31).
+      const { where: pkWhere, params: pkParams } = mysqlSchemaScope(schema, database);
       const [pkRows] = await conn.query(
         `SELECT table_schema, table_name, column_name
          FROM information_schema.key_column_usage
-         WHERE constraint_name = 'PRIMARY' AND ${pkWhere}`,
-        pkParams,
+         WHERE constraint_name = 'PRIMARY' AND ${pkWhere}
+         ORDER BY table_schema, table_name, ordinal_position`,
+        [...pkParams],
       );
-      const pkSet = new Set(
-        (pkRows as unknown as readonly MysqlPkRow[]).map((r) =>
-          pkKey(r.table_schema, r.table_name, r.column_name),
-        ),
-      );
+      const primaryKeys: IntrospectedPrimaryKey[] = (
+        pkRows as unknown as readonly MysqlPkRow[]
+      ).map((r) => ({
+        schema: r.table_schema,
+        table: r.table_name,
+        column: r.column_name,
+      }));
 
       // Index metadata (Story 3.5) from `information_schema.statistics`: one row per
       // (index, column), ordered by `SEQ_IN_INDEX` so the assembler folds columns in
@@ -248,18 +271,14 @@ export function createMysqlDriver(url: string): Driver {
       // functional key part has a NULL `column_name` (the expression lives in `EXPRESSION`);
       // `column_name IS NOT NULL` drops those parts — the analog of Postgres's `attnum > 0`
       // expression-column filter — so no null ever leaks into the folded columns list.
-      const idxScope =
-        database !== null
-          ? "table_schema = ?"
-          : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
+      const { where: idxScope, params: idxParams } = mysqlSchemaScope(schema, database);
       const idxWhere = `${idxScope} AND column_name IS NOT NULL`;
-      const idxParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
       const [idxRows] = await conn.query(
         `SELECT table_schema, table_name, index_name, non_unique, column_name
          FROM information_schema.statistics
          WHERE ${idxWhere}
          ORDER BY table_schema, table_name, index_name, seq_in_index`,
-        idxParams,
+        [...idxParams],
       );
       const indexes: IntrospectedIndex[] = (idxRows as unknown as readonly MysqlIndexRow[]).map(
         (r) => ({
@@ -280,18 +299,14 @@ export function createMysqlDriver(url: string): Driver {
       // `constraint_name` within the table and drops any FK whose owning table the
       // column query never listed. MySQL FK names are not the fixed `PRIMARY`, so no
       // special-casing is needed.
-      const fkScope =
-        database !== null
-          ? "table_schema = ?"
-          : `table_schema NOT IN (${SYSTEM_SCHEMAS.map(() => "?").join(", ")})`;
-      const fkParams = database !== null ? [database] : [...SYSTEM_SCHEMAS];
+      const { where: fkScope, params: fkParams } = mysqlSchemaScope(schema, database);
       const [fkRows] = await conn.query(
         `SELECT table_schema, table_name, constraint_name, column_name,
                 referenced_table_schema, referenced_table_name, referenced_column_name
          FROM information_schema.key_column_usage
          WHERE referenced_table_name IS NOT NULL AND ${fkScope}
          ORDER BY table_schema, table_name, constraint_name, ordinal_position`,
-        fkParams,
+        [...fkParams],
       );
       const foreignKeys: IntrospectedForeignKey[] = (fkRows as unknown as readonly MysqlFkRow[]).map(
         (r) => ({
@@ -312,10 +327,9 @@ export function createMysqlDriver(url: string): Driver {
           column: r.column_name,
           dataType: r.data_type,
           nullable: r.is_nullable === "YES",
-          isPrimaryKey: pkSet.has(pkKey(r.table_schema, r.table_name, r.column_name)),
         }),
       );
-      return assembleSchema("mysql", columns, indexes, foreignKeys);
+      return assembleSchema("mysql", columns, indexes, foreignKeys, primaryKeys);
       };
       try {
         return await withTimeout(introspect(), INTROSPECTION_TIMEOUT_MS);

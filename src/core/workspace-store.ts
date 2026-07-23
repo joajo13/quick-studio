@@ -136,7 +136,19 @@ function isErdLayouts(value: unknown): boolean {
   return true;
 }
 
-/** Type guard: `value` is a well-formed {@link WorkspaceSnapshotTab}. */
+/**
+ * Type guard: `value` is a well-formed {@link WorkspaceSnapshotTab}.
+ *
+ * A tab's optional `connectionId` (Story 10.6) is ADDITIVE and deliberately NOT gated here
+ * — a FIELD-DROP field, exactly like `lastProvider` below. This guard is used by
+ * `isWorkspaceSnapshot` through `v.tabs.every(isSnapshotTab)`, which is ALL-OR-NOTHING: the
+ * only rejection available at this boundary is discarding the entire file, so gating the id
+ * here would let one hand-edited value nuke every tab, panel size and ERD layout — the exact
+ * opposite of the load-side rule ("sanitize/drop just that field"). The sanitizing therefore
+ * lives UI-side in `restoreWorkspace` (non-empty string → keep, anything else → omit). The
+ * SAVE boundary stays strict: `workspace-registry.ts`'s `checkTabs` rejects a malformed
+ * `connectionId` with a `bad_request`, so nothing this build writes can be malformed here.
+ */
 function isSnapshotTab(value: unknown): value is WorkspaceSnapshotTab {
   if (typeof value !== "object" || value === null) return false;
   const v = value as Record<string, unknown>;

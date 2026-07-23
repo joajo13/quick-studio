@@ -6,7 +6,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { FROZEN_SCHEMA_VERSION, type FrozenData } from "./contract.ts";
-import { isSnapshotDoc, SNAPSHOT_SCHEMA_VERSION, type SnapshotDoc } from "./snapshot.ts";
+import { isSnapshotDoc, normalizeSnapshotDoc, SNAPSHOT_SCHEMA_VERSION, type SnapshotDoc } from "./snapshot.ts";
 
 const validData: FrozenData = {
   schemaVersion: FROZEN_SCHEMA_VERSION,
@@ -104,5 +104,35 @@ describe("isSnapshotDoc", () => {
   test("rejects a non-object / null", () => {
     expect(isSnapshotDoc(null)).toBe(false);
     expect(isSnapshotDoc("doc")).toBe(false);
+  });
+});
+
+describe("normalizeSnapshotDoc — millisecond precision (DW-6)", () => {
+  const overPreciseData: FrozenData = {
+    schemaVersion: FROZEN_SCHEMA_VERSION,
+    columns: [{ name: "t", type: "date" }],
+    rows: [[{ kind: "date", iso: "2026-07-06T12:00:00.123456Z" }]],
+  };
+
+  test("a doc with an over-precise date cell passes isSnapshotDoc and floors to .123Z", () => {
+    const doc: SnapshotDoc = {
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+      blocks: [{ kind: "table", data: overPreciseData, truncated: false }],
+    };
+    // The guard accepts it (decode succeeds) but never rewrites the payload…
+    expect(isSnapshotDoc(doc)).toBe(true);
+    // …so normalizeSnapshotDoc is what canonicalizes the embedded cell.
+    const normalized = normalizeSnapshotDoc(doc);
+    const block = normalized.blocks[0] as { kind: "table"; data: FrozenData };
+    expect(block.data.rows[0]?.[0]).toEqual({ kind: "date", iso: "2026-07-06T12:00:00.123Z" });
+  });
+
+  test("passes prose/empty blocks through by reference", () => {
+    const prose = { kind: "prose", markdown: "# hi" } as const;
+    const empty = { kind: "empty", note: "no data" } as const;
+    const doc: SnapshotDoc = { schemaVersion: SNAPSHOT_SCHEMA_VERSION, blocks: [prose, empty] };
+    const normalized = normalizeSnapshotDoc(doc);
+    expect(normalized.blocks[0]).toBe(prose);
+    expect(normalized.blocks[1]).toBe(empty);
   });
 });

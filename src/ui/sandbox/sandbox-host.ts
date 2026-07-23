@@ -25,6 +25,7 @@ import {
   type SandboxOutbound,
   type SandboxRenderDoc,
 } from "../../shared/contract.ts";
+import { isUsableSandboxOrigin } from "../../shared/sandbox-origin.ts";
 
 /** The opaque origin a `sandbox="allow-scripts"` (no `allow-same-origin`) guest posts from. */
 const OPAQUE_ORIGIN = "null";
@@ -70,14 +71,25 @@ export type SandboxIframeAttrs = {
  * Build the sandbox iframe attributes. The `sandbox` token list is EXACTLY
  * `allow-scripts` — never `allow-same-origin` (which would collapse the origin
  * boundary), nor `allow-forms`/`allow-popups`/`allow-top-navigation`/`allow-modals`.
- * `src` is the injected Ring 3 origin — but when that origin is empty or not an
- * `http(s)` URL, `src` falls back to `about:blank`. It is NEVER `""`: an empty `src`
- * resolves to the PARENT Core document, which would load the token-bearing page into
- * the `allow-scripts` frame — the opposite of containment. Pure.
+ * `src` is the injected Ring 3 origin — but when that origin is empty or not a usable
+ * `http(s)://host` URL, `src` falls back to `about:blank`. It is NEVER `""`: an empty
+ * `src` resolves to the PARENT Core document, which would load the token-bearing page
+ * into the `allow-scripts` frame — the opposite of containment.
+ *
+ * The usability test is {@link isUsableSandboxOrigin}, the SAME function `shellCspHeaders`
+ * gates the app shell's `frame-src` on — applied here to the RAW injected value, which is
+ * the same input Ring 1 gates. That is not a stylistic preference: the header and this
+ * attribute must reach the same verdict for the same value, or the CSP admits an origin
+ * the frame never visits (harmless) or refuses the one it does (a blank preview pane with
+ * no in-app explanation). This half of the pair is why Ring 1 no longer runs a character
+ * filter first: while it did, the two rings ran ONE gate over two different inputs, and
+ * a value like `"http://127.0.0.1:67'89"` was admitted by the header (as a repaired
+ * origin) while this function sent the frame to `about:blank`. One function, one rule,
+ * one input, both rings. Pure.
  */
 export function buildSandboxIframeAttrs(sandboxOrigin: string): SandboxIframeAttrs {
-  const isHttpOrigin = /^https?:\/\//.test(sandboxOrigin);
-  return { src: isHttpOrigin ? sandboxOrigin : "about:blank", sandbox: "allow-scripts" };
+  const usable = isUsableSandboxOrigin(sandboxOrigin);
+  return { src: usable ? sandboxOrigin : "about:blank", sandbox: "allow-scripts" };
 }
 
 /**

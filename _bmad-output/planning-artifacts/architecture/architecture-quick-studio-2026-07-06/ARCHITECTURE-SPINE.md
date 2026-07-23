@@ -123,7 +123,7 @@ graph LR
 
 - **Binds:** FR-17, FR-18, FR-20
 - **Prevents:** the Snapshot path, the Live path, and two MDX blocks each assuming a different shape or date encoding for "frozen data."
-- **Rule:** a single shared, versioned frozen-data schema (defined in `shared/`) is the only shape pushed to the Sandbox and the only shape embedded in a Snapshot. The wire conventions (ISO-8601 UTC dates, typed values) bind the UI↔Sandbox boundary exactly as they bind Core RPC — never live JS `Date` objects in one path and ISO strings in the other.
+- **Rule:** a single shared, versioned frozen-data schema (defined in `shared/`) is the only shape pushed to the Sandbox and the only shape embedded in a Snapshot. The wire conventions (ISO-8601 UTC dates, typed values) bind the UI↔Sandbox boundary exactly as they bind Core RPC — never live JS `Date` objects in one path and ISO strings in the other. Milliseconds are the frozen-date model's canonical precision (DW-6): at the frozen-data `encode`/`decode` boundary an over-precise instant is floored to 3 fractional digits — the truncation never moves the instant forward in time (it floors, so a pre-epoch instant floors away from zero) — while the standalone `assertIsoUtc` invariant stays exported and strict, still rejecting a 4+-digit fractional field as non-canonical.
 
 ### AD-14 — Engine-dialect isolation lives inside the Core
 

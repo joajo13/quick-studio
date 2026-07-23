@@ -10,12 +10,14 @@
 import { describe, expect, test } from "bun:test";
 import { FROZEN_SCHEMA_VERSION, type FrozenData } from "../../shared/contract.ts";
 import type { ChartSpec } from "../../shared/chart-spec.ts";
+import type { ReportSpec } from "../../shared/report-spec.ts";
 import {
   addProseBlock,
   addQueryBlock,
   emptyReport,
   moveBlock,
   removeBlock,
+  reportStateFromSpec,
   setBlockChart,
   setBlockError,
   setBlockOk,
@@ -217,5 +219,94 @@ describe("reorder + remove (totality)", () => {
     expect(s.blocks).toEqual([]);
     expect(s.nextId).toBe(2); // ids never reused
     expect(removeBlock(s, 99)).toBe(s); // unknown id no-op
+  });
+});
+
+describe("reportStateFromSpec (Story 9.7 — chat-generated report open seam)", () => {
+  test("a title folds into a LEADING `# title` prose block, followed by the spec's blocks in order", () => {
+    const spec: ReportSpec = {
+      title: "Revenue by country",
+      blocks: [
+        { kind: "prose", markdown: "some context" },
+        { kind: "query", sql: "SELECT country, sum(amount) FROM orders GROUP BY country" },
+      ],
+    };
+    const s = reportStateFromSpec(spec);
+    expect(s.blocks).toHaveLength(3);
+    expect(s.blocks[0]).toEqual({ id: 1, kind: "prose", markdown: "# Revenue by country" });
+    expect(s.blocks[1]).toEqual({ id: 2, kind: "prose", markdown: "some context" });
+    expect(s.blocks[2]).toEqual({
+      id: 3,
+      kind: "query",
+      sql: "SELECT country, sum(amount) FROM orders GROUP BY country",
+      result: null,
+      view: "table",
+      chart: null,
+    });
+    // Ids are monotonic from emptyReport()'s counter.
+    expect(s.nextId).toBe(4);
+  });
+
+  test("no title -> no leading prose block; blocks start at id 1", () => {
+    const spec: ReportSpec = { blocks: [{ kind: "query", sql: "SELECT 1" }] };
+    const s = reportStateFromSpec(spec);
+    expect(s.blocks).toHaveLength(1);
+    expect(s.blocks[0]).toEqual({ id: 1, kind: "query", sql: "SELECT 1", result: null, view: "table", chart: null });
+  });
+
+  test("a whitespace-only title is treated as absent (no leading prose block)", () => {
+    const spec: ReportSpec = { title: "   ", blocks: [{ kind: "prose", markdown: "hi" }] };
+    const s = reportStateFromSpec(spec);
+    expect(s.blocks).toHaveLength(1);
+    expect(s.blocks[0]).toEqual({ id: 1, kind: "prose", markdown: "hi" });
+  });
+
+  test("a query block carrying a chart intent seeds `view:chart` + the chart spec, UNRUN", () => {
+    const chart: ChartSpec = { mark: "bar", x: "country", y: "revenue" };
+    const spec: ReportSpec = {
+      blocks: [{ kind: "query", sql: "SELECT country, revenue FROM t", chart }],
+    };
+    const s = reportStateFromSpec(spec);
+    expect(s.blocks[0]).toEqual({
+      id: 1,
+      kind: "query",
+      sql: "SELECT country, revenue FROM t",
+      result: null,
+      view: "chart",
+      chart,
+    });
+  });
+
+  test("a chart-less query block stays view:table, chart:null", () => {
+    const spec: ReportSpec = { blocks: [{ kind: "query", sql: "SELECT 1" }] };
+    const s = reportStateFromSpec(spec);
+    expect(s.blocks[0]).toMatchObject({ view: "table", chart: null });
+  });
+
+  test("every query block's result stays null/unrun regardless of chart intent", () => {
+    const spec: ReportSpec = {
+      blocks: [
+        { kind: "query", sql: "SELECT 1" },
+        { kind: "query", sql: "SELECT 2", chart: { mark: "line", x: "a", y: "b" } },
+      ],
+    };
+    const s = reportStateFromSpec(spec);
+    for (const b of s.blocks) {
+      expect((b as { result: unknown }).result).toBeNull();
+    }
+  });
+
+  test("multiple prose + query blocks preserve order and monotonic ids", () => {
+    const spec: ReportSpec = {
+      blocks: [
+        { kind: "prose", markdown: "one" },
+        { kind: "prose", markdown: "two" },
+        { kind: "query", sql: "SELECT 1" },
+        { kind: "prose", markdown: "three" },
+      ],
+    };
+    const s = reportStateFromSpec(spec);
+    expect(s.blocks.map((b) => b.id)).toEqual([1, 2, 3, 4]);
+    expect(s.nextId).toBe(5);
   });
 });

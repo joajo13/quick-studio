@@ -192,4 +192,26 @@ describe("mountSnapshot (fallback + happy path)", () => {
     mountSnapshot(JSON.stringify({ ...goodDoc, schemaVersion: 99 }), host);
     expect(calls).toEqual([FALLBACK_HTML]);
   });
+
+  test("an over-precise date cell renders the millisecond form, never the microsecond string (DW-6)", () => {
+    const doc: SnapshotDoc = {
+      schemaVersion: SNAPSHOT_SCHEMA_VERSION,
+      blocks: [
+        {
+          kind: "table",
+          data: {
+            schemaVersion: FROZEN_SCHEMA_VERSION,
+            columns: [{ name: "t", type: "date" }],
+            rows: [[{ kind: "date", iso: "2026-07-06T12:00:00.123456Z" }]],
+          },
+          truncated: false,
+        },
+      ],
+    };
+    const { calls, host } = fakeHost();
+    mountSnapshot(JSON.stringify(doc), host);
+    const html = calls.join("");
+    expect(html).toContain("2026-07-06T12:00:00.123Z");
+    expect(html).not.toContain("2026-07-06T12:00:00.123456Z");
+  });
 });

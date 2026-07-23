@@ -17,19 +17,41 @@ import { createConnectionTargets, type StoredUrlLookup } from "./connection-targ
 
 const SCHEMA: DatabaseSchema = { engine: "postgres", tables: [] };
 
-/** A fake connection manager tagged with its url; records `query` + `close`. */
-function fakeManager(url: string) {
+/**
+ * A fake connection manager tagged with its url + pinned schema; records `query`,
+ * `connect`, `getSchema`, `getEngine`, `invalidateSchema` and `close`, so a seam can be
+ * proven to reach exactly ONE manager — and, for `getEngine`, the RIGHT manager verb
+ * (Story 10.4 widened the seams past `runQuery`).
+ */
+function fakeManager(url: string, schema?: string) {
   let closed = false;
+  let connects = 0;
+  let invalidations = 0;
+  let schemaReads = 0;
+  let engineReads = 0;
   const queries: string[] = [];
   const manager: ConnectionManager = {
-    connect: async (): Promise<ConnectResult> => ({ status: "connected", schema: SCHEMA }),
-    getSchema: async () => SCHEMA,
+    connect: async (): Promise<ConnectResult> => {
+      connects++;
+      return { status: "connected", schema: SCHEMA };
+    },
+    getSchema: async () => {
+      schemaReads++;
+      return SCHEMA;
+    },
+    getEngine: async () => {
+      engineReads++;
+      return SCHEMA.engine;
+    },
     query: async (text: string): Promise<DriverQueryResult> => {
       queries.push(text);
       return { columns: [], rows: [], rowsAffected: 0 };
     },
     queryReadOnly: async (): Promise<DriverQueryResult> => ({ columns: [], rows: [], rowsAffected: 0 }),
     quoteIdent: (i: string) => `"${i}"`,
+    invalidateSchema: () => {
+      invalidations++;
+    },
     describe: () => {
       try {
         const u = new URL(url);
@@ -38,31 +60,54 @@ function fakeManager(url: string) {
         return null;
       }
     },
+    // Mirrors the real `ConnectionManager.hasTarget()` (`connection.ts`), which
+    // is pure EXISTENCE — `databaseUrl !== null` — and never inspects the url's shape or
+    // length. Every fake here is constructed WITH a url, so the faithful answer is a flat
+    // `true`; an empty or unparseable url would still be a CONFIGURED target.
+    hasTarget: () => true,
     close: async () => {
       closed = true;
     },
   };
-  return { url, manager, isClosed: () => closed, queries };
+  return {
+    url,
+    schema,
+    manager,
+    isClosed: () => closed,
+    queries,
+    connects: () => connects,
+    invalidations: () => invalidations,
+    schemaReads: () => schemaReads,
+    engineReads: () => engineReads,
+  };
 }
 
-/** A harness: a mutable id→url store + a manager factory recording every manager built. */
+/**
+ * A harness: a mutable id→url store (plus the optional id→pinned-schema map of Story
+ * 10.2) + a manager factory recording every manager built, with the url AND schema it
+ * was built at.
+ */
 function harness(initial: Record<string, string> = {}) {
   const urls = new Map<string, string>(Object.entries(initial));
+  const schemas = new Map<string, string>();
   const created: Array<ReturnType<typeof fakeManager>> = [];
   const boot = fakeManager("boot://db");
 
   const getStoredUrl = (id: string): StoredUrlLookup => {
     const url = urls.get(id);
-    return url === undefined ? { kind: "not-found" } : { kind: "found", url };
+    if (url === undefined) return { kind: "not-found" };
+    const schema = schemas.get(id);
+    // Conditional, exactly like the registry's: an unpinned record carries no key.
+    return { kind: "found", url, ...(schema === undefined ? {} : { schema }) };
   };
-  const createManager = (url: string): ConnectionManager => {
-    const m = fakeManager(url);
+  const createManager = (url: string, schema?: string): ConnectionManager => {
+    const m = fakeManager(url, schema);
     created.push(m);
     return m.manager;
   };
 
   const targets = createConnectionTargets({ bootManager: boot.manager, getStoredUrl, createManager });
-  return { targets, urls, created, boot };
+  return { targets, urls, schemas, created, boot };
 }
 
 describe("createConnectionTargets — default + basic resolution", () => {
@@ -148,6 +193,55 @@ describe("createConnectionTargets — cache self-invalidation", () => {
   });
 });
 
+describe("createConnectionTargets — pinned schema scope (Story 10.2)", () => {
+  test("the record's pinned schema reaches the manager factory; unpinned passes undefined", () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a", b: "postgres://b" });
+    schemas.set("a", "reporting");
+
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(targets.resolve("b").ok).toBe(true);
+    expect(created[0]!.schema).toBe("reporting");
+    expect(created[1]!.schema).toBeUndefined();
+  });
+
+  test("a schema-ONLY edit evicts+closes the stale manager and re-creates it at the new scope", async () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a" });
+    const r1 = targets.resolve("a");
+    expect(r1.ok).toBe(true);
+    expect(created[0]!.schema).toBeUndefined();
+
+    schemas.set("a", "reporting"); // pinned in Settings — the url did NOT change
+    const r2 = targets.resolve("a");
+    expect(r2.ok).toBe(true);
+    if (r2.ok) await r2.seams.runQuery("SELECT scoped", []);
+
+    // Url-only equality would have kept serving the old (unscoped) introspection.
+    expect(created.length).toBe(2);
+    expect(created[0]!.isClosed()).toBe(true);
+    expect(created[1]!.schema).toBe("reporting");
+    expect(created[1]!.queries).toEqual(["SELECT scoped"]);
+  });
+
+  test("clearing the pin likewise re-creates the manager (unscoped again, same session)", () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a" });
+    schemas.set("a", "reporting");
+    expect(targets.resolve("a").ok).toBe(true);
+
+    schemas.delete("a"); // blanked in Settings
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(created.length).toBe(2);
+    expect(created[1]!.schema).toBeUndefined();
+  });
+
+  test("an unchanged pin is still a cache HIT (no needless re-open)", () => {
+    const { targets, schemas, created } = harness({ a: "postgres://a" });
+    schemas.set("a", "reporting");
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(targets.resolve("a").ok).toBe(true);
+    expect(created.length).toBe(1);
+  });
+});
+
 describe("createConnectionTargets — shutdown", () => {
   test("closeAll closes EVERY opened target manager (not the boot manager, which the caller owns)", async () => {
     const { targets, created, boot } = harness({ a: "postgres://a", b: "postgres://b" });
@@ -166,5 +260,73 @@ describe("createConnectionTargets — shutdown", () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe("not-found");
     expect(created.length).toBe(0); // latched closed: nothing opened
+  });
+});
+
+/**
+ * Story 10.4 widened the seams with `connect` and `invalidateSchema`. Both are 1:1
+ * delegations, so what needs proving is not the call but the ROUTING: a seam must reach
+ * the manager its `resolve` named — and no other. That scoping is what lets the executor
+ * bust exactly the memo it just invalidated (DW-45) without flushing the pool.
+ */
+describe("createConnectionTargets — connect + invalidateSchema seams (Story 10.4)", () => {
+  test("resolve(null).seams.connect() opens the BOOT manager only", async () => {
+    const { targets, boot, created } = harness({ a: "postgres://a" });
+    const r = targets.resolve(null);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(await r.seams.connect()).toEqual({ status: "connected", schema: SCHEMA });
+    expect(boot.connects()).toBe(1);
+    expect(created.length).toBe(0); // the default path never builds a target manager
+  });
+
+  test("resolve('a').seams.connect() opens THAT target's manager, never the boot one", async () => {
+    const { targets, boot, created } = harness({ a: "postgres://a" });
+    const r = targets.resolve("a");
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(await r.seams.connect()).toEqual({ status: "connected", schema: SCHEMA });
+    expect(created.length).toBe(1);
+    expect(created[0]!.connects()).toBe(1);
+    expect(boot.connects()).toBe(0);
+  });
+
+  test("invalidateSchema marks ONLY the resolved target (boot and the sibling target untouched)", () => {
+    const { targets, boot, created } = harness({ a: "postgres://a", b: "postgres://b" });
+    const ra = targets.resolve("a");
+    const rb = targets.resolve("b");
+    expect(ra.ok && rb.ok).toBe(true);
+    if (!ra.ok || !rb.ok) return;
+    expect(created.length).toBe(2); // one live manager each, in resolve order
+
+    ra.seams.invalidateSchema();
+
+    expect(created[0]!.invalidations()).toBe(1); // the target we resolved …
+    expect(created[1]!.invalidations()).toBe(0); // … and nobody else
+    expect(boot.invalidations()).toBe(0);
+    // Busted IN PLACE: the pool's evict+close machinery is not involved at all.
+    expect(created[0]!.isClosed()).toBe(false);
+  });
+
+  test("invalidateSchema through the boot seams marks the boot manager (the target eviction path cannot)", () => {
+    const { targets, boot } = harness({ a: "postgres://a" });
+    const r = targets.resolve(null);
+    expect(r.ok).toBe(true);
+    if (r.ok) r.seams.invalidateSchema();
+    expect(boot.invalidations()).toBe(1);
+    expect(boot.isClosed()).toBe(false); // busted in place — never closed/evicted
+  });
+
+  test("the getEngine seam delegates 1:1 to manager.getEngine — it never goes through getSchema", async () => {
+    const { targets, created } = harness({ a: "postgres://a" });
+    const r = targets.resolve("a");
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+
+    expect(await r.seams.getEngine()).toBe("postgres");
+
+    // The load-bearing half: this seam used to be `(await manager.getSchema()).engine`, so
+    // every `execute` after a schema-mutating one paid a full catalog re-introspection to
+    // learn a value fixed by the url scheme (N confirmed statements ⇒ N `listSchema`s).
+    expect(created[0]!.engineReads()).toBe(1);
+    expect(created[0]!.schemaReads()).toBe(0);
   });
 });

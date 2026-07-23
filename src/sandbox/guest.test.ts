@@ -144,6 +144,30 @@ describe("createGuestRouter — handshake + render", () => {
     expect(sent[0]!.targetOrigin).toBe(PARENT);
   });
 
+  test("an over-precise date cell is accepted and the data handed to render is floored to milliseconds (DW-6)", () => {
+    const { router, sent, rendered } = makeRouter();
+    const dateData: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "t", type: "date" }],
+      rows: [[{ kind: "date", iso: "2026-07-06T12:00:00.123456Z" }]],
+    };
+    router.handleMessage({
+      origin: PARENT,
+      data: {
+        type: "render",
+        protocolVersion: SANDBOX_PROTOCOL_VERSION,
+        markdown: "# hi",
+        chart: null,
+        data: dateData,
+      },
+    });
+    // The frame is accepted (ready + height emitted, no error)…
+    expect(sent.map((s) => s.frame.type)).toEqual(["ready", "height"]);
+    // …and render was handed the CANONICALIZED data, not the microsecond string.
+    expect(rendered).toHaveLength(1);
+    expect(rendered[0]!.data.rows[0]?.[0]).toEqual({ kind: "date", iso: "2026-07-06T12:00:00.123Z" });
+  });
+
   test("a message from a NON-parent source is dropped (never handshakes)", () => {
     // Distinct window sentinels: only `parentWin` is the real embedder.
     const parentWin = { role: "parent" };
