@@ -79,6 +79,27 @@ browser.
   URL is carried through). Contradicts `--persistent`.
 - **`--no-open`** — do not launch the OS default browser after boot.
 
+### Commands
+
+- **`quick-studio update`** — a read-only, advisory command. It detects how this
+  copy was installed and prints the exact command or URL to upgrade it (the
+  `npm i -g quick-studio@latest` command for an npm install, or the
+  [GitHub Releases](../../releases) download URL plus how to verify it against
+  `SHA256SUMS` for a standalone binary; both, if the install channel can't be told
+  apart). It performs no download and no self-replacement, and exits 0 without
+  booting the Core.
+
+### Update check
+
+On a Persistent boot, quick-studio does one **non-blocking** check for a newer
+release: it reads a cached result and, at most, prints a single stderr line when
+a newer version is available. If the cache is older than **24 hours** it fires a
+background request to the npm registry (`registry.npmjs.org`) and writes the
+result for the *next* boot — the boot itself never waits on the network, and any
+failure (offline, timeout, bad response) is a silent no-op. The request is a
+plain version lookup and **nothing else** is sent — no telemetry, no identifiers,
+no machine info. Ephemeral mode never participates: it reads and writes nothing.
+
 Behavior (the environment variables below are honored by the CLI; for `QS_MODE`,
 a flag or an explicit database URL overrides it — the others have no flag
 equivalent):
@@ -95,6 +116,8 @@ equivalent):
   `--ephemeral`/`--persistent`.
 - **`QS_NO_OPEN`** — a non-empty value suppresses browser-open, same as
   `--no-open`.
+- **`QS_NO_UPDATE_CHECK`** — a non-empty value disables the update check entirely,
+  in every mode (no cache read, no registry request).
 
 Press `Ctrl-C` to stop; the session ends cleanly and the port is released.
 

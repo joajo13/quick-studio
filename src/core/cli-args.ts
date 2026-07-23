@@ -35,6 +35,8 @@ import { resolveRunMode, type RunMode, type RunModeEnv } from "./run-mode.ts";
 export type CliArgsEnv = RunModeEnv & {
   /** Non-empty value suppresses browser-open, same as `--no-open`. */
   readonly QS_NO_OPEN?: string | undefined;
+  /** Non-empty value disables the TTL-cached update check (Story 11.5), in every mode. */
+  readonly QS_NO_UPDATE_CHECK?: string | undefined;
 };
 
 /** The resolved CLI decision handed to `bin/`. */
@@ -45,9 +47,11 @@ export type CliArgs = {
    * field rather than a discriminated union — see Design Notes in
    * spec-11-1-cli-surface-help-version.md for why: it keeps every pre-existing
    * field always present (so untouched tests never need to narrow) while
-   * still making help/version mutually exclusive by construction.
+   * still making help/version mutually exclusive by construction. `"update"`
+   * (Story 11.5) is a sibling early-exit request: `bin/` prints the upgrade
+   * instructions and exits 0 without booting the Core.
    */
-  readonly action: "run" | "help" | "version";
+  readonly action: "run" | "help" | "version" | "update";
   /** Selected run mode (Ephemeral vs Persistent). */
   readonly mode: RunMode;
   /**
@@ -124,6 +128,20 @@ export function parseCliArgs(argv: readonly string[], env: CliArgsEnv): CliArgs 
   if (values.help === true || values.version === true) {
     return {
       action: values.help === true ? "help" : "version",
+      mode: resolveRunMode(env),
+      databaseUrl: null,
+      openBrowser: !noOpen,
+    };
+  }
+
+  // `quick-studio update` (Story 11.5): the sole literal `update` positional is
+  // intercepted as the subcommand BEFORE the too-many-args guard and the URL
+  // shape check below. Unambiguous because a database URL always carries a scheme
+  // (`postgres://…`), so a bare `update` can never be mistaken for one. Any other
+  // positional falls through and is parsed as a URL exactly as before.
+  if (positionals.length === 1 && positionals[0] === "update") {
+    return {
+      action: "update",
       mode: resolveRunMode(env),
       databaseUrl: null,
       openBrowser: !noOpen,

@@ -22,6 +22,7 @@ import { CliArgsError, parseCliArgs, type CliArgs } from "../src/core/cli-args.t
 import { HELP_TEXT } from "../src/core/help-text.ts";
 import { createShutdownController, type ShutdownController } from "../src/core/lifecycle.ts";
 import { startCore } from "../src/core/server.ts";
+import { printUpdateInstructions, runUpdateCheck } from "../src/core/update-check.ts";
 import { VERSION } from "../src/core/version.generated.ts";
 
 /** Parse QS_PORT into a valid TCP port (0 = ephemeral). Rejects garbage early. */
@@ -65,6 +66,15 @@ if (cli.action === "version") {
   process.exit(0);
 }
 
+// `quick-studio update` (Story 11.5): a read-only, advisory subcommand. It
+// prints how to upgrade the running copy (detected from `process.execPath`) to
+// stdout — requested output, like help/version — and exits 0 without booting the
+// Core. No download, no write, no process replacement.
+if (cli.action === "update") {
+  printUpdateInstructions();
+  process.exit(0);
+}
+
 try {
   // Forward reference: `startCore` needs `onShutdownRequested` (so the UI's
   // `shutdown` RPC converges on the same teardown), but the controller itself
@@ -93,6 +103,13 @@ try {
 
   // stderr only, terse. Never log the session token.
   process.stderr.write(`quick-studio Core listening on ${core.url}\n`);
+
+  // TTL-cached update check (Story 11.5). Fire-and-forget, exactly like the
+  // `openBrowser` call below: launched after the Core is listening, NEVER
+  // awaited, structurally incapable of delaying or failing the boot. It self-
+  // swallows every failure and is a no-op in Ephemeral mode / when
+  // `QS_NO_UPDATE_CHECK` is set (both guarded before any disk or network access).
+  runUpdateCheck(cli.mode, process.env);
 
   // Port-Exposure Warning (FR-22): a non-loopback bind is reachable off-machine,
   // so anyone on the network can reach the UI and, through it, the connected
