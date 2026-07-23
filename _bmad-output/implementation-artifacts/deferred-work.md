@@ -728,7 +728,8 @@ origin: review-budget-followup
 source_spec: `spec-10-5-multi-root-schema-tree.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260722-141217-22a8; this entry preserves the lingering follow-up recommendation for a deliberate later review.
-status: open
+resolution: Follow-up adversarial review performed 2026-07-23 (3 rounds x 2 independent blind judges, out-of-loop session). Found and FIXED 6 confirmed defects in commit 4a49b52 — headline: a wrong-database READ/WRITE via a repointed connection that all three prior in-loop review passes missed (and whose false "read-only" premise had propagated into this ledger). 3 residuals escalated to DW-72/DW-73/DW-74. Verify: tsc clean, bun test 1567 pass / 0 fail (+3 new tests).
+status: done 2026-07-23
 
 ### DW-70: Query and chat tabs still execute against the boot target regardless of which connection root the user is browsing — neither can ACQUIRE a `connectionId` today
 origin: implementation of spec-10-6-tabs-carry-connection.md, 2026-07-22
@@ -779,4 +780,31 @@ origin: review-budget-followup
 source_spec: `spec-dw-2-csp-app-shell-hardening.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260722-181413-2b68; this entry preserves the lingering follow-up recommendation for a deliberate later review.
+status: open
+
+### DW-72: The multi-root schema tree can strand permanently on the `loading` phase — no roots, no warning, no Reintentar — when a failed mount read, a "Reintentar", and a Settings mutation with a failing `connections.list` interleave
+origin: adversarial follow-up review of 10-5, 2026-07-23 (commit 4a49b52); escalation E1
+source_spec: `spec-10-5-multi-root-schema-tree.md`
+location: `src/ui/schema/SchemaTree.tsx` (`loadTree`, `adoptBootRoot`, and the refresh failure branch)
+severity: medium
+found_by: both third-round blind judges (jd-105 follow-up review)
+reason: Pre-existing in 4ad9393 (NOT introduced by the review's own fixes). Both root-list readers refuse to CREATE a `roots` phase when they are not the winner — `adoptBootRoot`'s setPhase and the refresh failure branch are both guarded on `cur.kind === "roots"` — while `loadTree` demotes a live `error` phase back to `loading` before its own reply lands. Repro: mount reads fail (phase `error`) -> user clicks Reintentar (phase `loading`, seq 2) -> user adds a connection in Settings (refresh seq 3) -> loadTree's GOOD reply is superseded and commits nothing -> the refresh's `connections.list` fails and cannot leave `loading`, so the panel reads "loading connections…" for the rest of the session. Not fixed by the review because it needs a `loadTree` restructure (branch the phase commit on supersession instead of returning early, without publishing a non-authoritative list over a newer one) — beyond the protocol's 2-iteration cap, and it would ship un-re-judged.
+status: open
+
+### DW-73: A repointed connection's stale-catalog prune waits for the next COMMITTING root-list reader instead of applying eagerly, so a failed refresh `connections.list` leaves the old database's table list on screen until some later commit
+origin: adversarial follow-up review of 10-5, 2026-07-23 (commit 4a49b52); escalation E2
+source_spec: `spec-10-5-multi-root-schema-tree.md`
+location: `src/ui/schema/SchemaTree.tsx` (repoint-prune path), `src/ui/schema/schema-tree-state.ts` (banked-id set)
+severity: medium
+found_by: judge B, third round (jd-105 follow-up review); judge A independently traced the same area and found the durability sound — the two agreed on the mechanism, disagreed on severity
+reason: Residual of the review's own fix 1 (commit 4a49b52), which made the repoint invalidation DURABLE (banked id set cleared only by the reconciliation that applies it) but not IMMEDIATE. Dropping a root's cache needs only its key, never a fresh root list, so when the post-edit refresh's `connections.list` fails, the stale catalog of the old database stays visible until some later committing reader runs. Suggested fix: apply the prune synchronously when the repoint is banked, guarded on `phase.kind === "roots"` (pruning against an empty root list would wipe every cached root). Left open because it is a refinement, not a correctness hole — the wrong-database read/write itself is already closed by fix 1.
+status: open
+
+### DW-74: The two add-row affordances disagree on gating — the result-bar Add-Row is gated on `canMutate`, its in-grid `+ insert row` twin is not — so a PK-less table still offers an inline insert; whether to align them is a product call
+origin: adversarial follow-up review of 10-5, 2026-07-23 (commit 4a49b52); escalation E3
+source_spec: `spec-10-5-multi-root-schema-tree.md`
+location: `src/ui/workspace/DataGrid.tsx` (in-grid insert draft) vs the result-bar Add-Row button
+severity: low
+found_by: jd-105 follow-up review (pre-existing 7.2/3.3 disagreement, surfaced during the 10-5 pass)
+reason: The result-bar Add-Row button is gated on `canMutate` while its in-grid `+ insert row` twin is not, so a PK-less table still exposes the inline insert. Hiding the in-grid draft would remove insert for PK-less tables, which DataGrid documents as deliberate — so reconciling the two is a PRODUCT decision (which affordance is authoritative), not a review's to make. The insert itself is SAFE post-fix-1: it commits through `connectionScope`, landing in the tab's own database. Not a correctness defect; recorded for a product call.
 status: open
