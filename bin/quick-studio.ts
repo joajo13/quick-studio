@@ -19,8 +19,10 @@
 import { resolveBindHost } from "../src/core/binding.ts";
 import { openBrowser } from "../src/core/browser-open.ts";
 import { CliArgsError, parseCliArgs, type CliArgs } from "../src/core/cli-args.ts";
+import { HELP_TEXT } from "../src/core/help-text.ts";
 import { createShutdownController, type ShutdownController } from "../src/core/lifecycle.ts";
 import { startCore } from "../src/core/server.ts";
+import { VERSION } from "../src/core/version.generated.ts";
 
 /** Parse QS_PORT into a valid TCP port (0 = ephemeral). Rejects garbage early. */
 function resolvePort(): number {
@@ -48,6 +50,19 @@ try {
     process.exit(1);
   }
   throw err;
+}
+
+// --help / --version are the only two stdout writes anywhere in this file
+// (everything else is process.stderr.write): requested output, not
+// diagnostics, so they exit 0 and never boot the Core. Checked before
+// resolvePort() or anything else runs.
+if (cli.action === "help") {
+  process.stdout.write(HELP_TEXT);
+  process.exit(0);
+}
+if (cli.action === "version") {
+  process.stdout.write(`${VERSION}\n`);
+  process.exit(0);
 }
 
 try {

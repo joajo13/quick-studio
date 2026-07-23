@@ -808,3 +808,13 @@ severity: low
 found_by: jd-105 follow-up review (pre-existing 7.2/3.3 disagreement, surfaced during the 10-5 pass)
 reason: The result-bar Add-Row button is gated on `canMutate` while its in-grid `+ insert row` twin is not, so a PK-less table still exposes the inline insert. Hiding the in-grid draft would remove insert for PK-less tables, which DataGrid documents as deliberate — so reconciling the two is a PRODUCT decision (which affordance is authoritative), not a review's to make. The insert itself is SAFE post-fix-1: it commits through `connectionScope`, landing in the tab's own database. Not a correctness defect; recorded for a product call.
 status: open
+
+### DW-75: The npm publish allowlist (`files: ["src"]`) ships `*.test.ts` and the multi-MB generated bundles, and the generated modules live only in `.gitignore` (no `.npmignore`) — so an `npm publish` (which honors `.gitignore` as `.npmignore`) could exclude `version.generated.ts` and the UI bundles and ship a broken package
+origin: adversarial review of 11-1, 2026-07-23
+source_spec: `spec-11-1-cli-surface-help-version.md`
+location: `package.json` (`files`), `.gitignore` (the five `src/core/*.generated.ts` entries)
+severity: low
+found_by: Blind Hunter review pass on 11-1
+summary: The main package's file allowlist is coarse (`src` pulls in every co-located test and the ~3.5MB generated bundles) and the generated modules are only in `.gitignore` with no `.npmignore`, creating a packer-dependent hazard — `bun pm pack` includes the generated files, but `npm publish` treats `.gitignore` as `.npmignore` and would exclude them, publishing a package that crashes at launch.
+evidence: `bun pm pack` produced 185 files / 6.76MB including all `*.test.ts` and the generated bundles. Pre-existing before this story (the four other generated bundles already share this exact `.gitignore`-only situation); this story only added `version.generated.ts` following the established pattern. Publish/packaging is owned by Story 11.4, which generates a purpose-built manifest — this is the natural place to add an `npm pack --dry-run` assertion in CI and a tightened allowlist. Not this story's problem to fix.
+status: open

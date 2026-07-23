@@ -58,9 +58,20 @@ quick-studio prints the bound URL to stderr on start, e.g.
 `quick-studio Core listening on http://127.0.0.1:<port>`. Open that URL in your
 browser.
 
-Behavior (this epic honors the environment variables below; connecting to a
-database — including passing a database URL to select a session mode — arrives in
-a later epic and is not parsed by the CLI yet):
+### Flags
+
+- **`-h, --help`** — print usage and exit 0 (stdout; the Core never boots).
+- **`-v, --version`** — print the version and exit 0 (stdout; the Core never boots).
+- **`--persistent`** — select Persistent mode explicitly. Contradicts a database
+  URL positional (both can't be selected at once).
+- **`--ephemeral`** — select Ephemeral mode explicitly, with no database
+  connection configured (`quick-studio --ephemeral <url>` is also valid — the
+  URL is carried through). Contradicts `--persistent`.
+- **`--no-open`** — do not launch the OS default browser after boot.
+
+Behavior (the environment variables below are honored by the CLI; for `QS_MODE`,
+a flag or an explicit database URL overrides it — the others have no flag
+equivalent):
 
 - **`QS_HOST`** — overrides the bind host (default loopback `127.0.0.1`). A
   non-loopback value (a concrete IP or wildcard `0.0.0.0` / `::`) makes the Core
@@ -69,6 +80,11 @@ a later epic and is not parsed by the CLI yet):
   network and your data — use with intent.
 - **`QS_PORT`** — overrides the bind port. `0` (the default) picks an ephemeral
   free port.
+- **`QS_MODE`** — default run mode when no flag/URL is given: `persistent`
+  (default) or `ephemeral`. Overridden by a database URL positional or by
+  `--ephemeral`/`--persistent`.
+- **`QS_NO_OPEN`** — a non-empty value suppresses browser-open, same as
+  `--no-open`.
 
 Press `Ctrl-C` to stop; the session ends cleanly and the port is released.
 
