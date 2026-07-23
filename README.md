@@ -10,10 +10,39 @@ loopback, gated by a per-boot session token.
 
 ## Install
 
-### A. Standalone binary (recommended)
+### A. npm (recommended)
 
-Download the binary for your platform from the
-[GitHub Releases](../../releases) page:
+Only [Node.js](https://nodejs.org) `>= 18` is required — the published package
+ships a self-contained binary for your platform, so **no Bun** and no bundler are
+needed at run time.
+
+Run it once, without installing anything permanent:
+
+```sh
+npx -y quick-studio <db-url>
+```
+
+`-y` skips npx's install prompt. Or install it globally for a permanent command:
+
+```sh
+npm i -g quick-studio
+quick-studio
+```
+
+To update, ask for the newest version explicitly (this bypasses npx's cache):
+
+```sh
+npx quick-studio@latest <db-url>
+```
+
+npm installs only the prebuilt binary for your platform (`win32-x64`,
+`linux-x64`, or `linux-arm64`); the others are skipped automatically. macOS is
+not yet supported — use the standalone binary or wait for a later release.
+
+### B. Standalone binary
+
+Prefer no npm at all? Download the self-contained binary for your platform from
+the [GitHub Releases](../../releases) page:
 
 - **Linux (x64):** `quick-studio-linux-x64`
 - **Windows (x64):** `quick-studio-windows-x64.exe`
@@ -31,25 +60,6 @@ chmod +x quick-studio-linux-x64
 
 ```powershell
 .\quick-studio-windows-x64.exe
-```
-
-### B. Global package
-
-Requires [Bun](https://bun.sh) `>= 1.2.0` **installed and on your `PATH`** — the
-`quick-studio` command runs on Bun (the entry point is a Bun script). You can
-install the package globally with either bun or npm, but Bun must be present at
-run time in both cases:
-
-```sh
-bun add -g quick-studio
-# or (still requires Bun at run time)
-npm i -g quick-studio
-```
-
-Then run:
-
-```sh
-quick-studio
 ```
 
 ## Run
@@ -149,6 +159,14 @@ Build a self-contained binary locally:
 ```sh
 bun run build:binary   # → dist/quick-studio
 ```
+
+**Publishing note.** The repo's `package.json` is the **development** manifest,
+not the published artifact. The npm packages are **generated** by
+`scripts/build-npm-packages.ts` (invoked by `.github/workflows/publish.yml` on a
+release): it emits one self-contained package per platform plus a minimal
+`quick-studio` package with no runtime `dependencies` and no build scripts. Do
+not "fix" the repo manifest's `files`/`dependencies` for publishing, and do not
+run `npm publish` on the repo directly — publishing goes through that workflow.
 
 ### Run with Docker (pre-seeded demo DB)
 

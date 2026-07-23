@@ -838,3 +838,63 @@ found_by: Blind Hunter review pass on 11-3
 summary: The shim's binary resolution is a load-bearing cross-story contract on 11.4's packaging: platform manifests must omit a restrictive `exports` (or explicitly export `./package.json`), place the binary at `<pkgroot>/quick-studio[.exe]`, and set its exec bit; violating any of these makes an installed package fail resolution and surface the misleading "platform package was not installed" message.
 evidence: `require.resolve("<pkg>/package.json")` throws `ERR_PACKAGE_PATH_NOT_EXPORTED` for a package whose `exports` map omits `./package.json` (Node strict exports enforcement), and a binary not at the joined path or lacking the exec bit yields `ENOENT`/`EACCES` at spawn. 11.4 generates minimal manifests (no `dependencies`, no scripts), so a restrictive `exports` is unlikely — but nothing enforces it and the failure mode is a package that "works on the author's machine only." Natural fix in 11.4: assert the generated manifest has no `exports` (or exports `./package.json`), place the binary at the pinned path, `chmod +x`, and add an install-and-launch smoke check. Not this story's problem to fix (the shim code is correct given a sane manifest); the Design Notes over-claim of "immune to exports" was corrected in this pass.
 status: open
+
+### DW-78: `publish.yml` uses `oven-sh/setup-bun@v2` (a mutable tag) in a job that holds `id-token: write` — the OIDC publish credential is exposable to an unpinned third-party action, undercutting the workflow's whole "no long-lived token" security story
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`Set up Bun` step; job-scoped `permissions: id-token: write`)
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: The publish job grants `id-token: write` (to mint short-lived npm publish creds via Trusted Publishing) at job scope, so every step — including `oven-sh/setup-bun@v2`, pinned to a mutable tag rather than a commit SHA — runs with access to that token. A repointed tag on a third-party action could exfiltrate the credential. This extends the already-tracked "SHA-pin third-party actions" concern (referenced by DW-76) specifically to the new, more-sensitive publish workflow.
+evidence: GitHub Actions `permissions` are job-scoped (cannot be narrowed to a single step), and `actions/checkout@v4` / `actions/setup-node@v4` / `oven-sh/setup-bun@v2` are all tag-pinned per this repo's existing convention. Fixing only `publish.yml` to SHA-pin would diverge from that repo-wide convention, so this belongs to the same supply-chain-hardening pass that SHA-pins actions across all workflows (DW-76's referenced item). Not this story's problem to fix unilaterally; the OIDC-only design is otherwise sound.
+status: open
+
+### DW-79: `publish.yml` downloads the release binaries and wraps them with no integrity check against Story 11.2's `SHA256SUMS` — a tampered or corrupted asset (beyond the zero-byte case the packaging script now rejects) would be published verbatim
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`Download release binaries` step); `scripts/build-npm-packages.ts` (asset validation)
+severity: medium
+found_by: Blind Hunter review pass on 11-4
+summary: The publish workflow trusts whatever `gh release download` returns; the packaging script now rejects a missing/empty/non-file asset, but nothing verifies a checksum. A substituted or partially-corrupted binary that is non-empty would package and publish. The natural gate is comparing each asset against the `SHA256SUMS` file Story 11.2's release matrix emits.
+evidence: The epic context and 11.2's spec establish that every release attaches a `SHA256SUMS` file; this story's publish workflow does not consume it. Depends on 11.2 actually emitting `SHA256SUMS` (the current pre-11.2 `release.yml` does not), so wiring the check belongs with/after 11.2. Add a `sha256sum -c` step against the downloaded `SHA256SUMS` before running the packaging script. Not fixable in this story until 11.2 lands the checksum file.
+status: open
+
+### DW-80: nothing verifies the downloaded binary's build-time embedded `--version` equals the git tag / published package version — a tag/binary mismatch ships a `quick-studio@X` package wrapping a binary that reports `Y`
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`VERSION="${TAG#v}"`); the binary embeds `VERSION` via `scripts/build-version.ts` at release-build time
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: The published npm version derives purely from the git tag, while the binaries were compiled by a separate `release.yml` run off `package.json`'s version. If the operator tags `v1.2.3` without bumping `package.json` to `1.2.3` first, the package claims `1.2.3` around a binary whose `--version` prints `1.2.2`, with no failure anywhere. Consequence is a cosmetic/support mismatch (`--version` disagrees with the installed package), not a launch break.
+evidence: `build-version.ts` bakes `package.json`'s version into `version.generated.ts` at compile time; the tag drives the npm version independently. A cheap guard: after download, run one binary with `--version` in CI and assert it equals `VERSION`, failing the publish on mismatch. Out of this story's contract scope (which is packaging/publish mechanics, not release-versioning discipline); recorded for a later hardening pass.
+status: open
+
+### DW-81: the generated public packages declare no `license` field and copy no `LICENSE` file, so `npm publish` warns "No license field" and consumers/scanners see the packages as unlicensed (all-rights-reserved by default)
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `scripts/build-npm-packages.ts` (`platformManifest`, `mainManifest`)
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: Neither generated manifest sets `license` (nor `repository`/`author`/`homepage`), and no `LICENSE` file is included. For a package published to the public npm registry this is a real distribution/legal gap — the default is all-rights-reserved. It was NOT auto-patched because the repo itself declares no license and has no `LICENSE` file, so choosing one (MIT? Apache-2.0? proprietary?) is an owner decision the loop must not fabricate.
+evidence: `grep '"license"' package.json` → none; `ls LICENSE*` → none. The published packages inherit that unlicensed state consistently, but a public npm package should carry an explicit license. Fix once the owner decides: add a `LICENSE` file to the repo + a `license` field to `package.json`, then have the generator copy the LICENSE into the main package's `files` and set `license` on every generated manifest. Owner/product decision, not a loop-safe patch.
+status: open
+
+### DW-82: A GitHub prerelease later promoted to a full release never reaches the `latest` npm dist-tag — `publish.yml` triggers only on `release: published` (promotion fires `released`, not `published`), and even a manual re-run's idempotency skip ignores dist-tags, so a version stays stuck on `next` while `npm i quick-studio` keeps serving the older `latest`
+origin: follow-up review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`on.release.types: [published]`; the `publish_one` idempotency skip)
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: The prerelease→`--tag next` routing (added in the prior 11-4 review pass) has no promotion path. Shipping `v1.2.3` as a GitHub prerelease publishes it to `next`; un-ticking "prerelease" later fires the `released` activity type, which this workflow does not listen for, so the workflow never re-runs and `latest` never advances to `1.2.3`. Manually re-dispatching does not help either: `publish_one` skips any package already present at that version (`npm view`) without touching the dist-tag, so it never runs `npm dist-tag add`.
+evidence: GitHub `release` activity types distinguish `published` (fires for releases and prereleases when first published) from `released` (fires when a release is published or a prerelease is promoted to a full release) — the workflow subscribes only to the former. The natural fix has two parts with real tradeoffs the loop cannot verify without a live run: (a) add `released` to the trigger types (which double-fires the workflow on a normal full release — harmless only because publish is idempotent), and (b) make the idempotency branch reconcile the dist-tag via `npm dist-tag add "$pkg@$VERSION" "$NPM_TAG"` — but whether an OIDC/Trusted-Publishing-minted token is even scoped for dist-tag operations (vs publish only) is unverified in-loop. Deferred rather than patched: the whole prerelease path is speculative for a project that has not shipped v0.1.0, and forcing an unverifiable behavior change into a credential-holding workflow is riskier than a focused later pass. Not blocking for the first stable release.
+status: open
+
+### DW-83: `publish.yml`'s fixed 6×20s (~2 min) release-asset download-poll window may be too short for `release.yml`'s serial build matrix — `release: published` can fire while later legs are still compiling, so a release whose binaries are merely slow (not missing) would exhaust the poll, fail, and require a manual workflow re-run
+origin: follow-up review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`Download release binaries` step, `for attempt in 1 2 3 4 5 6` / `sleep 20`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter review pass on 11-4
+summary: The download step polls for all three release assets across 6 attempts × 20s ≈ 2 min before giving up loudly. If `release.yml` runs its build legs serially (`max-parallel: 1`) and the release is published on the first leg's upload, the `release: published` event that starts `publish.yml` fires while the remaining legs (checkout + bun install + UI build + `bun build --compile` + upload) are still running — easily longer than 2 min combined. The publish then fails on a release that is only slow to finish attaching assets, not genuinely incomplete.
+evidence: The poll window (6×20s) was a deliberate value chosen in the prior 11-4 review pass to tolerate the `published`-before-upload race; the concern here is that its magnitude is calibrated to nothing concrete because the target — 11.2's rebuilt three-platform `release.yml` — does not exist yet. The correct fix depends on that final shape: either raise the attempt count/backoff to cover realistic serial matrix wall-time (~10 min), or have `release.yml` publish the release only after all legs finish (build to a draft, flip to published last) so `published` fires when assets are already complete. Blocked on 11.2; wiring/tuning belongs with or after it. Not this story's problem to finalize in isolation.
+status: open
