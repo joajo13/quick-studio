@@ -818,3 +818,23 @@ found_by: Blind Hunter review pass on 11-1
 summary: The main package's file allowlist is coarse (`src` pulls in every co-located test and the ~3.5MB generated bundles) and the generated modules are only in `.gitignore` with no `.npmignore`, creating a packer-dependent hazard — `bun pm pack` includes the generated files, but `npm publish` treats `.gitignore` as `.npmignore` and would exclude them, publishing a package that crashes at launch.
 evidence: `bun pm pack` produced 185 files / 6.76MB including all `*.test.ts` and the generated bundles. Pre-existing before this story (the four other generated bundles already share this exact `.gitignore`-only situation); this story only added `version.generated.ts` following the established pattern. Publish/packaging is owned by Story 11.4, which generates a purpose-built manifest — this is the natural place to add an `npm pack --dry-run` assertion in CI and a tightened allowlist. Not this story's problem to fix.
 status: open
+
+### DW-76: The release workflow pins no Bun toolchain version (`oven-sh/setup-bun@v2` with no `bun-version`), so every release binary is built with whatever Bun is "latest" that day — release builds are non-reproducible and a single bad Bun release can break `bun build --compile` on all legs at once with no toolchain rollback independent of the tag
+origin: follow-up review of 11-2, 2026-07-23
+source_spec: `spec-11-2-release-matrix-native.md`
+location: `.github/workflows/release.yml` (`Set up Bun` step in the `build` job)
+severity: medium
+found_by: Blind Hunter review pass on 11-2
+summary: `oven-sh/setup-bun@v2` is used with no `bun-version` input, so the release matrix compiles every published binary with the day's latest Bun; the toolchain that produces the shipped artifacts is unpinned, making releases non-reproducible and exposing all legs simultaneously to a single regressive Bun release with no way to roll the toolchain back independently of the git tag.
+evidence: Pre-existing — the `setup-bun@v2` step predates this story and was unchanged by it (this story rebuilt the matrix around it, not the toolchain setup). Distinct from the already-deferred SHA-pinning of third-party actions: that hardens action *identity*, this pins the *build toolchain version*. Natural fix is to add `with: bun-version: <pinned>` (matching the `>=1.2.0` floor recorded in the keyring spike doc / README) across the workflow, ideally as part of the same supply-chain-hardening pass that SHA-pins the actions. Not this story's problem to fix.
+status: open
+
+### DW-77: The npm launcher shim resolves the per-platform binary via `require.resolve(`<pkg>/package.json`)` + a fixed `<pkgroot>/quick-studio[.exe]` path, so Story 11.4's generated platform-package manifests must carry no restrictive `exports` field (or must export `./package.json`) and must set the binary's executable bit — otherwise resolution throws `ERR_PACKAGE_PATH_NOT_EXPORTED`/`EACCES` on installs where the package is actually present, and the shim misreports "not installed"
+origin: review pass of 11-3, 2026-07-23
+source_spec: `spec-11-3-node-launcher-shim.md`
+location: `bin/quick-studio.cjs` (resolution + `child.on("error")`); consumed by Story 11.4's manifest generator + packaging script
+severity: low
+found_by: Blind Hunter review pass on 11-3
+summary: The shim's binary resolution is a load-bearing cross-story contract on 11.4's packaging: platform manifests must omit a restrictive `exports` (or explicitly export `./package.json`), place the binary at `<pkgroot>/quick-studio[.exe]`, and set its exec bit; violating any of these makes an installed package fail resolution and surface the misleading "platform package was not installed" message.
+evidence: `require.resolve("<pkg>/package.json")` throws `ERR_PACKAGE_PATH_NOT_EXPORTED` for a package whose `exports` map omits `./package.json` (Node strict exports enforcement), and a binary not at the joined path or lacking the exec bit yields `ENOENT`/`EACCES` at spawn. 11.4 generates minimal manifests (no `dependencies`, no scripts), so a restrictive `exports` is unlikely — but nothing enforces it and the failure mode is a package that "works on the author's machine only." Natural fix in 11.4: assert the generated manifest has no `exports` (or exports `./package.json`), place the binary at the pinned path, `chmod +x`, and add an install-and-launch smoke check. Not this story's problem to fix (the shim code is correct given a sane manifest); the Design Notes over-claim of "immune to exports" was corrected in this pass.
+status: open

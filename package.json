@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Lightweight local-first DB manager (Postgres + MySQL) — walking skeleton",
   "bin": {
-    "quick-studio": "bin/quick-studio.ts"
+    "quick-studio": "bin/quick-studio.cjs"
   },
   "files": [
     "bin",
@@ -12,6 +12,7 @@
     "README.md"
   ],
   "engines": {
+    "node": ">=18",
     "bun": ">=1.2.0"
   },
   "scripts": {
