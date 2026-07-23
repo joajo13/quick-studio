@@ -19,6 +19,7 @@
 import { resolveBindHost } from "../src/core/binding.ts";
 import { openBrowser } from "../src/core/browser-open.ts";
 import { CliArgsError, parseCliArgs, type CliArgs } from "../src/core/cli-args.ts";
+import { runFirstRunSetup, type FirstRunSetupResult } from "../src/core/first-run-setup.ts";
 import { HELP_TEXT } from "../src/core/help-text.ts";
 import { createShutdownController, type ShutdownController } from "../src/core/lifecycle.ts";
 import { startCore } from "../src/core/server.ts";
@@ -85,13 +86,55 @@ try {
   // if the timing invariant is ever broken. The thunk is only invoked from a
   // live RPC (post-boot), by which point `controller` is the real one.
   let controller: ShutdownController = { initiate: async () => {} };
-  const core = await startCore(resolvePort(), {
+
+  // Review fix: resolved BEFORE the first-run pre-flight (was previously passed
+  // inline to `startCore` after the prompt). `resolvePort()` is cheap, synchronous
+  // PARSING — a malformed `QS_PORT` now fails before the user is asked to type and
+  // confirm a passphrase. It does NOT (and cannot, without pre-binding) cover a
+  // port that parses but cannot be bound: the `listen()` happens inside `startCore`
+  // below, so an `EADDRINUSE` still surfaces after a store may have been created.
+  // That residual case is the outer catch's "failed to start Core", which is
+  // accurate — the Core genuinely failed to start.
+  const port = resolvePort();
+
+  // First-run setup pre-flight (Story 11.6): on a Persistent boot with no OS
+  // keychain reachable and no QS_PASSPHRASE/QS_PASSPHRASE_FD set, prompt
+  // interactively BEFORE the Core boots — never after, since the registries open
+  // their stores lazily and a wrong/declined passphrase would otherwise surface
+  // only as an opaque `internal_error` on the first RPC. Runs AFTER the
+  // help/version/update early exits above, so none of those paths ever prompt.
+  // `aborted` (Ctrl-C) is the one outcome only `bin/` may act on: exit 130 without
+  // ever booting the Core. `skip` means change nothing — `startCore` resolves its
+  // own provider exactly as today.
+  //
+  // Review fix: wrapped in its own try/catch, separate from the outer one below.
+  // `openCredentialStore` re-throws genuinely unexpected errors (not a typed
+  // `OpenResult` arm); left uncaught here it would propagate to the OUTER catch and
+  // be misreported as "failed to start Core" even though the Core was never
+  // started. Contained here, it is reported for what it is.
+  let setup: FirstRunSetupResult;
+  try {
+    setup = await runFirstRunSetup(cli.mode, process.env, {});
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`quick-studio: first-run setup failed: ${msg}\n`);
+    process.exit(1);
+  }
+  if (setup.outcome === "aborted") {
+    process.exit(130);
+  }
+
+  const core = await startCore(port, {
     onShutdownRequested: () => controller.initiate(),
     host: resolveBindHost(process.env.QS_HOST),
     mode: cli.mode,
     // Thread the in-memory Ephemeral URL through to the Core's connection manager
     // (Story 1.3). Held only in Core memory — never persisted, never logged here.
     databaseUrl: cli.databaseUrl ?? undefined,
+    // The ONE provider instance the pre-flight already resolved interactively
+    // (Story 11.6), or undefined on `skip` so `startCore` resolves it exactly as
+    // today (`resolvePassphraseProvider(process.env)`).
+    passphraseProvider: setup.outcome === "provider" ? setup.provider : undefined,
   });
   controller = createShutdownController({ stop: core.stop, exit: () => process.exit(0) });
 

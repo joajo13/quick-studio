@@ -10,7 +10,9 @@ import {
   PASSPHRASE_FD_ENV_VAR,
   envPassphraseProvider,
   fdPassphraseProvider,
+  hasPassphraseTransport,
   resolvePassphraseProvider,
+  staticPassphraseProvider,
   type FdReader,
   type PassphraseContext,
 } from "./passphrase-provider.ts";
@@ -246,6 +248,52 @@ describe("passphrase-provider — resolvePassphraseProvider", () => {
         reader,
       );
       expect(provider(CTX).outcome).toBe("declined");
+    }
+  });
+});
+
+/**
+ * Review fix: `hasPassphraseTransport` and `staticPassphraseProvider` are Story
+ * 11.6 exports with no direct coverage before this — they were only exercised
+ * indirectly through mocks in `first-run-setup.test.ts`. This block covers both
+ * directly.
+ */
+describe("passphrase-provider — hasPassphraseTransport", () => {
+  const cases: Array<[string, Record<string, string | undefined>, boolean]> = [
+    ["both unset", {}, false],
+    ["QS_PASSPHRASE non-blank", { QS_PASSPHRASE: "hunter2" }, true],
+    ["QS_PASSPHRASE blank (empty string)", { QS_PASSPHRASE: "" }, false],
+    ["QS_PASSPHRASE whitespace-only", { QS_PASSPHRASE: "   " }, false],
+    ["QS_PASSPHRASE_FD valid", { QS_PASSPHRASE_FD: "3" }, true],
+    ["QS_PASSPHRASE_FD malformed ('abc')", { QS_PASSPHRASE_FD: "abc" }, true],
+    ["QS_PASSPHRASE_FD blank (empty string)", { QS_PASSPHRASE_FD: "" }, false],
+    ["QS_PASSPHRASE_FD whitespace-only", { QS_PASSPHRASE_FD: "   " }, false],
+    ["both set", { QS_PASSPHRASE: "hunter2", QS_PASSPHRASE_FD: "3" }, true],
+  ];
+  for (const [description, env, expected] of cases) {
+    test(`${description} → ${expected}`, () => {
+      expect(hasPassphraseTransport(env)).toBe(expected);
+    });
+  }
+});
+
+describe("passphrase-provider — staticPassphraseProvider", () => {
+  test("returns the exact passphrase regardless of ctx.isFirstRun (true)", () => {
+    const provider = staticPassphraseProvider("captured-pass");
+    const r = provider({ reason: "keychain-unavailable", isFirstRun: true });
+    expect(r).toEqual({ outcome: "provided", passphrase: "captured-pass" });
+  });
+
+  test("returns the exact passphrase regardless of ctx.isFirstRun (false)", () => {
+    const provider = staticPassphraseProvider("captured-pass");
+    const r = provider({ reason: "keychain-unavailable", isFirstRun: false });
+    expect(r).toEqual({ outcome: "provided", passphrase: "captured-pass" });
+  });
+
+  test("stable across repeated calls with the same instance", () => {
+    const provider = staticPassphraseProvider("captured-pass");
+    for (let i = 0; i < 3; i++) {
+      expect(provider(CTX)).toEqual({ outcome: "provided", passphrase: "captured-pass" });
     }
   });
 });

@@ -160,6 +160,47 @@ with no keychain, it is instead derived from a passphrase you supply.
   while you believe you supplied a passphrase, check that the fd is actually
   inherited (e.g. the `3< secretfile` redirect or the `| QS_PASSPHRASE_FD=0` pipe
   is present) and that the fd number matches.
+- **Interactive prompt** — the third, terminal-driven way to supply a passphrase,
+  for a keychain-less host with neither env var set. It appears only when **all
+  four** of these hold:
+  1. the run is in Persistent mode — either explicitly via `--persistent`, or by
+     default when no `--url` and no `--ephemeral` was given and `QS_MODE` is not
+     `ephemeral`;
+  2. neither `QS_PASSPHRASE` nor `QS_PASSPHRASE_FD` is set;
+  3. the OS keychain is unreachable on this host;
+  4. **both** stdin and stderr are an interactive terminal (a TTY). stderr matters
+     because that is where the prompt is written: `quick-studio --persistent
+     2>err.log` never prompts, since the question would land in the file with
+     nothing on screen to answer.
+
+  It runs **before** the Core boots, with terminal echo disabled while you type.
+  On a brand-new store it asks you to type the passphrase **twice** (a typo would
+  otherwise permanently lock you out — there is no recovery if it is lost) before
+  creating `credential-store.meta.json` + `credential-store.enc` in the app-data
+  directory; if the two entries disagree three times, nothing is created and the
+  Core boots as it would have without a passphrase. On an **existing**
+  passphrase-protected store there is no confirmation, and a wrong passphrase is
+  re-asked up to **three times** in total. `Ctrl-C` at any point exits cleanly
+  without booting the Core, with echo restored, and without writing a descriptor,
+  ciphertext, or plaintext — though checking whether a passphrase is even needed
+  opens the credential store first, so an *empty* app-data directory may already
+  have been created by the time you press it. Pressing Enter on an empty prompt
+  is taken as "no passphrase" and stops asking. If all three attempts on an
+  existing store are wrong, the Core still boots — with a workspace that cannot
+  save a connection or an AI provider key until it is unlocked on a later run.
+  Exactly one prompt covers both the connection store and the AI-provider-key
+  store, which are expected to share one passphrase; that is an assumption of the
+  layout, not something enforced, so an app-data directory assembled by hand from
+  two differently-keyed stores is not handled.
+
+  If the terminal cannot hide typed input, quick-studio does **not** prompt with
+  echo on — it says so and falls back to the non-interactive transports below.
+
+  It **never** appears in Ephemeral mode, when the keychain is reachable, or on a
+  non-interactive stdin (piped input, CI, a service manager) — that case falls
+  straight through to today's behavior: a typed `passphrase-declined` result and a
+  stderr pointer at `QS_PASSPHRASE_FD`, the way to supply a passphrase
+  non-interactively (e.g. from a script or systemd unit).
 
 ## Development
 

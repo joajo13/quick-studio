@@ -2,11 +2,14 @@
  * quick-studio Core — passphrase provider seam (FR-5, AR-7, AD-5, UJ-2).
  *
  * The "offer / decline" boundary the credential store consults when the OS
- * keychain is unavailable. Story 2.3 ships only the headless default —
+ * keychain is unavailable. Story 2.3 shipped the headless default —
  * {@link envPassphraseProvider}, reading `QS_PASSPHRASE` — so the fallback works on
- * a keychain-less box today; Story 2.4 injects an interactive prompt later through
- * this same seam. The context carries NO secret; the passphrase flows out only via
- * a `provided` response.
+ * a keychain-less box today. Story 11.6 injects an interactive prompt through this
+ * SAME seam via {@link staticPassphraseProvider}: `bin/` runs the prompt
+ * asynchronously BEFORE the Core boots (the sync `PassphraseProvider` contract below
+ * is never made async) and hands `startCore` a pre-resolved closure that simply
+ * replays the captured answer. The context carries NO secret; the passphrase flows
+ * out only via a `provided` response.
  */
 
 import { readFileSync } from "node:fs";
@@ -130,6 +133,39 @@ export function fdPassphraseProvider(
   let cached: PassphraseResponse | undefined;
   return (_ctx: PassphraseContext): PassphraseResponse =>
     (cached ??= readOnce(fd, readFd));
+}
+
+/**
+ * True when an operator has already opted into an explicit passphrase transport —
+ * `QS_PASSPHRASE` non-blank, OR `QS_PASSPHRASE_FD` present-and-non-blank (its
+ * NUMERIC validity is {@link resolvePassphraseProvider}'s concern, not this
+ * predicate's: a malformed fd value still counts as "an operator chose a
+ * transport", so the Story 11.6 pre-flight must NOT layer an interactive prompt on
+ * top of it as a third silent fallback — see the malformed-fd handling below).
+ * Mirrors {@link resolvePassphraseProvider}'s precedence exactly; pure and total.
+ */
+export function hasPassphraseTransport(
+  env: Record<string, string | undefined>,
+): boolean {
+  const rawFd = env[PASSPHRASE_FD_ENV_VAR];
+  if (rawFd !== undefined && rawFd.trim().length > 0) return true;
+  const rawPassphrase = env[PASSPHRASE_ENV_VAR];
+  return rawPassphrase !== undefined && rawPassphrase.trim().length > 0;
+}
+
+/**
+ * A pre-resolved {@link PassphraseProvider}: ignores `ctx` entirely and always
+ * answers `provided` with the captured `passphrase`. This is how the Story 11.6
+ * interactive pre-flight (`first-run-setup.ts`) hands `startCore` an answer that
+ * was already obtained asynchronously BEFORE the Core boots, without making the
+ * `PassphraseProvider` seam itself async. The passphrase lives only in this
+ * closure — never logged, never placed in `process.env`.
+ */
+export function staticPassphraseProvider(passphrase: string): PassphraseProvider {
+  return (_ctx: PassphraseContext): PassphraseResponse => ({
+    outcome: "provided",
+    passphrase,
+  });
 }
 
 /**

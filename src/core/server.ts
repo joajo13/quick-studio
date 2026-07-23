@@ -28,7 +28,7 @@ import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 import { createLiveReportRegistry } from "./live-report-registry.ts";
 import { liveReportBundle } from "./live-report-bundle.generated.ts";
-import { resolvePassphraseProvider } from "./passphrase-provider.ts";
+import { resolvePassphraseProvider, type PassphraseProvider } from "./passphrase-provider.ts";
 import { createProviderRegistry } from "./provider-registry.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
@@ -370,6 +370,17 @@ export type StartCoreOptions = {
    * testability seam, mirroring `createDriver`.
    */
   startSandboxServer?: (options: StartSandboxServerOptions) => SandboxServer;
+  /**
+   * Pre-resolved passphrase provider (Story 11.6). Defaults to
+   * `resolvePassphraseProvider(process.env)` — today's env/fd behavior, byte-for-
+   * byte unchanged. `bin/`'s first-run pre-flight (`first-run-setup.ts`) prompts
+   * interactively BEFORE calling `startCore` and passes a
+   * `staticPassphraseProvider(passphrase)` closure here when it captured an
+   * answer, so the ONE-provider-per-boot invariant below still holds: whichever
+   * instance is resolved — the default or this override — is the single instance
+   * shared by BOTH persistent stores.
+   */
+  passphraseProvider?: PassphraseProvider;
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -525,7 +536,12 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // provider instance would read `""` → decline and starve the second store. A single
   // memoized provider reads the fd at most once and serves the captured passphrase to
   // both the connection and provider-key registries (and to any retry within a store).
-  const passphraseProvider = resolvePassphraseProvider(process.env);
+  //
+  // `options.passphraseProvider` (Story 11.6) is the pre-flight's pre-resolved
+  // closure when `bin/` already prompted interactively before this boot; absent,
+  // this resolves EXACTLY as before. Either way it is still resolved ONCE, here,
+  // and this single instance is what flows into both registries below.
+  const passphraseProvider = options.passphraseProvider ?? resolvePassphraseProvider(process.env);
 
   const connectionRegistry = createConnectionRegistry({
     storeDeps: { mode, passphraseProvider },
