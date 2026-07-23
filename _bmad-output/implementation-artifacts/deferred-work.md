@@ -82,7 +82,8 @@ origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 
 location: `isNotFoundError` (keyring spike wrapper)
 reason: Both review layers flagged the substring match as locale-fragile and as the linchpin of the passphrase-fallback decision — on backends that throw NoEntry (e.g. Windows Credential Manager) rather than returning null, a genuine miss or a localized/reworded error could be misclassified. It currently fails safe (unknown → `unavailable`), and the tested Linux path returns null (never hits the throw branch), so the robust fix genuinely needs Windows-observed error data the local spike could not gather. Story 2.2 must not commit Windows to the keychain path until confirmed.
 decision: [2026-07-21, user] Replace the English-substring heuristic with typed error codes/kinds from @napi-rs/keyring — observe the real per-platform error shapes in CI and map them (robust, locale-proof).
-status: open
+status: done 2026-07-23
+resolution: resolved by sweep bundle dw-keychain-typed-error-and-empty-key
 
 ### DW-11: Validate the macOS keychain path for `@napi-rs/keyring` under Bun (a `macos-latest` CI leg + a decision-record row) before the product ships a signed macOS build that relies on the keychain key-management path
 
@@ -98,7 +99,8 @@ origin: migrated from legacy ledger (code review of spec-2-1-keyring-spike.md), 
 location: `getSecret` (keyring spike wrapper)
 reason: `getSecret` only maps `null`/`undefined` to `not-found`, so a stored empty string surfaces as a legitimate `found` result. That is faithful for a generic wrapper, but an empty AES-256 key is never valid; the guard belongs in Story 2.2's key validation, not in the spike wrapper (patching it here would risk masking a legitimately-stored empty value). Latent until the real store loads keys.
 decision: [2026-07-21, user] Treat a keychain entry that round-trips as "" as effectively not-found (reject it; fall back to re-create/passphrase). An empty encryption key is never legitimate.
-status: open
+status: done 2026-07-23
+resolution: resolved by sweep bundle dw-keychain-typed-error-and-empty-key
 
 ### DW-13: In Story 2.2's durable keychain API, distinguish an invalid-argument error (e.g. empty/blank `service` or `account` making `new Entry()` throw) from a genuine backend-unavailable condition, rather than letting the wrapper's catch-all classify every non-not-found throw as `unavailable`
 
