@@ -246,6 +246,41 @@ export function pruneByRoot<T>(
   return next;
 }
 
+/**
+ * The root keys a root-list reader may KEEP cached state for: every live root, MINUS every
+ * connection whose saved record was repointed (its url and/or its pinned schema changed in
+ * Settings) and whose cache has not actually been dropped yet.
+ *
+ * An edit keeps the connection's id, so the plain liveness rule above — which only drops
+ * roots that are GONE — leaves a repointed root standing with the catalog of the database
+ * it used to point at, and nothing can ever refetch it: `shouldFetchOnExpand` fetches only
+ * from `idle`, and "Reintentar" is rendered only for a root in `error`. Excluding it here
+ * hands it to {@link pruneByRoot}/{@link pruneSetByRoot} as if it were removed, which
+ * returns it to collapsed `idle` — the one state that re-introspects on the next expand.
+ *
+ * This mirrors what Core already does one layer down: `connection-targets.ts` closes and
+ * evicts a cached manager whose stored url or pinned schema no longer matches the registry.
+ * A name-only edit contributes no id and changes nothing — the target is the same database,
+ * so collapsing that root would cost a click and buy nothing.
+ *
+ * A SET, not one id, because the invalidation is DURABLE STATE rather than an event: the
+ * reader that learned about a repoint may never reach a commit (its `connections.list` can
+ * fail, or a newer read can supersede it), so ids must accumulate until a reconciliation
+ * actually applies them — otherwise the stale catalog outlives the only signal about it.
+ * Ids naming no live root simply do not appear in the result, so a connection repointed and
+ * then removed needs no special case.
+ */
+export function retainedRoots(
+  roots: ReadonlyArray<RootDescriptor>,
+  repointedConnectionIds: ReadonlySet<string>,
+): ReadonlySet<string> {
+  const live = new Set(roots.map((r) => r.key));
+  // Only ever SAVED connections' ids (Settings edits no other kind of record), so this
+  // can never delete the boot sentinel — the boot target has no registry record to edit.
+  for (const id of repointedConnectionIds) live.delete(rootKey(id));
+  return live;
+}
+
 /** {@link pruneByRoot} for the expansion Sets (root, schema and table keys alike). */
 export function pruneSetByRoot(
   keys: ReadonlySet<string>,

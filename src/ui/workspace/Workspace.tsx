@@ -339,6 +339,14 @@ export function Workspace({
   // (not a boolean/flag) so back-to-back mutations each register as their own change.
   const [registryRevision, setRegistryRevision] = useState(0);
 
+  // The connection the mutation behind the CURRENT `registryRevision` repointed (a new url
+  // and/or a changed pinned schema), or `null` for an add, a remove or a name-only edit.
+  // Set in the same commit as the bump, so the tree's refresh always reads the id belonging
+  // to the mutation it is reconciling. It exists because an edit keeps the record's id: the
+  // root survives reconciliation, and without this it would keep serving the cached catalog
+  // of the database it used to point at, with no path anywhere in the tree to refetch it.
+  const [repointedConnectionId, setRepointedConnectionId] = useState<string | null>(null);
+
   // The LIVE saved-connection set (Story 10.6) — the only rpc this shell makes. `null` means
   // "not known yet" (in flight, or the read failed), which `isTabConnectionMissing` treats as
   // "never flag a tab": a registry read that never answered must not accuse a restored tab of
@@ -435,6 +443,7 @@ export function Workspace({
                 onSchemaLoaded={onSchemaLoaded}
                 extraTables={extraTables}
                 registryRevision={registryRevision}
+                repointedConnectionId={repointedConnectionId}
               />
             </div>
           </div>
@@ -484,7 +493,12 @@ export function Workspace({
                   tables={allTables}
                   schemas={schemas}
                   onTableCreated={onTableCreated}
-                  onRegistryChanged={() => setRegistryRevision((n) => n + 1)}
+                  onRegistryChanged={(repointed) => {
+                    // Both setters land in ONE commit, so the tree's revision-keyed effect
+                    // never sees a bump paired with the previous mutation's id.
+                    setRepointedConnectionId(repointed ?? null);
+                    setRegistryRevision((n) => n + 1);
+                  }}
                   queryDraft={activeTab !== null ? (queryDrafts.get(activeTab.id) ?? "") : ""}
                   onQueryDraftChange={(sql) => {
                     if (activeTab !== null) onQueryDraftChange(activeTab.id, sql);

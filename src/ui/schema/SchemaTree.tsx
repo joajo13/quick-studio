@@ -49,6 +49,7 @@ import {
   mergeTables,
   pruneByRoot,
   pruneSetByRoot,
+  retainedRoots,
   schemaKey,
   shouldFetchOnExpand,
   tableKey,
@@ -416,6 +417,7 @@ export function SchemaTree({
   onSchemaLoaded,
   extraTables = [],
   registryRevision = 0,
+  repointedConnectionId = null,
 }: {
   /** The currently-bound table (drives the single `.on` highlight), or null. */
   activeTable: TableRef | null;
@@ -453,6 +455,19 @@ export function SchemaTree({
    * root the user already opened. `0` is the mount value and fetches nothing extra.
    */
   registryRevision?: number;
+  /**
+   * The saved connection whose record the mutation behind this `registryRevision`
+   * REPOINTED — its url and/or its pinned schema changed — or `null` when that mutation
+   * added a connection, removed one, or only renamed one.
+   *
+   * An edit keeps the connection's id, so the root survives reconciliation with the cached
+   * catalog of the database it used to point at, and no path can refetch it (a `ready` root
+   * renders no "Reintentar" and re-expanding is a cache hit). Naming the repointed id lets
+   * the refresh drop exactly that one root's state — the same thing Core does one layer
+   * down, where `connection-targets.ts` evicts a cached manager whose stored url or pinned
+   * schema no longer matches the registry.
+   */
+  repointedConnectionId?: string | null;
 }): React.JSX.Element {
   const [phase, setPhase] = useState<TreePhase>({ kind: "loading" });
   // Per-root introspection state, keyed by `RootDescriptor.key`. A Map (not a field on
@@ -483,6 +498,12 @@ export function SchemaTree({
   // older reply can land last and drop the just-saved connection with no further bump
   // to recover from. Only the newest issued read may commit.
   const treeSeqRef = useRef(0);
+  // The same discipline PER ROOT: `loadRoot`'s issue counter, keyed by `RootDescriptor.key`.
+  // Never reset or pruned — that is the point. A key that is deleted and later re-created
+  // (the repoint path is the only one that does this) keeps its counter, so a `connect`
+  // issued before the repoint can be recognised as superseded by the one issued after,
+  // instead of being waved through by a presence test that the re-creation just made true.
+  const rootSeqRef = useRef<Map<string, number>>(new Map());
   // `states` mirrored into a ref, written through `updateStates` so the two can never
   // drift. A functional `setState` updater runs during the NEXT render, so its result
   // cannot be read at the call site — and an in-flight `connect` needs exactly that
@@ -494,6 +515,13 @@ export function SchemaTree({
   // boot root, and therefore an empty `schemaTables`) is still very much in force —
   // leaving a tree that looks healthy on top of a dead ERD.
   const bootWarningRef = useRef<string | null>(null);
+  // Connections repointed in Settings whose cached catalog has NOT been dropped yet. A ref,
+  // and additive, because the invalidation is durable state, not an event: the refresh that
+  // learns of a repoint can fail its own `connections.list`, be superseded by a tree-level
+  // "Reintentar", or be torn down by the next mutation — and a stale catalog that outlives
+  // its only signal is exactly the wrong-database read this exists to stop. Ids stay here
+  // until a reconciliation actually prunes them, and BOTH root-list readers apply them.
+  const pendingRepointRef = useRef<ReadonlySet<string>>(new Set());
   const updateStates = (
     next: (cur: ReadonlyMap<string, RootState>) => ReadonlyMap<string, RootState>,
   ): void => {
@@ -526,18 +554,32 @@ export function SchemaTree({
     // `connect`s whose reply order decides the surviving state, and fire `onSchemaLoaded`
     // twice for the boot root.
     if (statesRef.current.get(descriptor.key)?.kind === "loading") return;
+    // IDENTITY, not just presence. The `loading` bail above orders two activations of one
+    // key against each other only while the key SURVIVES; a repoint deletes a live root's
+    // `loading` entry (`retainedRoots`) and the very same id can then be re-expanded, so
+    // two `connect`s for one key really can be in flight and the later-landing one wins.
+    // A per-root monotonic token settles that by identity: only the newest issued fetch for
+    // this key may commit, so a slow pre-repoint reply can never paint the OLD database's
+    // catalog over the new target's — the tree's own `treeSeqRef` discipline, per root.
+    const seq = (rootSeqRef.current.get(descriptor.key) ?? 0) + 1;
+    rootSeqRef.current.set(descriptor.key, seq);
     updateStates((cur) => new Map(cur).set(descriptor.key, { kind: "loading" }));
     void rpc<ConnectResult>(
       "connect",
       descriptor.connectionId === null ? undefined : { connectionId: descriptor.connectionId },
     ).then((reply) => {
       if (!alive.current) return;
+      // Superseded by a newer fetch for this same root (the repoint-then-re-expand race).
+      if (rootSeqRef.current.get(descriptor.key) !== seq) return;
       // LIVENESS: the root may have been PRUNED while this `connect` was in flight (the
       // user removed that connection in Settings). `loadRoot` writes this key as
       // `loading` before firing and `pruneByRoot` deletes it on removal, so "the key is
       // still present" is exactly the liveness test — without it the reply resurrects a
       // dead root's state and seeds dead keys into `expandedSchemas`, and no later prune
-      // ever cleans them up. The boot root is never pruned, so it always passes.
+      // ever cleans them up. It stays alongside the token because it answers a different
+      // question: the token orders fetches, this one asks whether the root exists at all
+      // (a removal issues no new fetch, so its token never advances). The boot root is
+      // never pruned, so it always passes.
       if (!statesRef.current.has(descriptor.key)) return;
       const next = connectStateFromReply(reply);
       updateStates((cur) => (cur.has(descriptor.key) ? new Map(cur).set(descriptor.key, next) : cur));
@@ -555,6 +597,81 @@ export function SchemaTree({
       }
       onSchemaLoaded?.(next.schema.tables, descriptor.connectionId);
     });
+  };
+
+  /**
+   * BOOT-ROOT MOUNT EXCEPTION (AR-12): the default target auto-expands and introspects,
+   * exactly as the single-root tree always did. It is the ONLY root that does, and
+   * `App.tsx`'s `schemaTables` (ERD, create-table schemas, PK resolution) depends on it.
+   *
+   * Shared by BOTH root-list readers, because either can be the one that first puts a boot
+   * root on the tree: `loadTree` at mount (and on a retry that recovers a failed read), and
+   * the registry refresh whenever it commits a root list `loadTree` learned the boot target
+   * for but was superseded before it could act on (see the retention above the ordering
+   * guard). A boot root that appears without introspecting leaves `schemaTables` empty for
+   * the whole session — the exact degradation this exception exists to prevent.
+   *
+   * The EXPANSION is gated by the same `idle`-only rule as the fetch, not applied
+   * unconditionally: a `ready` boot root must neither re-handshake nor be forced back open,
+   * and re-expanding a 400-table root the user deliberately collapsed (to reach the saved
+   * roots below it, say, and then hit the tree-level "Reintentar") undoes their own action.
+   */
+  const ensureBootRoot = (roots: ReadonlyArray<RootDescriptor>): void => {
+    const boot = roots.find((r) => r.connectionId === null);
+    if (boot === undefined) return;
+    if (!shouldFetchOnExpand(statesRef.current.get(boot.key) ?? IDLE)) return;
+    setExpandedRoots((cur) => (cur.has(boot.key) ? cur : new Set(cur).add(boot.key)));
+    loadRoot(boot);
+  };
+
+  /**
+   * The ONE reconciliation both root-list readers run once they hold an authoritative root
+   * list: drop every entry whose root is gone (a removed connection) or whose target moved
+   * out from under it (a repointed one), then honour the boot-root mount exception.
+   *
+   * Sharing it is what makes the repoint invalidation durable. Applied ids are cleared only
+   * HERE, after the prune they caused has actually been committed — so a repoint whose own
+   * refresh never got to commit is still applied by whatever reader commits next, including
+   * the tree-level "Reintentar" that used to prune with a repoint-blind liveness set and so
+   * looked like a recovery path while provably not being one.
+   */
+  const reconcile = (roots: ReadonlyArray<RootDescriptor>): void => {
+    const keep = retainedRoots(roots, pendingRepointRef.current);
+    pendingRepointRef.current = new Set();
+    updateStates((cur) => pruneByRoot(cur, keep));
+    setExpandedRoots((cur) => pruneSetByRoot(cur, keep));
+    setExpandedSchemas((cur) => pruneSetByRoot(cur, keep));
+    setExpandedTables((cur) => pruneSetByRoot(cur, keep));
+    ensureBootRoot(roots);
+  };
+
+  /**
+   * Contribute the boot root a SUPERSEDED `loadTree` proved exists. `connection.active` has
+   * exactly one reader, so when the refresh commits its root list first — it can, the two
+   * readers race in both directions — it builds from `activeRef === null` and the boot root
+   * is simply absent, with `schemaTables` empty for the session and (since the warning was
+   * never written either) no line on screen and no Reintentar to click. Retaining `activeRef`
+   * above the ordering guard is only half the fix; this is the other half: splice the one
+   * root the newer reader could not know about into the list it committed, without touching
+   * the saved-connection half it owns.
+   */
+  const adoptBootRoot = (): void => {
+    const active = activeRef.current;
+    if (active === null || !active.hasTarget) return;
+    // Built from the FRESHEST known registry, which is whatever the newer reader just
+    // stored — so this is that reader's own list with the boot root spliced back in front,
+    // never an older one resurrected.
+    const roots = buildRoots(active, summariesRef.current);
+    setPhase((cur) =>
+      cur.kind === "roots" && !cur.roots.some((r) => r.connectionId === null)
+        ? { ...cur, roots }
+        : cur,
+    );
+    // Full reconciliation, not just the boot exception: this can be the last commit of the
+    // sequence, and banked repoints must not be left waiting on a reader that never comes.
+    // Idempotent against the newer reader's own prune (both `prune*` return the same
+    // reference when nothing is dropped).
+    reconcile(roots);
   };
 
   /**
@@ -584,10 +701,41 @@ export function SchemaTree({
       rpc<ListConnectionsResult>("connections.list"),
     ]).then(([activeReply, listReply]) => {
       if (!alive.current) return;
+      // RETAINED BEFORE THE ORDERING GUARD, deliberately. `connection.active` describes a
+      // CLI/env boot argument that cannot change mid-session, and this is its only reader —
+      // the registry refresh never re-reads it — so a superseded reply is still the only
+      // proof of the boot target anyone will get. Dropping it with the reply is what let a
+      // refresh that overtook the mount read rebuild the roots from `activeRef === null`:
+      // no boot root, no mount introspection, an empty `schemaTables` (dead ERD, empty
+      // create-table schema list, unresolvable PKs) for the whole session — and, since the
+      // warning was dropped with it, not one word on screen and no Reintentar to click.
+      // `summariesRef` stays BELOW the guard: the registry is mutable and the refresh
+      // writes it too, so an older list landing late must not regress a newer one.
+      if (activeReply.ok) {
+        activeRef.current = activeReply.result;
+        // CLEARED here too, not only on the winning path below. A superseded reply is proof
+        // the boot target IS readable, and the clear used to sit below the guard — so a
+        // retry that succeeded but lost the race left "no se pudo leer la conexión de
+        // arranque" pinned above the very boot root `adoptBootRoot` then spliced in, green
+        // and fully introspected, with every later refresh re-publishing the same dead
+        // string off this ref. Safe in the other direction as well: a failed read only ever
+        // means "unknown", so an `ok` from any read is the more authoritative answer.
+        bootWarningRef.current = null;
+      } else if (activeRef.current === null && bootWarningRef.current === null) {
+        // Same retention for the failure: with no boot knowledge at all, a superseded read
+        // is also the only thing that knows the tree is degraded. Only ever RAISES a warning
+        // no one has raised yet, so it cannot resurrect one an `ok` reply just cleared.
+        bootWarningRef.current = bootTargetWarning(activeReply.error);
+      }
       // A newer root-list read (another Reintentar, or a registry refresh) was issued
       // while this one was in flight — it owns `phase` now, so this reply must not
-      // overwrite it with an older list.
-      if (seq !== treeSeqRef.current) return;
+      // overwrite it with an older list. It may, however, have committed that list before
+      // this reply taught anyone a boot target exists, so hand it the one root it could
+      // not have known about before standing down.
+      if (seq !== treeSeqRef.current) {
+        adoptBootRoot();
+        return;
+      }
       // Both calls are pure reads, and a FAILED one means "unknown", never "gone". On the
       // first mount the refs are empty so this reads exactly as a plain degradation; on a
       // RETRY it is what stops a transient failure from deleting what we already proved:
@@ -595,7 +743,7 @@ export function SchemaTree({
       // (and with it the ERD's catalog) off the tree, and a demoted `connections.list`
       // would wipe every saved root — the very thing the refresh effect refuses to do.
       // The failures are still surfaced, never swallowed: `mountWarning` renders them.
-      if (activeReply.ok) activeRef.current = activeReply.result;
+      // (`activeRef` was already retained above the guard, for the same reason.)
       if (listReply.ok) summariesRef.current = listReply.result;
       const active = activeRef.current;
       const summaries = summariesRef.current;
@@ -623,26 +771,13 @@ export function SchemaTree({
           listReply.ok ? null : listReply.error,
         ),
       });
-      // Same reconciliation the refresh effect performs: a root that is genuinely gone
-      // takes its cached state and expansion keys with it. Without this the orphans
-      // survive forever AND `loadRoot`'s liveness guard (`statesRef.current.has`) keeps
-      // accepting replies for a root that no longer exists. Safe here precisely because
-      // of the retention above — the list only ever SHRINKS on an authoritative reply.
-      const live = new Set(roots.map((r) => r.key));
-      updateStates((cur) => pruneByRoot(cur, live));
-      setExpandedRoots((cur) => pruneSetByRoot(cur, live));
-      setExpandedSchemas((cur) => pruneSetByRoot(cur, live));
-      setExpandedTables((cur) => pruneSetByRoot(cur, live));
-      // BOOT-ROOT MOUNT EXCEPTION: the default target auto-expands and introspects now,
-      // exactly as the single-root tree always did. It is the ONLY root that does, and
-      // `App.tsx`'s `schemaTables` (ERD, create-table schemas, PK resolution) depends on it.
-      // Guarded by the same `idle`-only rule every other root obeys, so a RETRY of this
-      // read can never re-handshake (or re-`onSchemaLoaded`) a boot root already `ready`.
-      const boot = roots.find((r) => r.connectionId === null);
-      if (boot !== undefined) {
-        setExpandedRoots((cur) => (cur.has(boot.key) ? cur : new Set(cur).add(boot.key)));
-        if (shouldFetchOnExpand(statesRef.current.get(boot.key) ?? IDLE)) loadRoot(boot);
-      }
+      // The SAME reconciliation the refresh effect performs (shared, so the two cannot
+      // drift): a root that is genuinely gone — or one whose target was repointed and whose
+      // invalidation no reader has applied yet — takes its cached state and expansion keys
+      // with it. Without it the orphans survive forever AND `loadRoot`'s liveness guard
+      // keeps accepting replies for a root that no longer exists. Safe here precisely
+      // because of the retention above: the list only ever SHRINKS on an authoritative reply.
+      reconcile(roots);
     });
   };
 
@@ -660,10 +795,23 @@ export function SchemaTree({
   // REGISTRY-DRIVEN REFRESH: a mount-only fetch froze the root list for the session
   // (saving a connection added no root until an app restart — verbatim the complaint
   // this story exists to fix), so every registry mutation re-reads the list and
-  // reconciles. Only the removed roots' entries are dropped; survivors keep the exact
-  // same values under the same keys, so nothing they hold is re-fetched or reset.
+  // reconciles. Only the removed roots' entries are dropped — plus any REPOINTED one's, whose
+  // id survived an edit that pointed it at a different database; every other survivor keeps
+  // the exact same values under the same keys, so nothing it holds is re-fetched or reset.
+  //
+  // `repointedConnectionId` is deliberately NOT a dependency: it is set in the same commit as
+  // the revision bump that describes it, so this body always reads the id belonging to the
+  // mutation it is reconciling — while listing it would re-run the whole refetch when it
+  // later resets to `null` for an unrelated add/remove. The id is banked SYNCHRONOUSLY here,
+  // before the round-trip, precisely because this effect run may never reach its commit: a
+  // failed list read, a "Reintentar" that supersedes it, or the next mutation's cleanup all
+  // end it early, and the prop is gone by then. Banked, it survives for whichever reader
+  // commits next (`reconcile`).
   useEffect(() => {
     if (registryRevision === 0) return;
+    if (repointedConnectionId !== null) {
+      pendingRepointRef.current = new Set(pendingRepointRef.current).add(repointedConnectionId);
+    }
     let mounted = true;
     // Shares `loadTree`'s token so the two readers are ordered against EACH OTHER, not
     // just against themselves: whichever was issued last is the one allowed to commit.
@@ -685,16 +833,16 @@ export function SchemaTree({
       // from the FRESHEST known registry rather than from the mount-time one.
       summariesRef.current = reply.result;
       const roots = buildRoots(activeRef.current, reply.result);
-      const live = new Set(roots.map((r) => r.key));
       // A SUCCESSFUL refresh clears only the REGISTRY warning it just disproved. A live
       // boot-target warning survives: the degradation it reports (no boot root, empty
       // `schemaTables`) is untouched by anything the registry has to say, and dropping
       // the line would leave a healthy-looking tree over a dead ERD.
       setPhase({ kind: "roots", roots, warning: bootWarningRef.current });
-      updateStates((cur) => pruneByRoot(cur, live));
-      setExpandedRoots((cur) => pruneSetByRoot(cur, live));
-      setExpandedSchemas((cur) => pruneSetByRoot(cur, live));
-      setExpandedTables((cur) => pruneSetByRoot(cur, live));
+      // Every live root KEEPS its cached state (IG-A) — except a repointed one, which keeps
+      // its id but no longer describes the same database. Shared with `loadTree`, and it is
+      // what clears the banked repoints, so exactly one reader can be the one that applies
+      // them and neither can silently skip them.
+      reconcile(roots);
     });
     return () => {
       mounted = false;

@@ -118,9 +118,20 @@ function TableTabView({
   const [mutating, setMutating] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
 
-  // Exactly one PK column is the executor's `resolveSinglePkTable` precondition. Without
-  // it the tab is fully READ-ONLY: inline edit and row delete are disabled AND the
-  // Add-Row affordance is hidden (see the result bar below), so insert goes too.
+  // Exactly one PK column is the executor's `resolveSinglePkTable` precondition — the two
+  // PK-ADDRESSED mutations (inline edit, row delete) are disabled without it, and so is the
+  // result bar's Add-Row below.
+  //
+  // NOT a read-only tab, despite what this comment claimed until the 10.5 follow-up review:
+  // INSERT needs no PK (`executeInsert` has no `resolveSinglePkTable` precondition), and
+  // `DataGrid` deliberately keeps its own in-grid `+ insert row` draft available whatever
+  // `canMutate` says — so an insert stays reachable here. That is SAFE (the draft commits
+  // through `runOp`, which spreads `connectionScope`, so it lands in this tab's own
+  // database and never another), but it is not the "no catalog ⇒ no writes" property the
+  // `primaryKeys` bail was described as buying. The two add-row affordances disagreeing —
+  // one gated on `canMutate`, its in-grid twin not — is a pre-existing 7.2/3.3 seam, left
+  // for the product call rather than silently resolved by a review.
+  //
   // A SAVED-CONNECTION tab always lands here: `primaryKeys` is resolved out of the shared
   // `allTables` catalog, which since Story 10.5 describes the BOOT target only, and
   // `App.tsx` deliberately refuses to answer for a non-null `ref.connectionId` rather
@@ -673,8 +684,10 @@ export function TabContent({
    * schema tree can re-read `connections.list` and reconcile its roots. Fired from the
    * Settings mutation itself — not from a tab close — because the tree and Settings are
    * siblings in one React tree and a mount-only fetch froze the root list for the session.
+   * The optional argument names a connection the mutation REPOINTED (see `SettingsPanel`),
+   * which the tree needs because such a root survives reconciliation with a stale catalog.
    */
-  onRegistryChanged?: () => void;
+  onRegistryChanged?: (repointedConnectionId?: string) => void;
   /**
    * The live saved connections (Story 10.6), or `null` while the `connections.list` read is
    * in flight / after it failed. `null` is "not known yet" and NEVER flags a tab — see
@@ -734,6 +747,14 @@ export function TabContent({
       // per-table state (page/data/grid/error) and fires a single fetch. The owning
       // connection is part of that identity (Story 10.5) — the same `schema.name` under
       // two different roots is two different tables and must not reuse one mount's rows.
+      //
+      // A REPOINT (a Settings edit moving a saved connection to another database) leaves
+      // every part of this key identical, so it triggers no remount — but it needs none:
+      // only the ACTIVE tab's body is mounted, and repointing requires the Settings tab to
+      // be active, so this body is unmounted throughout and refetches from the live target
+      // when the user comes back. What survives the repoint is the tab's BINDING, which
+      // still names a `schema.name` chosen in the old database — the ledger's open 10.6
+      // entry, not something a key can fix.
       <TableTabView
         key={`${tab.table.connectionId ?? ""}::${tab.table.schema}.${tab.table.name}`}
         table={tab.table}

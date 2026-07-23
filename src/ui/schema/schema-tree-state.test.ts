@@ -29,6 +29,7 @@ import {
   mergeTables,
   pruneByRoot,
   pruneSetByRoot,
+  retainedRoots,
   rootKey,
   schemaKey,
   shouldFetchOnExpand,
@@ -263,6 +264,64 @@ describe("registry-refresh reconciliation (IG-A)", () => {
     );
     // Nothing dead ⇒ the same reference (no needless re-render).
     expect(pruneSetByRoot(expanded, new Set([BOOT_ROOT_KEY, "conn-a", "conn-b"]))).toBe(expanded);
+  });
+
+  test("a REPOINTED connection is excluded from the retained set even though its id survived", () => {
+    const roots = buildRoots(EPHEMERAL_BOOT, [summary("conn-a", "alpha"), summary("conn-b", "beta")]);
+    // An edit that only renamed a connection banks no id: every root keeps its cache.
+    expect([...retainedRoots(roots, new Set())].sort()).toEqual(
+      [BOOT_ROOT_KEY, "conn-a", "conn-b"].sort(),
+    );
+    // An edit that changed `conn-a`'s url (or its pinned schema) points it at a different
+    // database, so its cached catalog must go with it — and ONLY its own.
+    expect([...retainedRoots(roots, new Set(["conn-a"]))].sort()).toEqual(
+      [BOOT_ROOT_KEY, "conn-b"].sort(),
+    );
+    // Banked ids ACCUMULATE while no reader commits, so a reconciliation that finally runs
+    // applies every repoint that happened since — not just the most recent one.
+    expect([...retainedRoots(roots, new Set(["conn-a", "conn-b"]))]).toEqual([BOOT_ROOT_KEY]);
+    // A banked id naming no live root (repointed, then removed) needs no special case.
+    expect([...retainedRoots(roots, new Set(["conn-gone"]))].sort()).toEqual(
+      [BOOT_ROOT_KEY, "conn-a", "conn-b"].sort(),
+    );
+  });
+
+  test("a repointed root's cached state AND expansion keys are dropped, nothing else", () => {
+    const roots = buildRoots(EPHEMERAL_BOOT, [summary("conn-a", "alpha"), summary("conn-b", "beta")]);
+    const keep = retainedRoots(roots, new Set(["conn-a"]));
+    const readyB: RootState = { kind: "ready", schema: { engine: "postgres", tables: [] } };
+    const states = new Map<string, RootState>([
+      [BOOT_ROOT_KEY, { kind: "ready", schema: { engine: "mysql", tables: [] } }],
+      ["conn-a", { kind: "ready", schema: { engine: "postgres", tables: [table("public", "orders")] } }],
+      ["conn-b", readyB],
+    ]);
+    const pruned = pruneByRoot(states, keep);
+    // Back to absent ⇒ `idle`, the ONE state `shouldFetchOnExpand` re-introspects from.
+    expect(pruned.has("conn-a")).toBe(false);
+    expect(shouldFetchOnExpand(pruned.get("conn-a") ?? { kind: "idle" })).toBe(true);
+    // Untouched neighbours, by reference — a repoint reconciles one root, never the tree.
+    expect(pruned.get("conn-b")).toBe(readyB);
+    expect(pruned.has(BOOT_ROOT_KEY)).toBe(true);
+
+    const expanded = new Set([
+      BOOT_ROOT_KEY,
+      "conn-a",
+      schemaKey("conn-a", "public"),
+      tableKey("conn-a", "public", "orders"),
+      "conn-b",
+      schemaKey("conn-b", "public"),
+    ]);
+    // The root also COLLAPSES: an expanded root left at `idle` renders an empty body.
+    expect([...pruneSetByRoot(expanded, keep)].sort()).toEqual(
+      [BOOT_ROOT_KEY, "conn-b", "conn-b::public"].sort(),
+    );
+  });
+
+  test("the boot root is never repointable — it has no registry record to edit", () => {
+    const roots = buildRoots(EPHEMERAL_BOOT, [summary("conn-a", "alpha")]);
+    // Defensive: even handed the sentinel, only a SAVED id can name a root here, and a
+    // saved id is a `randomUUID()` that can never equal the literal `"boot"`.
+    expect(retainedRoots(roots, new Set(["conn-a"])).has(BOOT_ROOT_KEY)).toBe(true);
   });
 });
 

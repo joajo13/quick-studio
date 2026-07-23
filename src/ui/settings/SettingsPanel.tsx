@@ -232,8 +232,16 @@ export function SettingsPanel({
    * both live for the whole session, and a saved connection must appear in the tree the
    * moment it is saved — that is what the empty-state's "Agregá una conexión en Ajustes"
    * promises. Never fired on a failed mutation (nothing changed to reconcile).
+   *
+   * `repointedConnectionId` names the connection when the mutation REPOINTED it — an edit
+   * that carried a new url and/or changed its pinned schema — and is absent otherwise. An
+   * edit keeps the record's id, so the tree cannot tell from `connections.list` alone that
+   * a root's cached catalog now describes a different database; only this call site knows,
+   * because only it saw which keys the patch carried. Absent for an add (nothing cached
+   * yet), a remove (the root is dropped wholesale) and a NAME-only edit (same database —
+   * collapsing that root would cost a click and buy nothing).
    */
-  onRegistryChanged?: () => void;
+  onRegistryChanged?: (repointedConnectionId?: string) => void;
 }): React.JSX.Element {
   const [state, setState] = useState<ConnectionsState>(emptyConnections);
   const [loading, setLoading] = useState(true);
@@ -322,12 +330,18 @@ export function SettingsPanel({
     // omitted unless it differs from the pin the row was rendered from. Pure and
     // unit-tested in `connections-model.ts`; see `editConnectionParams`.
     const params = editConnectionParams(id, draft, storedSchema);
+    // A patch carrying `url` or `schema` REPOINTS the connection: the id stays, but what it
+    // resolves to (the database, or the scope introspected inside it) does not. Core evicts
+    // its cached manager for exactly this reason (`connection-targets.ts`); reporting the id
+    // is what lets the tree drop the matching root's now-foreign catalog instead of showing
+    // the old database's tables under it for the rest of the session.
+    const repointed = params.url !== undefined || params.schema !== undefined;
     void rpc<ConnectionSummary>("connections.edit", params).then((reply) => {
       if (reply.ok) {
         setState((s) => applyEdited(s, reply.result));
         setEditingId(null);
         setError(null);
-        onRegistryChanged?.();
+        onRegistryChanged?.(repointed ? id : undefined);
       } else {
         setError(envelopeText(reply.error));
       }
