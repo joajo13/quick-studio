@@ -1,27 +1,85 @@
 name: Release
 
+# Story 11.2 — one job per native runner, gated on the compiled-binary keyring
+# check that already exists from the Story 2.1 spike, then a single collect
+# job emits SHA256SUMS and uploads everything to the release in one place.
+# Never cross-compile: @napi-rs/keyring is a native NAPI addon whose
+# platform-specific binding is resolved at build time, so every binary is
+# compiled on a runner whose OS/arch matches its target.
+
 on:
   push:
     tags:
       - "v*"
 
+# Workflow-level default is read-only; only the `release` job elevates to
+# `contents: write`, so a build leg can never touch the release directly.
 permissions:
-  contents: write
+  contents: read
+
+# Replaces the cross-run protection that `max-parallel: 1` used to provide.
+# Only one job touches the release WITHIN a run, but two RUNS for the same ref
+# (a re-pushed tag, or a manual re-run overlapping the original) would still hit
+# `action-gh-release` against the same tag concurrently — the 422 / dropped-asset
+# race the old workaround existed for. Never cancel a run mid-upload.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build:
+  # Emits the platform matrix as JSON. A `strategy.matrix` cannot `import` a TS
+  # module, so this job runs scripts/platforms.ts and exposes its output for
+  # the `build` job's `fromJSON(...)`. No `bun install` — platforms.ts has no
+  # imports, so checkout + setup-bun is enough.
+  platforms:
     runs-on: ubuntu-latest
+    # Checkout + setup-bun + one script; anything longer is a stuck runner.
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Generate platform matrix
+        id: gen
+        # `set -euo pipefail` does NOT propagate a failure out of `$(...)`, so a
+        # broken platforms.ts would otherwise write an empty `matrix=` and let
+        # the build job expand to nothing. Assert non-empty explicitly.
+        run: |
+          set -euo pipefail
+          m="$(bun scripts/platforms.ts --github-matrix)"
+          if [ -z "$m" ] || [ "$m" = "[]" ]; then
+            echo "platforms: --github-matrix produced no rows" >&2
+            exit 1
+          fi
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: platforms
+    runs-on: ${{ matrix.runner }}
+    # This job compiles and RUNS a self-compiled keyring binary on three
+    # runners; a Windows Credential Manager call that raises a dialog is the
+    # documented hang mode. Cap it instead of inheriting the 6h default.
+    timeout-minutes: 30
     strategy:
-      # Serialize the matrix legs: both upload to the same release for the tag,
-      # and parallel create/update via action-gh-release can race (one leg 422s
-      # and drops its asset). One leg at a time keeps the release consistent.
-      max-parallel: 1
+      # The `release` job's `needs: build` already makes a partial release
+      # structurally impossible, so cancelling sibling legs buys nothing and
+      # costs diagnostics: on a workflow triggered by a `v*` tag push, learning
+      # about one broken platform per run means deleting and re-pushing the tag
+      # to discover the next. `keyring-spike.yml` sets this for the same reason.
+      fail-fast: false
       matrix:
-        include:
-          - target: bun-linux-x64
-            outfile: quick-studio-linux-x64
-          - target: bun-windows-x64
-            outfile: quick-studio-windows-x64.exe
+        include: ${{ fromJSON(needs.platforms.outputs.matrix) }}
+    defaults:
+      run:
+        # windows-latest defaults to pwsh; force bash on every leg so the
+        # keyring-gate step below behaves identically across platforms (the
+        # spike workflow forces bash on Windows for the same reason).
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,9 +94,112 @@ jobs:
         run: bun run build
 
       - name: Compile self-contained binary
-        run: bun build --compile --target=${{ matrix.target }} bin/quick-studio.ts --outfile ${{ matrix.outfile }}
+        # No --target: the binary is always compiled for the runner it is
+        # running on, so @napi-rs/keyring's platform binding matches the host.
+        run: bun build --compile bin/quick-studio.ts --outfile ${{ matrix.asset }}
 
-      - name: Upload to GitHub release
+      - name: Smoke the shipped binary (${{ matrix.key }}) — it must boot on its own runner
+        # The keyring gate below compiles and runs a SECOND artifact
+        # (scripts/keyring-native-check.ts); it never executes the binary we
+        # publish. This step is the only place the published artifact itself
+        # runs. `--version` writes the baked version to stdout and exits 0
+        # before the Core boots — but AFTER the entry's static import chain
+        # (bin/quick-studio.ts -> first-run-setup.ts -> ... ->
+        # src/core/keychain.ts, which imports @napi-rs/keyring at module top)
+        # has been evaluated. So a shipped binary that did not embed its native
+        # binding, or that cannot start on this OS/arch at all, fails HERE, on
+        # the artifact users actually download.
+        run: |
+          set -euo pipefail
+          ./${{ matrix.asset }} --version
+
+      - name: Keyring gate (${{ matrix.key }}) — native addon must load from the compiled binary
+        # KEYRING_REQUIRE_ROUNDTRIP is deliberately UNSET here: this gate proves
+        # the addon embedded and loaded (the cross-compile failure mode this
+        # story exists to prevent), not that a keychain backend is present. A
+        # typed `unavailable` on a headless runner is a pass; only a failure to
+        # load the addon at all is a failure. Round-trip attestation stays with
+        # keyring-spike.yml, which provisions a backend per OS.
+        run: |
+          set -euo pipefail
+          bun build --compile scripts/keyring-native-check.ts --outfile keyring-native-check
+          ./keyring-native-check
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.key }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+          # Long enough that GitHub's "re-run failed jobs" (available for days)
+          # still finds these artifacts; at 1 day a re-run after 24h would fail
+          # in `download-artifact` with everything expired.
+          retention-days: 7
+
+  release:
+    # Only runs if every build leg succeeded — a partial release (some
+    # platforms present, others silently missing because a leg failed) is
+    # structurally impossible: this job simply never starts.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        id: sums
+        run: |
+          set -euo pipefail
+          if [ ! -d dist ]; then
+            echo "release: no build artifacts were downloaded" >&2
+            exit 1
+          fi
+          cd dist
+          # `set -e` does NOT propagate a failure out of a process substitution,
+          # and `mapfile` exits 0 on empty input — so without the guard below a
+          # broken platforms.ts would leave ASSETS empty, skip the presence loop
+          # entirely, and make `sha256sum "${ASSETS[@]}"` read STDIN, writing the
+          # hash of nothing and exiting 0.
+          mapfile -t ASSETS < <(bun ../scripts/platforms.ts --assets)
+          if [ "${#ASSETS[@]}" -eq 0 ]; then
+            echo "release: could not read the platform table — refusing to write a checksum file that verifies nothing" >&2
+            exit 1
+          fi
+          for a in "${ASSETS[@]}"; do
+            if [ ! -s "$a" ]; then
+              echo "release: missing or empty expected asset: $a" >&2
+              exit 1
+            fi
+          done
+          # Explicit array order (not a glob) makes SHA256SUMS deterministic —
+          # a glob is locale-ordered.
+          sha256sum "${ASSETS[@]}" > SHA256SUMS
+          cat SHA256SUMS
+          # Publish the exact validated list (plus SHA256SUMS) as a step output so
+          # the upload ships precisely what was checked, instead of globbing
+          # whatever else happened to land in dist/.
+          {
+            echo "files<<EOF"
+            printf 'dist/%s\n' "${ASSETS[@]}"
+            echo "dist/SHA256SUMS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.outfile }}
+          files: ${{ steps.sums.outputs.files }}
+          fail_on_unmatched_files: true

@@ -42,25 +42,55 @@ not yet supported — use the standalone binary or wait for a later release.
 ### B. Standalone binary
 
 Prefer no npm at all? Download the self-contained binary for your platform from
-the [GitHub Releases](../../releases) page:
+the [GitHub Releases](../../releases) page. Every release also attaches a
+`SHA256SUMS` file covering every published binary, so you can verify what you
+downloaded — download it alongside the binary, into the same directory:
 
 - **Linux (x64):** `quick-studio-linux-x64`
+- **Linux (ARM64):** `quick-studio-linux-arm64`
 - **Windows (x64):** `quick-studio-windows-x64.exe`
+- **Checksums:** `SHA256SUMS`
 
-The binary is self-contained — no Bun, Node, or bundler required.
+The binary is self-contained — no Bun, Node, or bundler required. Each one is
+compiled natively on a runner matching its own OS/architecture (never
+cross-compiled), so the OS-keychain integration works out of the box. macOS is
+not yet supported — a later phase adds it once its keyring path is validated
+in CI; see [docs/keyring-spike-decision.md](docs/keyring-spike-decision.md).
 
-**Linux**
+**Linux (x64 or ARM64)**
+
+With the binary and `SHA256SUMS` downloaded into the same directory — verify
+first, then run:
 
 ```sh
-chmod +x quick-studio-linux-x64
-./quick-studio-linux-x64
+BIN=quick-studio-linux-x64        # or quick-studio-linux-arm64
+sha256sum --ignore-missing -c SHA256SUMS && chmod +x "$BIN" && ./"$BIN"
 ```
+
+The `&&` chain is load-bearing: on a checksum mismatch `sha256sum` exits
+non-zero and the binary is never made executable and never runs. As separate
+lines the `FAILED` message would just scroll past and the binary would run
+anyway.
+
+`SHA256SUMS` covers every published binary, so `--ignore-missing` is what you
+want unless you downloaded all of them (a plain `-c` reports the ones you did
+not download as failures).
 
 **Windows**
 
+With `quick-studio-windows-x64.exe` and `SHA256SUMS` downloaded into the same
+directory — verify first, then run:
+
 ```powershell
-.\quick-studio-windows-x64.exe
+$expected = ((Select-String -Path SHA256SUMS -Pattern 'quick-studio-windows-x64\.exe').Line -split '\s+')[0]
+$actual = (Get-FileHash quick-studio-windows-x64.exe -Algorithm SHA256).Hash
+if ($actual -ine $expected) { Write-Error "checksum mismatch - do not run this binary" } else { .\quick-studio-windows-x64.exe }
 ```
+
+Verification is pass/fail rather than a hash you eyeball, and the run happens
+only in the matching branch — a mismatch prints an error and stops. If
+`SHA256SUMS` is missing or has no line for this file, `$expected` is empty, the
+comparison fails, and the binary still does not run.
 
 ## Run
 

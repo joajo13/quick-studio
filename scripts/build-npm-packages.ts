@@ -40,37 +40,21 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-
-/** The ONE package-name prefix constant. Naming can be revisited here alone. */
-const PKG_PREFIX = "quick-studio-";
+import { PKG_PREFIX, PLATFORMS } from "./platforms.ts";
 
 /** Short description reused across every generated manifest. */
 const DESCRIPTION = "Lightweight, local-first database manager (Postgres + MySQL).";
 
-/**
- * The shared platform table — THE authoritative mapping, consumed by Story 11.2's
- * release matrix and Story 11.3's shim `SUPPORTED` keys. Note the deliberate
- * token mismatch: the npm PACKAGE uses `win32` (from `process.platform`, so the
- * shim's `require.resolve` matches) while the release ASSET uses `windows`, so
- * `asset` is an explicit field, not a string transform. Adding macOS later = add
- * rows here and nothing else.
- */
-interface PlatformRow {
-  /** `<platform>-<arch>` key, identical to the shim's SUPPORTED keys. */
-  key: string;
-  /** npm `os` field value (`process.platform`). */
-  os: string;
-  /** npm `cpu` field value (`process.arch`). */
-  cpu: string;
-  /** Release-asset filename produced by `release.yml`. */
-  asset: string;
-}
-
-const PLATFORMS: readonly PlatformRow[] = [
-  { key: "win32-x64", os: "win32", cpu: "x64", asset: "quick-studio-windows-x64.exe" },
-  { key: "linux-x64", os: "linux", cpu: "x64", asset: "quick-studio-linux-x64" },
-  { key: "linux-arm64", os: "linux", cpu: "arm64", asset: "quick-studio-linux-arm64" },
-];
+// The shared platform table now lives in `scripts/platforms.ts` — THE
+// authoritative mapping, consumed by Story 11.2's release matrix and Story
+// 11.3's shim `SUPPORTED` keys. Note the deliberate token mismatch: the npm
+// PACKAGE uses `win32` (from `process.platform`, so the shim's
+// `require.resolve` matches) while the release ASSET uses `windows`, so
+// `asset` is an explicit field, not a string transform. Adding macOS later
+// needs no edit HERE — this file, the release matrix, and `publish.yml` all
+// read the table — but it is not a pure data change either: `platforms.test.ts`
+// carries deliberate tripwires (a no-darwin guard and an exact-asset list) that
+// the macOS phase must clear on purpose. That is the point of them.
 
 /** In-package binary filename for a row (DW-77): win32 → `.exe`, else bare. */
 function binaryNameFor(os: string): string {

@@ -4,11 +4,13 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { PKG_PREFIX, PLATFORMS } from "../scripts/platforms.ts";
 
 /**
  * Spawn-based tests for the Node launcher shim (bin/quick-studio.cjs).
@@ -21,7 +23,7 @@ import path from "node:path";
 
 const SHIM = path.join(import.meta.dir, "quick-studio.cjs");
 const KEY = `${process.platform}-${process.arch}`;
-const SUPPORTED_HERE = ["win32-x64", "linux-x64", "linux-arm64"].includes(KEY);
+const SUPPORTED_HERE = PLATFORMS.some((row) => row.key === KEY);
 const RELEASES_URL = "https://github.com/joajo13/quick-studio/releases";
 const BIN_NAME = process.platform === "win32" ? "quick-studio.exe" : "quick-studio";
 
@@ -184,7 +186,11 @@ describe("quick-studio shim — resolution failure UX", () => {
     expect(code).not.toBe(0);
     expect(code).not.toBeNull();
     expect(stderr).toContain(KEY);
-    expect(stderr).toContain("windows-x64, linux-x64, linux-arm64");
+    expect(stderr).toContain(
+      PLATFORMS.map((row) => row.asset.replace(/^quick-studio-/, "").replace(/\.exe$/, "")).join(
+        ", ",
+      ),
+    );
     expect(stderr).toContain(RELEASES_URL);
     expect(stderr).not.toContain("MODULE_NOT_FOUND");
   });
@@ -271,4 +277,44 @@ describe("quick-studio shim — spawn-error failure UX", () => {
       expect(stderr).not.toContain("MODULE_NOT_FOUND");
     },
   );
+});
+
+describe("platform-list drift", () => {
+  // The shim is dependency-free CommonJS and must not import scripts/platforms.ts
+  // (a TS module) — and require()ing it would execute the launcher. So we read
+  // it AS TEXT and assert its literals stay in sync with the shared table,
+  // making the shim a real consumer instead of a sixth hardcoded copy.
+  const shimSource = readFileSync(SHIM, "utf8");
+
+  test("SUPPORTED map matches PLATFORMS exactly (extra AND missing entries caught)", () => {
+    const literalMatch = shimSource.match(/const SUPPORTED = \{([\s\S]*?)\};/);
+    expect(literalMatch).not.toBeNull();
+    const literal = literalMatch![1] ?? "";
+
+    const pairs: Record<string, string> = {};
+    for (const m of literal.matchAll(/"([^"]+)":\s*"([^"]+)"/g)) {
+      const mkey = m[1];
+      const mval = m[2];
+      if (mkey !== undefined && mval !== undefined) {
+        pairs[mkey] = mval;
+      }
+    }
+
+    const expected = Object.fromEntries(PLATFORMS.map((row) => [row.key, PKG_PREFIX + row.key]));
+    expect(pairs).toEqual(expected);
+  });
+
+  test("human-readable supported-platforms sentence lists exactly every row's display name", () => {
+    // Matching the display names anywhere in the file is useless: the SUPPORTED
+    // map values already contain them ("quick-studio-linux-x64" contains
+    // "linux-x64"), so deleting a name from the human-readable sentence would
+    // still pass. Parse the SENTENCE and compare the list it actually renders.
+    const sentenceMatch = shimSource.match(/Supported platforms: ([^.]+)\./);
+    expect(sentenceMatch).not.toBeNull();
+    const listed = (sentenceMatch![1] ?? "").split(", ");
+    const displayNames = PLATFORMS.map((row) =>
+      row.asset.replace(/^quick-studio-/, "").replace(/\.exe$/, ""),
+    );
+    expect(listed).toEqual(displayNames);
+  });
 });

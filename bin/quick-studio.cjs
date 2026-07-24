@@ -17,8 +17,14 @@ const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
 
-// One shared platform map (three consumers: release matrix, packaging, shim).
-// The later macOS phase adds two entries here and nothing else.
+// A HAND-MAINTAINED COPY of the shared platform table in `scripts/platforms.ts`
+// (Story 11.2). This file is dependency-free CommonJS shipped standalone, so it
+// cannot import that module; `bin/quick-studio-shim.test.ts` scrapes the literal
+// below as text and fails the moment it drifts from the table. Keep the map and
+// the human-readable list in `fail()` in sync with it.
+// The later macOS phase edits BOTH files, plus the deliberate tripwires in
+// `scripts/platforms.test.ts` (a no-darwin guard and an exact-asset list) — it
+// is not a one-line change, and that is on purpose.
 const SUPPORTED = {
   "win32-x64": "quick-studio-win32-x64",
   "linux-x64": "quick-studio-linux-x64",

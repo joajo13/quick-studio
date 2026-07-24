@@ -69,15 +69,31 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ github.event.release.tag_name }}"
+          # Derived from scripts/platforms.ts so a future macOS row propagates
+          # here too, rather than hardcoding a fourth copy of the asset list.
+          mapfile -t REQUIRED < <(bun scripts/platforms.ts --assets)
+          # `set -e` does not propagate out of a process substitution and
+          # `mapfile` exits 0 on empty input: an empty REQUIRED would make the
+          # poll's `ok=1` succeed on the first attempt with zero binaries
+          # downloaded, bypassing the entire DW-83 retry window.
+          if [ "${#REQUIRED[@]}" -eq 0 ]; then
+            echo "publish: could not read the platform table" >&2
+            exit 1
+          fi
           # The `release: published` event can fire before release.yml has finished
           # attaching every binary. `gh release download` exits 0 on a partial set,
-          # so poll until all three expected assets are present (or give up loudly).
+          # so poll until all expected assets are present (or give up loudly).
           for attempt in 1 2 3 4 5 6; do
             rm -rf bin-dl
             gh release download "$TAG" --dir bin-dl || true
-            if [ -s bin-dl/quick-studio-windows-x64.exe ] \
-               && [ -s bin-dl/quick-studio-linux-x64 ] \
-               && [ -s bin-dl/quick-studio-linux-arm64 ]; then
+            ok=1
+            for a in "${REQUIRED[@]}"; do
+              if [ ! -s "bin-dl/$a" ]; then
+                ok=0
+                break
+              fi
+            done
+            if [ "$ok" = "1" ]; then
               echo "all release binaries present"
               exit 0
             fi
@@ -126,7 +142,16 @@ jobs:
             fi
           }
           # Strict order: every platform package first, main package LAST.
-          publish_one dist-npm/quick-studio-win32-x64
-          publish_one dist-npm/quick-studio-linux-x64
-          publish_one dist-npm/quick-studio-linux-arm64
+          # Derived from scripts/platforms.ts (not hardcoded) so a future row is
+          # actually PUBLISHED, instead of being built, checksummed, downloaded,
+          # packaged — and then silently skipped, leaving the main package's
+          # optionalDependencies naming a package that does not exist on npm.
+          mapfile -t PKGS < <(bun scripts/platforms.ts --packages)
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "publish: could not read the platform table" >&2
+            exit 1
+          fi
+          for p in "${PKGS[@]}"; do
+            publish_one "dist-npm/$p"
+          done
           publish_one dist-npm/quick-studio

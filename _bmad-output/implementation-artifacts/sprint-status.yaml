@@ -185,7 +185,7 @@ development_status:
   # cache and 11-6's setup. Loopback/token/gates/RPC/exposure warning unchanged throughout.
   epic-11: backlog
   11-1-cli-surface-help-version: done     # Story 11.1: CLI surface — --help, --version, explicit --ephemeral
-  11-2-release-matrix-native: backlog        # Story 11.2: Release matrix on native runners + SHA256SUMS + keyring gate
+  11-2-release-matrix-native: done        # Story 11.2: Release matrix on native runners + SHA256SUMS + keyring gate
   11-3-node-launcher-shim: done           # Story 11.3: Node-compatible launcher shim (npx works without Bun)
   11-4-npm-platform-packages: done        # Story 11.4: Platform packages + end-to-end publish workflow
   11-5-update-check-and-command: done     # Story 11.5: TTL update check (ephemeral-safe) + delegating `update` command
