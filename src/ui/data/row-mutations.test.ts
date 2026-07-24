@@ -12,6 +12,7 @@ import {
   buildInsertOp,
   buildUpdateOp,
   coerceValue,
+  coerceValueForColumn,
   isMutationError,
   pkForRow,
 } from "./row-mutations.ts";
@@ -212,5 +213,221 @@ describe("buildInsertOp — omit empties, keep explicit NULL, coerce by kind", (
       draft: [{ column: "name", edit: { raw: "dave" } }],
     });
     expect(op).toEqual({ kind: "insert", table: "users", columns: [{ column: "name", value: "dave" }] });
+  });
+});
+
+// DW-40 — a `bigint`/`numeric` value cannot survive a JS `number`. These columns carry
+// their SQL `dataType`, so both the SET value and the PK ADDRESS bind exact strings and
+// no `Number()` ever touches them. `9007199254740993` is the canonical witness: it is
+// 2^53+1, so `Number()` silently lands on …992 — a different row.
+const WIDE = "9007199254740993";
+
+const exactColumns: ReadonlyArray<FrozenColumn> = [
+  { name: "id", type: "string", dataType: "bigint" },
+  { name: "amount", type: "string", dataType: "numeric" },
+  { name: "label", type: "string" },
+];
+
+const exactRow: FrozenRow = [
+  { kind: "string", value: WIDE },
+  { kind: "string", value: "1.25" },
+  { kind: "string", value: "alice" },
+];
+
+describe("coerceValueForColumn — exact-numeric columns bind validated strings (DW-40)", () => {
+  test("a wide integer is bound as the EXACT string, never through Number()", () => {
+    const coerced = coerceValueForColumn(exactColumns[0]!, WIDE);
+    expect(coerced).toEqual({ value: WIDE });
+    // Pin the trap this guards against: the numeric route would lose the last digit.
+    expect(String(Number(WIDE))).toBe("9007199254740992");
+  });
+
+  test("decimals, signs and surrounding whitespace are accepted (and trimmed)", () => {
+    expect(coerceValueForColumn(exactColumns[1]!, "  -12345678901234567890.0987  ")).toEqual({
+      value: "-12345678901234567890.0987",
+    });
+    expect(coerceValueForColumn(exactColumns[1]!, "+7")).toEqual({ value: "+7" });
+    expect(coerceValueForColumn(exactColumns[1]!, ".5")).toEqual({ value: ".5" });
+  });
+
+  test("a malformed exact-numeric edit is rejected BEFORE an op is built", () => {
+    expect(coerceValueForColumn(exactColumns[1]!, "12ab")).toEqual({ error: "not a number: 12ab" });
+    for (const bad of ["", "  ", "1e5", "Infinity", "NaN", "1,000", "0x10", "--1"]) {
+      expect(isMutationError(coerceValueForColumn(exactColumns[1]!, bad))).toBe(true);
+    }
+  });
+
+  test("a FRACTIONAL literal is rejected for bigint but accepted for numeric", () => {
+    // A `bigint` has no fractional part: shipping `12.5` would be rounded away by
+    // Postgres or hard-error under MySQL strict mode — either way not what was typed.
+    for (const frac of ["12.5", ".5", "-0.1"]) {
+      expect(isMutationError(coerceValueForColumn(exactColumns[0]!, frac))).toBe(true);
+      expect(coerceValueForColumn(exactColumns[1]!, frac)).toEqual({ value: frac });
+    }
+    expect(coerceValueForColumn(exactColumns[0]!, "12.5")).toEqual({ error: "not an integer: 12.5" });
+    // The integer gate still accepts signs and whitespace around a whole number.
+    expect(coerceValueForColumn(exactColumns[0]!, "  -42 ")).toEqual({ value: "-42" });
+    expect(coerceValueForColumn(exactColumns[0]!, "+7")).toEqual({ value: "+7" });
+  });
+
+  test("a TRAILING-DOT literal (`12.`) is rejected by BOTH exact gates", () => {
+    // This branch forwards the user's characters verbatim as a bound parameter — it never
+    // goes through `Number()` — and `12.` is not a literal every engine parses (Postgres
+    // rejects it as `numeric` input). Admitting it would trade the clean client-side
+    // message for a raw driver error at the server. `.5` and `+7` stay accepted.
+    expect(coerceValueForColumn(exactColumns[0]!, "12.")).toEqual({ error: "not an integer: 12." });
+    expect(coerceValueForColumn(exactColumns[1]!, "12.")).toEqual({ error: "not a number: 12." });
+    expect(coerceValueForColumn(exactColumns[1]!, "-0.")).toEqual({ error: "not a number: -0." });
+    expect(coerceValueForColumn(exactColumns[1]!, ".5")).toEqual({ value: ".5" });
+    expect(coerceValueForColumn(exactColumns[1]!, "+7")).toEqual({ value: "+7" });
+  });
+
+  test("`int8` is treated exactly like `bigint` (the pg internal spelling)", () => {
+    const int8: FrozenColumn = { name: "id", type: "string", dataType: "int8" };
+    expect(coerceValueForColumn(int8, WIDE)).toEqual({ value: WIDE });
+    expect(isMutationError(coerceValueForColumn(int8, "1.5"))).toBe(true);
+  });
+
+  test("a TEMPORAL column still validates as a date even though its type is string", () => {
+    // Forcing a naive column to `type: "string"` (so a wall clock never becomes a false-Z
+    // date cell) would otherwise silently drop the editor's date validation while the
+    // grid header still reads "time".
+    const naive: FrozenColumn = {
+      name: "at",
+      type: "string",
+      dataType: "timestamp without time zone",
+    };
+    expect(isMutationError(coerceValueForColumn(naive, "not a date"))).toBe(true);
+    expect(coerceValueForColumn(naive, "2026-07-22T18:14:13")).toEqual({
+      value: "2026-07-22T18:14:13",
+    });
+    // An AWARE temporal column takes the same branch (its runtime type is `date`).
+    const aware: FrozenColumn = { name: "at", type: "date", dataType: "timestamptz" };
+    expect(isMutationError(coerceValueForColumn(aware, "not a date"))).toBe(true);
+    // And MySQL's naive `datetime`.
+    const dt: FrozenColumn = { name: "at", type: "string", dataType: "datetime" };
+    expect(isMutationError(coerceValueForColumn(dt, "nonsense"))).toBe(true);
+    // The raw literal is sent, never a JS Date — same rule `coerceValue("date")` holds.
+    expect(coerceValueForColumn(dt, "2026-07-22 18:14:13")).toEqual({
+      value: "2026-07-22 18:14:13",
+    });
+  });
+
+  test("a column with NO dataType delegates to coerceValue unchanged (legacy parity)", () => {
+    for (const col of columns) {
+      for (const raw of ["42", "abc", "true", "2026-07-10T12:00", ""]) {
+        expect(coerceValueForColumn(col, raw)).toEqual(coerceValue(col.type, raw));
+      }
+    }
+  });
+
+  test("a non-exact dataType (int4, text) also delegates to the kind-based path", () => {
+    const int4: FrozenColumn = { name: "n", type: "number", dataType: "int4" };
+    expect(coerceValueForColumn(int4, "42")).toEqual({ value: 42 });
+    const text: FrozenColumn = { name: "s", type: "string", dataType: "text" };
+    expect(coerceValueForColumn(text, " keep me ")).toEqual({ value: " keep me " });
+  });
+});
+
+describe("wide-integer op building + PK addressing (DW-40)", () => {
+  test("an update on a bigint column sets the exact string", () => {
+    const op = buildUpdateOp({
+      target,
+      columns: exactColumns,
+      primaryKeys: ["id"],
+      row: exactRow,
+      column: "id",
+      edit: { raw: WIDE },
+    });
+    expect(op).toEqual({
+      kind: "update",
+      schema: "public",
+      table: "users",
+      pk: { column: "id", value: WIDE, exactNumeric: true },
+      set: [{ column: "id", value: WIDE }],
+    });
+  });
+
+  test("a bigint PK addresses the row with the exact string from its cell", () => {
+    expect(pkForRow(exactColumns, ["id"], exactRow)).toEqual({
+      column: "id",
+      value: WIDE,
+      exactNumeric: true,
+    });
+    expect(buildDeleteOp({ target, columns: exactColumns, primaryKeys: ["id"], row: exactRow })).toEqual({
+      kind: "delete",
+      schema: "public",
+      table: "users",
+      pk: { column: "id", value: WIDE, exactNumeric: true },
+    });
+  });
+
+  test("the exactNumeric flag is set ONLY for an exact-numeric PK column", () => {
+    // It is what makes the executor compose MySQL's `CAST(? AS DECIMAL(65,30))`; binding
+    // the exact digits as a string is not enough there, because MySQL compares an integer
+    // column against a string operand as a FLOAT.
+    const numericPk = pkForRow(
+      [{ name: "amount", type: "string", dataType: "numeric" }],
+      ["amount"],
+      [{ kind: "string", value: "1.25" }],
+    );
+    expect(numericPk).toEqual({ column: "amount", value: "1.25", exactNumeric: true });
+    // A plain int4 / a column with no dataType keeps the byte-identical legacy pk shape.
+    const int4Pk = pkForRow(
+      [{ name: "id", type: "number", dataType: "int4" }],
+      ["id"],
+      [{ kind: "number", value: 7 }],
+    );
+    expect(int4Pk).toEqual({ column: "id", value: 7 });
+    expect("exactNumeric" in (int4Pk as object)).toBe(false);
+    expect("exactNumeric" in (pkForRow(columns, ["id"], row) as object)).toBe(false);
+  });
+
+  test("a malformed decimal aborts the update — no op reaches the executor", () => {
+    const op = buildUpdateOp({
+      target,
+      columns: exactColumns,
+      primaryKeys: ["id"],
+      row: exactRow,
+      column: "amount",
+      edit: { raw: "12ab" },
+    });
+    expect(isMutationError(op)).toBe(true);
+  });
+
+  test("an exact-numeric insert binds the string; an explicit NULL still wins", () => {
+    expect(
+      buildInsertOp({
+        target,
+        columns: exactColumns,
+        draft: [
+          { column: "id", edit: { raw: WIDE } },
+          { column: "amount", edit: { setNull: true } },
+        ],
+      }),
+    ).toEqual({
+      kind: "insert",
+      schema: "public",
+      table: "users",
+      columns: [
+        { column: "id", value: WIDE },
+        { column: "amount", value: null },
+      ],
+    });
+  });
+
+  test("an exact-numeric PK that arrived as a JS NUMBER cell is refused, not repaired", () => {
+    // Unreachable through either driver after this change (both stringify these columns),
+    // so this is the belt-and-braces invariant: a lossy address would hit the WRONG row.
+    const lossyRow: FrozenRow = [
+      { kind: "number", value: 9007199254740992 },
+      { kind: "string", value: "1.25" },
+      { kind: "string", value: "alice" },
+    ];
+    const pk = pkForRow(exactColumns, ["id"], lossyRow);
+    expect(isMutationError(pk)).toBe(true);
+    expect((pk as { error: string }).error).toContain("precision");
+    // The same number cell in a column with NO dataType is untouched (legacy parity).
+    expect(pkForRow(columns, ["id"], row)).toEqual({ column: "id", value: 7 });
   });
 });

@@ -18,8 +18,19 @@
  * user's literal, letting the DB/driver parse it in its own context.
  * A column whose kind can't be inferred (all-NULL on the page → kind `"null"`)
  * falls back to a best-effort string; superseded once `SchemaColumnInfo` is threaded.
+ *
+ * The SECOND trap it owns (DW-40): a column whose SQL `dataType` is exact-numeric
+ * (`bigint`/`int8`/`numeric`/`decimal`) holds values a JS `number` cannot represent. Those
+ * are bound as VALIDATED EXACT STRINGS — on the SET value via `coerceValueForColumn` and on
+ * the PK address via `pkForRow`'s lossy-PK guard — so `Number()` never touches them and a
+ * wide value can neither be mis-written nor address the wrong row.
  */
 
+import {
+  classifySqlDisplayKind,
+  isExactIntegerType,
+  isExactNumericType,
+} from "../../shared/contract.ts";
 import type {
   FrozenCell,
   FrozenColumn,
@@ -92,10 +103,77 @@ export function coerceValue(kind: FrozenCell["kind"], raw: string): Coerced {
   }
 }
 
-/** Resolve a `CellEdit` to a bound value or an error, given the column kind. */
-function resolveEdit(kind: FrozenCell["kind"], edit: CellEdit): Coerced {
+/**
+ * An INTEGER or DECIMAL literal, with an optional sign: `42`, `-7`, `+0.5`, `.5`.
+ * Deliberately no exponent, no `Infinity`/`NaN`, no whitespace, no thousands separator —
+ * this is the exact-DECIMAL gate, and anything it admits must be a digit string the
+ * engine will accept verbatim for a `numeric`/`decimal` column.
+ *
+ * A decimal POINT must be followed by at least one digit, so the trailing-dot literal
+ * `12.` is REJECTED. It looks harmless (`Number("12.")` is `12`) but this branch never
+ * goes through `Number()` — it forwards the user's characters verbatim as a bound
+ * parameter, and `12.` is not a literal every engine parses: it is a syntax error for a
+ * Postgres `numeric` input, so the "validated exact string" would fail at the server
+ * with a raw driver error instead of the clean client-side message this gate exists to
+ * produce. The leading-dot form `.5` stays accepted — both engines parse that one.
+ */
+const EXACT_DECIMAL_LITERAL_RE = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+
+/**
+ * A pure INTEGER literal with an optional sign. Stricter than the decimal gate on
+ * purpose: a `bigint`/`int8` column has no fractional part, so `12.5` (or the trailing-dot
+ * `12.`) must be refused HERE rather than shipped to an engine that would round it away
+ * on Postgres or hard-error under MySQL strict mode — either way the user's typed value
+ * is not what lands in the row.
+ */
+const EXACT_INTEGER_LITERAL_RE = /^[+-]?\d+$/;
+
+/**
+ * Coerce a raw editor string for a specific COLUMN, honoring its SQL `dataType`.
+ *
+ * Three dataType-driven branches, then the unchanged kind-based fallback:
+ *
+ *  (a) EXACT INTEGER (`bigint`/`int8`) — the trimmed text must be a bare integer literal
+ *      and is bound AS A STRING, never through `Number()`, which would silently round
+ *      `9007199254740993` to `…992` and write the wrong value (DW-40).
+ *  (b) EXACT DECIMAL (`numeric`/`decimal`) — same string binding, but a fractional part
+ *      is legal.
+ *  (c) TEMPORAL (any `dataType` classified as a date, naive OR aware) — routed through
+ *      `coerceValue("date", raw)`. Forcing naive columns to a runtime `type: "string"`
+ *      (so a wall clock never becomes a false-`Z` `date` cell) would otherwise silently
+ *      DROP the editor's date validation while the grid header still reads "time"; this
+ *      branch keeps validation keyed to what the user is being told the column is.
+ *
+ * Both string-binding branches are safe on the wire: both drivers already READ these
+ * columns as strings, and postgres.js / mysql2 bind a numeric-literal string against a
+ * numeric column fine (unlike the int/bool assignment-cast trap this module's header
+ * describes, which is about TEXT-vs-int, not numeric-literal text).
+ *
+ * Every other column — including one with no `dataType` at all — delegates to
+ * {@link coerceValue} unchanged, so absent type metadata reproduces the old behavior exactly.
+ */
+export function coerceValueForColumn(column: FrozenColumn, raw: string): Coerced {
+  const dataType = column.dataType;
+  if (isExactNumericType(dataType)) {
+    const trimmed = raw.trim();
+    // Mirrors `coerceValue`'s number branch: an empty input is "no value", not zero.
+    if (trimmed === "") return { error: "expected a number, got empty" };
+    const re = isExactIntegerType(dataType) ? EXACT_INTEGER_LITERAL_RE : EXACT_DECIMAL_LITERAL_RE;
+    if (!re.test(trimmed)) {
+      return isExactIntegerType(dataType)
+        ? { error: `not an integer: ${raw}` }
+        : { error: `not a number: ${raw}` };
+    }
+    return { value: trimmed };
+  }
+  if (classifySqlDisplayKind(dataType) === "date") return coerceValue("date", raw);
+  return coerceValue(column.type, raw);
+}
+
+/** Resolve a `CellEdit` to a bound value or an error, given the target column. */
+function resolveEdit(column: FrozenColumn, edit: CellEdit): Coerced {
   if ("setNull" in edit) return { value: null };
-  return coerceValue(kind, edit.raw);
+  return coerceValueForColumn(column, edit.raw);
 }
 
 /** The native JS value a `FrozenCell` already carries (for reading a PK from a row). */
@@ -136,13 +214,30 @@ export function pkForRow(
   if (idx < 0) return { error: `primary-key column not on page: ${column}` };
   const cell = row[idx];
   if (cell === undefined) return { error: `row is missing the primary-key cell for ${column}` };
+  const exactNumeric = isExactNumericType(columns[idx]!.dataType);
+  // An exact-numeric PK that somehow arrived as a JS `number` cell has already lost its
+  // digits — they are unrecoverable, and `WHERE pk = <lossy>` would address the WRONG row
+  // (or none) while still reporting `ok` (DW-40). Both drivers now hand these back as
+  // strings, so this is a belt-and-braces invariant rather than a routine path: refuse to
+  // address the row at all rather than repair a value we cannot repair.
+  if (exactNumeric && cell.kind === "number") {
+    return {
+      error: `primary-key value for ${column} arrived as a JS number — precision cannot be guaranteed`,
+    };
+  }
   const value = cellToValue(cell);
   // A NULL PK can't safely address a row: `WHERE pk = NULL` matches 0 rows, yet the
   // executor still returns `ok` — the update/delete would silently no-op as success.
   if (value === null || value === undefined) {
     return { error: `primary-key value is null — row cannot be addressed (${column})` };
   }
-  return { column, value };
+  // Flag an exact-numeric address so the executor can force MySQL's EXACT comparison
+  // path (`CAST(? AS DECIMAL(65,30))`). Binding the exact digits as a string is NOT
+  // enough there: mysql2 escapes them into a quoted literal and MySQL compares an
+  // integer column against a string operand as a FLOAT, so `WHERE id='…993'` also
+  // matches `…992`. The key is OMITTED when false, so a non-exact PK keeps the
+  // byte-identical `{column, value}` wire shape it has always had.
+  return exactNumeric ? { column, value, exactNumeric: true } : { column, value };
 }
 
 /**
@@ -163,8 +258,7 @@ export function buildUpdateOp(params: {
   if (isMutationError(pk)) return pk;
   const idx = columnIndex(columns, column);
   if (idx < 0) return { error: `unknown column: ${column}` };
-  const kind = columns[idx]!.type;
-  const coerced = resolveEdit(kind, edit);
+  const coerced = resolveEdit(columns[idx]!, edit);
   if (isMutationError(coerced)) return coerced;
   return { kind: "update", ...target(params.target), pk, set: [{ column, value: coerced.value }] };
 }
@@ -199,7 +293,7 @@ export function buildInsertOp(params: {
     if ("raw" in edit && edit.raw.trim() === "") continue;
     const idx = columnIndex(columns, column);
     if (idx < 0) return { error: `unknown column: ${column}` };
-    const coerced = resolveEdit(columns[idx]!.type, edit);
+    const coerced = resolveEdit(columns[idx]!, edit);
     if (isMutationError(coerced)) return coerced;
     values.push({ column, value: coerced.value });
   }

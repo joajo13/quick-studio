@@ -742,6 +742,252 @@ describe("structured update — single-column-PK verification", () => {
   });
 });
 
+// DW-40 — binding an exact-numeric PK as a digit STRING closes the wrong-row hazard on
+// Postgres only. mysql2 escapes a JS string parameter into a QUOTED SQL literal, and
+// MySQL compares an integer column against a string operand as a FLOATING-POINT number
+// (`SELECT '18015376320243458' = 18015376320243459` → 1), so `WHERE id='9007199254740993'`
+// also matches `…992` — and neither the UPDATE nor the DELETE carries a `LIMIT 1`.
+// `CAST(? AS DECIMAL(65,<scale>))` forces the exact-decimal comparison path. Postgres needs
+// no cast (postgres.js sends the parameter untyped; the server parses it into the column's
+// own type exactly), so the cast MUST be engine-gated.
+//
+// Two further properties this battery pins, both of them safety rather than cosmetics:
+//  - the client's `exactNumeric` flag rides an UNTRUSTED RPC payload but changes SQL
+//    COMPOSITION, so it is honored only when the SERVER's introspected PK column agrees;
+//  - the cast's SCALE is derived from the validated literal, because `DECIMAL(65,30)` has
+//    only 35 INTEGRAL digits and a legal `DECIMAL(40,0)` PK would be clamped by it — the
+//    WHERE would then match nothing while the executor still reported `status:"ok"`.
+describe("exact-numeric PK addressing is engine-gated (DW-40)", () => {
+  const WIDE = "9007199254740993";
+
+  /** The default fixture types every column `text`; give the PK a real SQL type instead. */
+  function schemaWithPkType(engine: DbEngine, dataType: string): DatabaseSchema {
+    const base = schemaFor(engine);
+    return {
+      ...base,
+      tables: base.tables.map((t) =>
+        t.name === "users"
+          ? { ...t, columns: t.columns.map((c) => (c.name === "id" ? { ...c, dataType } : c)) }
+          : t,
+      ),
+    };
+  }
+
+  const mysqlBigintPk = () =>
+    makeExecutor({ engine: "mysql", schema: schemaWithPkType("mysql", "bigint") });
+
+  test("mysql wraps the PK placeholder in CAST(? AS DECIMAL(65,0)) for update", async () => {
+    const { exec, queryCalls } = mysqlBigintPk();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: {
+        kind: "update",
+        table: "users",
+        pk: { column: "id", value: WIDE, exactNumeric: true },
+        set: [{ column: "name", value: "bo" }],
+      },
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe(
+      "UPDATE `public`.`users` SET `name`=? WHERE `id`=CAST(? AS DECIMAL(65,0))",
+    );
+    // The exact digits still travel as a bound PARAMETER — never string-spliced.
+    expect(queryCalls[0]!.params).toEqual(["bo", WIDE]);
+  });
+
+  test("mysql wraps it for delete too", async () => {
+    const { exec, queryCalls } = mysqlBigintPk();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "delete", table: "users", pk: { column: "id", value: WIDE, exactNumeric: true } },
+      confirmed: true,
+    });
+    expect(reply.ok && reply.result.status).toBe("ok");
+    expect(queryCalls[0]!.sql).toBe(
+      "DELETE FROM `public`.`users` WHERE `id`=CAST(? AS DECIMAL(65,0))",
+    );
+    expect(queryCalls[0]!.params).toEqual([WIDE]);
+  });
+
+  test("postgres keeps its BARE placeholder — it needs no cast", async () => {
+    const { exec, queryCalls } = makeExecutor({
+      engine: "postgres",
+      schema: schemaWithPkType("postgres", "bigint"),
+    });
+    await exec.execute({
+      shape: "structured",
+      op: {
+        kind: "update",
+        table: "users",
+        pk: { column: "id", value: WIDE, exactNumeric: true },
+        set: [{ column: "name", value: "bo" }],
+      },
+    });
+    expect(queryCalls[0]!.sql).toBe('UPDATE "public"."users" SET "name"=$1 WHERE "id"=$2');
+    await exec.execute({
+      shape: "structured",
+      op: { kind: "delete", table: "users", pk: { column: "id", value: WIDE, exactNumeric: true } },
+      confirmed: true,
+    });
+    expect(queryCalls[1]!.sql).toBe('DELETE FROM "public"."users" WHERE "id"=$1');
+  });
+
+  test("mysql WITHOUT the flag is unchanged — the cast is opt-in per pk", async () => {
+    const { exec, queryCalls } = mysqlBigintPk();
+    await exec.execute({
+      shape: "structured",
+      op: { kind: "update", table: "users", pk: { column: "id", value: 5 }, set: [{ column: "name", value: "bo" }] },
+    });
+    expect(queryCalls[0]!.sql).toBe("UPDATE `public`.`users` SET `name`=? WHERE `id`=?");
+  });
+
+  test("a non-boolean exactNumeric is NOT honored (only a real `true` casts)", async () => {
+    const { exec, queryCalls } = mysqlBigintPk();
+    for (const flag of ["true", 1, {}, null]) {
+      await exec.execute({
+        shape: "structured",
+        op: {
+          kind: "delete",
+          table: "users",
+          pk: { column: "id", value: WIDE, exactNumeric: flag },
+        },
+        confirmed: true,
+      });
+    }
+    expect(queryCalls.map((c) => c.sql)).toEqual(
+      Array.from({ length: 4 }, () => "DELETE FROM `public`.`users` WHERE `id`=?"),
+    );
+  });
+
+  test("the confirmation PREVIEW shows the cast the delete will actually run", async () => {
+    const { exec } = mysqlBigintPk();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: { kind: "delete", table: "users", pk: { column: "id", value: WIDE, exactNumeric: true } },
+    });
+    expect(reply.ok && reply.result.status).toBe("confirmation_required");
+    if (reply.ok && reply.result.status === "confirmation_required") {
+      expect(reply.result.preview.sql).toContain("CAST(? AS DECIMAL(65,0))");
+    }
+  });
+
+  /* ---- The flag is UNTRUSTED: the server re-derives it from its own schema ---- */
+
+  // A hostile frame setting `exactNumeric:true` on a TEXT primary key would otherwise
+  // compose `WHERE name=CAST(? AS DECIMAL(65,30))`. MySQL then coerces the VARCHAR column
+  // to a number too, EVERY non-numeric row evaluates to 0, and a single-row UPDATE/DELETE
+  // silently hits MANY rows. The resolved column's own dataType is the only authority.
+  test("a hostile exactNumeric on a TEXT pk composes the PLAIN placeholder", async () => {
+    // The default fixture types `id` as `text`, which is exactly the hostile case.
+    const { exec, queryCalls } = makeExecutor({ engine: "mysql" });
+    await exec.execute({
+      shape: "structured",
+      op: {
+        kind: "update",
+        table: "users",
+        pk: { column: "id", value: "abc", exactNumeric: true },
+        set: [{ column: "name", value: "bo" }],
+      },
+    });
+    expect(queryCalls[0]!.sql).toBe("UPDATE `public`.`users` SET `name`=? WHERE `id`=?");
+    await exec.execute({
+      shape: "structured",
+      op: { kind: "delete", table: "users", pk: { column: "id", value: "abc", exactNumeric: true } },
+      confirmed: true,
+    });
+    expect(queryCalls[1]!.sql).toBe("DELETE FROM `public`.`users` WHERE `id`=?");
+  });
+
+  test("a hostile exactNumeric on a TEXT pk is ignored on POSTGRES too", async () => {
+    const { exec, queryCalls } = makeExecutor({ engine: "postgres" });
+    await exec.execute({
+      shape: "structured",
+      op: { kind: "delete", table: "users", pk: { column: "id", value: "abc", exactNumeric: true } },
+      confirmed: true,
+    });
+    expect(queryCalls[0]!.sql).toBe('DELETE FROM "public"."users" WHERE "id"=$1');
+  });
+
+  // When the column REALLY is exact-numeric but the value is not a numeric literal, we
+  // cannot promise an exact comparison (nor read a scale off it) — so this is a
+  // `bad_request`, not a quiet fallback to a float-compared placeholder.
+  test("a malformed value on a genuinely exact-numeric pk is bad_request, not a fallback", async () => {
+    for (const value of ["12ab", "1e5", " 12 ", "", null, {}]) {
+      const { exec, queryCalls } = mysqlBigintPk();
+      const reply = await exec.execute({
+        shape: "structured",
+        op: { kind: "delete", table: "users", pk: { column: "id", value, exactNumeric: true } },
+        confirmed: true,
+      });
+      expect(reply.ok).toBe(false);
+      if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+      expect(queryCalls.length).toBe(0);
+    }
+  });
+
+  test("the malformed-pk rejection applies to UPDATE as well", async () => {
+    const { exec, queryCalls } = mysqlBigintPk();
+    const reply = await exec.execute({
+      shape: "structured",
+      op: {
+        kind: "update",
+        table: "users",
+        pk: { column: "id", value: "12ab", exactNumeric: true },
+        set: [{ column: "name", value: "bo" }],
+      },
+    });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.code).toBe("bad_request");
+    expect(queryCalls.length).toBe(0);
+  });
+
+  /* ---- The scale is DERIVED, because DECIMAL(65,30) holds only 35 integral digits ---- */
+
+  test("a 40-digit integer PK composes DECIMAL(65,0) — a fixed scale 30 would CLAMP it", async () => {
+    // MySQL permits a `DECIMAL(40,0)` primary key. Under the old fixed `DECIMAL(65,30)`
+    // the cast kept only 35 integral digits, so this value was clamped, the WHERE matched
+    // nothing, `affectedRows` was 0 — and the executor still reported `status:"ok"`.
+    const forty = "1234567890123456789012345678901234567890";
+    expect(forty.length).toBe(40);
+    const { exec, queryCalls } = makeExecutor({
+      engine: "mysql",
+      schema: schemaWithPkType("mysql", "decimal"),
+    });
+    await exec.execute({
+      shape: "structured",
+      op: { kind: "delete", table: "users", pk: { column: "id", value: forty, exactNumeric: true } },
+      confirmed: true,
+    });
+    expect(queryCalls[0]!.sql).toBe("DELETE FROM `public`.`users` WHERE `id`=CAST(? AS DECIMAL(65,0))");
+    expect(queryCalls[0]!.params).toEqual([forty]);
+  });
+
+  test("a FRACTIONAL PK keeps its fraction exactly — the scale counts its digits", async () => {
+    const cases: ReadonlyArray<readonly [string, number]> = [
+      ["12.5", 1],
+      ["-0.250", 3],
+      [".5", 1],
+      ["+7", 0],
+      // More than 30 fractional digits is clamped to MySQL's own DECIMAL maximum.
+      [`0.${"1".repeat(35)}`, 30],
+    ];
+    for (const [value, scale] of cases) {
+      const { exec, queryCalls } = makeExecutor({
+        engine: "mysql",
+        schema: schemaWithPkType("mysql", "numeric"),
+      });
+      await exec.execute({
+        shape: "structured",
+        op: { kind: "delete", table: "users", pk: { column: "id", value, exactNumeric: true } },
+        confirmed: true,
+      });
+      expect(queryCalls[0]!.sql).toBe(
+        `DELETE FROM \`public\`.\`users\` WHERE \`id\`=CAST(? AS DECIMAL(65,${scale}))`,
+      );
+    }
+  });
+});
+
 /* ---- Structured path (a): delete ------------------------------------- */
 
 describe("structured delete — confirmation + PK verification", () => {

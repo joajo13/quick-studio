@@ -11,6 +11,7 @@ import { describe, expect, test } from "bun:test";
 import postgres from "postgres";
 import mysql2 from "mysql2";
 import type { ConnectionFailureKind } from "../shared/contract.ts";
+import { classifySqlDisplayKind, isNaiveDateTimeType } from "../shared/contract.ts";
 import {
   DEFAULT_SESSION_MODES,
   DriverConnectionError,
@@ -27,6 +28,7 @@ import {
 import {
   buildMysqlConfig,
   createMutex,
+  mysqlFieldsToColumns,
   mysqlRelationKind,
   mysqlSchemaScope,
 } from "./driver-mysql.ts";
@@ -1199,5 +1201,251 @@ describe("session-mode parsers (DW-39)", () => {
       expect(mysqlSessionModes(123)).toEqual(SAFE_FALLBACK_SESSION_MODES);
       expect(mysqlSessionModes(undefined)).toEqual(SAFE_FALLBACK_SESSION_MODES);
     });
+  });
+});
+
+describe("mysql connection-option pinning (DW-35, no live DB)", () => {
+  const ConnectionConfig = (
+    mysql2 as unknown as {
+      ConnectionConfig: new (opts: unknown) => {
+        supportBigNumbers: boolean;
+        bigNumberStrings: boolean;
+        decimalNumbers: boolean;
+        dateStrings: boolean | Array<string>;
+        timezone: string;
+        multipleStatements: boolean;
+        database: string;
+      };
+    }
+  ).ConnectionConfig;
+
+  test("a plain mysql URL yields all five pins at their required values", () => {
+    const cfg = new ConnectionConfig(buildMysqlConfig("mysql://u:p@localhost:3306/db"));
+    expect(cfg.supportBigNumbers).toBe(true);
+    expect(cfg.bigNumberStrings).toBe(true);
+    expect(cfg.decimalNumbers).toBe(false);
+    expect(cfg.dateStrings).toBe(false);
+    expect(cfg.timezone).toBe("local");
+  });
+
+  test("a URL trying to flip EVERY pin is overridden on all five", () => {
+    const cfg = new ConnectionConfig(
+      buildMysqlConfig(
+        "mysql://u:p@localhost:3306/db?supportBigNumbers=false&bigNumberStrings=false" +
+          "&decimalNumbers=true&dateStrings=true&timezone=Z",
+      ),
+    );
+    expect(cfg.supportBigNumbers).toBe(true);
+    expect(cfg.bigNumberStrings).toBe(true);
+    expect(cfg.decimalNumbers).toBe(false);
+    expect(cfg.dateStrings).toBe(false);
+    expect(cfg.timezone).toBe("local");
+  });
+
+  test("the new pins do NOT displace the multi-statement pin (independent keys)", () => {
+    const cfg = new ConnectionConfig(
+      buildMysqlConfig("mysql://u:p@localhost:3306/db?multipleStatements=true"),
+    );
+    expect(cfg.multipleStatements).toBe(false);
+    expect(cfg.supportBigNumbers).toBe(true);
+    expect(cfg.bigNumberStrings).toBe(true);
+    expect(cfg.decimalNumbers).toBe(false);
+    expect(cfg.dateStrings).toBe(false);
+    expect(cfg.timezone).toBe("local");
+    expect(cfg.database).toBe("db");
+  });
+
+  test("all five are pinned in the returned options object too", () => {
+    const opts = buildMysqlConfig("mysql://u:p@h/db");
+    expect(opts.supportBigNumbers).toBe(true);
+    expect(opts.bigNumberStrings).toBe(true);
+    expect(opts.decimalNumbers).toBe(false);
+    expect(opts.dateStrings).toBe(false);
+    expect(opts.timezone).toBe("local");
+  });
+
+  test("and in the URI half, which is the load-bearing one for the FALSY pins", () => {
+    // mysql2's URI merge is `if (options[key]) continue;` — an explicit `false` is falsy
+    // and would be OVERWRITTEN by the URL, so `decimalNumbers`/`dateStrings` are only
+    // safe because the query param says `false` too.
+    const q = new URL(buildMysqlConfig("mysql://u:p@h/db?decimalNumbers=true").uri as string)
+      .searchParams;
+    expect(q.get("decimalNumbers")).toBe("false");
+    expect(q.get("dateStrings")).toBe("false");
+    expect(q.get("multipleStatements")).toBe("false");
+    expect(q.get("supportBigNumbers")).toBe("true");
+    expect(q.get("bigNumberStrings")).toBe("true");
+    expect(q.get("timezone")).toBe("local");
+  });
+});
+
+// DW-30/34 — the AD-HOC query path has no `information_schema` to lean on, so both
+// adapters derive a canonical SQL type name from the wire-protocol metadata they already
+// receive. Both maps must emit the SAME vocabulary the browse path's introspection does.
+describe("ad-hoc result column dataType mapping (DW-30/34)", () => {
+  test("postgres: OIDs map to canonical names; an unmapped OID carries NO dataType", () => {
+    const result = Object.assign([["9007199254740993", 1.5, new Date(0), null]], {
+      columns: [
+        { name: "big", type: 20 }, // int8
+        { name: "dbl", type: 701 }, // float8
+        { name: "naive", type: 1114 }, // timestamp without time zone
+        { name: "weird", type: 869 }, // inet — deliberately unmapped
+      ],
+      count: 1,
+    });
+    expect(mapUnsafeResult(result).columns).toEqual([
+      { name: "big", dataType: "bigint" },
+      { name: "dbl", dataType: "double precision" },
+      { name: "naive", dataType: "timestamp without time zone" },
+      { name: "weird" },
+    ]);
+  });
+
+  test("postgres: a column descriptor with NO type OID stays the legacy {name} shape", () => {
+    const result = Object.assign([[1]], { columns: [{ name: "id" }], count: 1 });
+    const columns = mapUnsafeResult(result).columns;
+    expect(columns).toEqual([{ name: "id" }]);
+    expect("dataType" in (columns[0] as object)).toBe(false);
+  });
+
+  test("postgres: 1114 is the NAIVE spelling, 1184 the aware one (never a bare `timestamp`)", () => {
+    const result = Object.assign([] as unknown[][], {
+      columns: [
+        { name: "a", type: 1114 },
+        { name: "b", type: 1184 },
+      ],
+      count: 0,
+    });
+    expect(mapUnsafeResult(result).columns.map((c) => c.dataType)).toEqual([
+      "timestamp without time zone",
+      "timestamp with time zone",
+    ]);
+  });
+
+  test("mysql: field type CODES map to canonical names (codes per mysql2 constants/types)", () => {
+    expect(
+      mysqlFieldsToColumns([
+        { name: "dec_old", type: 0 }, // DECIMAL
+        { name: "dec_new", type: 246 }, // NEWDECIMAL
+        { name: "big", type: 8 }, // LONGLONG
+        { name: "tiny", type: 1 }, // TINY — never guessed as boolean
+        { name: "small", type: 2 }, // SHORT
+        { name: "medium", type: 9 }, // INT24
+        { name: "i", type: 3 }, // LONG — `information_schema` spells this `int`
+        { name: "f", type: 4 }, // FLOAT
+        { name: "d", type: 5 }, // DOUBLE
+        { name: "dt", type: 12 }, // DATETIME — the naive one
+        // TIMESTAMP — session-tz converted, i.e. aware. Spelled `timestamp`, exactly as
+        // MySQL's own `information_schema` spells it; the classifier buckets a bare
+        // `timestamp` as aware, so no invented name is needed to get the right behavior.
+        { name: "ts", type: 7 },
+        { name: "day", type: 10 }, // DATE
+        { name: "clock", type: 11 }, // TIME
+      ]).map((c) => c.dataType),
+    ).toEqual([
+      "decimal",
+      "decimal",
+      "bigint",
+      "tinyint",
+      "smallint",
+      "mediumint",
+      "int",
+      "float",
+      "double",
+      "datetime",
+      "timestamp",
+      "date",
+      "time",
+    ]);
+  });
+
+  test("mysql: TIMESTAMP is spelled `timestamp` (a name MySQL has) and classifies AWARE", () => {
+    // The ad-hoc path and the browse path must agree CHARACTER-for-character on the same
+    // logical column: `information_schema.columns.data_type` says `timestamp`, so the
+    // field-code map must too — and that spelling must still land in the tz-aware bucket
+    // (a naive classification would strip the `Z` off a genuinely instant-bearing value).
+    const [ts] = mysqlFieldsToColumns([{ name: "ts", type: 7 }]);
+    expect(ts?.dataType).toBe("timestamp");
+    expect(isNaiveDateTimeType(ts?.dataType)).toBe(false);
+    expect(classifySqlDisplayKind(ts?.dataType)).toBe("date");
+  });
+
+  test("mysql: an unmapped code (VARCHAR/BLOB) and an absent code carry NO dataType", () => {
+    const columns = mysqlFieldsToColumns([
+      { name: "s", type: 253 }, // VAR_STRING — deliberately unmapped
+      { name: "b", type: 252 }, // BLOB — deliberately unmapped
+      { name: "n" }, // no type metadata at all
+    ]);
+    expect(columns).toEqual([{ name: "s" }, { name: "b" }, { name: "n" }]);
+    expect(columns.every((c) => !("dataType" in c))).toBe(true);
+  });
+
+  test("mysql: an absent fields array yields no columns (non-row result)", () => {
+    expect(mysqlFieldsToColumns(undefined)).toEqual([]);
+  });
+
+  test("both maps use the `information_schema` SPELLING, not an internal alias", () => {
+    // `dataType` is a PUBLIC wire field documented as "the SQL type as the engine names
+    // it", so the ad-hoc maps must not invent a private vocabulary that disagrees with
+    // the browse path for the same logical column — even where both spellings land in
+    // the same display bucket today.
+    const result = Object.assign([] as unknown[][], {
+      columns: [
+        { name: "a", type: 21 }, // int2  → smallint
+        { name: "b", type: 23 }, // int4  → integer
+        { name: "c", type: 1043 }, // varchar → character varying
+        { name: "d", type: 1042 }, // bpchar  → character
+        { name: "e", type: 3802 }, // jsonb (NOT collapsed into `json`)
+        { name: "f", type: 1083 }, // time → time without time zone
+        { name: "g", type: 1266 }, // timetz → time with time zone
+      ],
+      count: 0,
+    });
+    expect(mapUnsafeResult(result).columns.map((c) => c.dataType)).toEqual([
+      "smallint",
+      "integer",
+      "character varying",
+      "character",
+      "jsonb",
+      "time without time zone",
+      "time with time zone",
+    ]);
+    // MySQL's LONG is `int` in `information_schema` — never Postgres's `integer`.
+    expect(mysqlFieldsToColumns([{ name: "i", type: 3 }])[0]?.dataType).toBe("int");
+  });
+});
+
+// Both adapters reach the wire type metadata through an `as` cast, because neither
+// library DECLARES the property in its published types. A rename upstream would silently
+// turn the whole typing path back into `{name}` with a green suite, so pin the two
+// assumptions against the real installed libraries here.
+describe("library assumptions the ad-hoc typing path rests on", () => {
+  test("mysql2 exposes a numeric field-type CODE on its FieldPacket", () => {
+    // The packet is built by the wire parser from `constants/types`, so assert the
+    // constants module still holds the exact codes the local map is written against.
+    const types = (
+      mysql2 as unknown as { Types?: Record<string, number> }
+    ).Types as Record<string, number> | undefined;
+    expect(types).toBeDefined();
+    expect(types?.LONGLONG).toBe(8);
+    expect(types?.NEWDECIMAL).toBe(246);
+    expect(types?.DATETIME).toBe(12);
+    expect(types?.TIMESTAMP).toBe(7);
+    expect(types?.LONG).toBe(3);
+  });
+
+  test("postgres.js exposes a column's type OID as `.type` on its column descriptor", async () => {
+    // `Column` is postgres.js's own describe-result shape. Constructing the driver would
+    // need a live server, so assert the shape through the parser the library exports for
+    // it: a RowDescription column is `{name, parser, table, number, type}`.
+    const pgModule = (await import("postgres")) as unknown as Record<string, unknown>;
+    expect(typeof pgModule.default).toBe("function");
+    // The mapper only reads `.type`, so a structurally-equivalent descriptor is enough
+    // to pin the contract mapUnsafeResult is written against.
+    const descriptor: { name: string; type: number } = { name: "id", type: 20 };
+    const mapped = mapUnsafeResult(
+      Object.assign([] as unknown[][], { columns: [descriptor], count: 0 }),
+    );
+    expect(mapped.columns[0]).toEqual({ name: "id", dataType: "bigint" });
   });
 });

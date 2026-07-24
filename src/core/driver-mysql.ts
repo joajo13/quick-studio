@@ -22,6 +22,7 @@ import {
   toDriverConnectionError,
   withTimeout,
   type Driver,
+  type DriverColumn,
   type DriverQueryResult,
   type IntrospectedColumn,
   type IntrospectedForeignKey,
@@ -113,6 +114,64 @@ export function createMutex(): <T>(fn: () => Promise<T>) => Promise<T> {
 }
 
 /**
+ * mysql2 wire-protocol field-type CODE → the canonical lowercase SQL type name
+ * (DW-30/34). The ad-hoc SQL path has no `information_schema` to lean on, but every
+ * `FieldPacket` already carries the numeric column type — this map turns it into
+ * EXACTLY the spelling `information_schema.columns.data_type` yields for the browse
+ * path, so both read paths classify identically.
+ *
+ * Written out as a LOCAL literal on purpose: `mysql.Types` is an untyped runtime getter
+ * that `mysql2/promise.d.ts` does not declare, and it maps a code to the PROTOCOL enum
+ * name (`LONGLONG`, `NEWDECIMAL`) rather than to a SQL type name — the wrong vocabulary
+ * on top of the wrong typing. Codes verified against `mysql2/lib/constants/types.js`.
+ *
+ * Two deliberate calls: `TINY` maps to `tinyint` and is NEVER special-cased to boolean
+ * (the protocol cannot distinguish `TINYINT(1)` from `TINYINT(4)` here, and guessing
+ * would mislabel real small integers); and `TIMESTAMP` maps to the bare `timestamp`
+ * while `DATETIME` maps to `datetime`, because MySQL session-tz-converts the former and
+ * stores the latter as a bare wall clock — the classifier already treats a bare
+ * `timestamp` as tz-AWARE and `datetime` as naive, so the two land in the right buckets
+ * with no invented spelling. `timestamp` is exactly what MySQL's own
+ * `information_schema.columns.data_type` returns for the column, so the promise above —
+ * both read paths emit the SAME name for the same logical column — holds literally;
+ * `timestamp with time zone` is a name MySQL does not have anywhere.
+ * Anything absent (string/blob/bit/geometry/enum/set/year) stays unmapped.
+ */
+const MYSQL_TYPE_CODE_TO_DATA_TYPE: ReadonlyMap<number, string> = new Map([
+  [0, "decimal"], // DECIMAL
+  [246, "decimal"], // NEWDECIMAL
+  [8, "bigint"], // LONGLONG
+  [1, "tinyint"], // TINY
+  [2, "smallint"], // SHORT
+  [9, "mediumint"], // INT24
+  [3, "int"], // LONG — `information_schema` spells this `int`, never `integer`
+  [4, "float"], // FLOAT
+  [5, "double"], // DOUBLE
+  [12, "datetime"], // DATETIME
+  [7, "timestamp"], // TIMESTAMP — the browse path's `information_schema` spelling; AWARE
+  [10, "date"], // DATE
+  [11, "time"], // TIME
+]);
+
+/**
+ * Map mysql2's `FieldPacket[]` onto neutral {@link DriverColumn}s (DW-30/34). Each packet
+ * carries the wire-protocol type CODE, which becomes the same canonical name the browse
+ * path's `information_schema` introspection yields. The `dataType` key is OMITTED when the
+ * code is absent or unmapped, so a field with no usable type metadata keeps the
+ * byte-identical `{name}` shape this adapter has always produced. Pure and exported so the
+ * code→name mapping is unit-testable without a live mysql (same precedent as
+ * {@link buildMysqlConfig}); an absent `fields` (a non-row result) yields `[]`.
+ */
+export function mysqlFieldsToColumns(
+  fields: ReadonlyArray<{ readonly name: string; readonly type?: number }> | undefined,
+): ReadonlyArray<DriverColumn> {
+  return (fields ?? []).map((f) => {
+    const dataType = f.type === undefined ? undefined : MYSQL_TYPE_CODE_TO_DATA_TYPE.get(f.type);
+    return dataType === undefined ? { name: f.name } : { name: f.name, dataType };
+  });
+}
+
+/**
  * Run one Core-composed statement on `conn` and map it into the neutral
  * {@link DriverQueryResult}. A SELECT comes back (with `rowsAsArray`) as row arrays +
  * a `fields` descriptor; a DML statement comes back as a `ResultSetHeader` object
@@ -130,9 +189,9 @@ async function execMysql(
     params !== undefined ? [...params] : [],
   );
   if (Array.isArray(result)) {
-    const columns = ((fields as ReadonlyArray<{ name: string }> | undefined) ?? []).map((f) => ({
-      name: f.name,
-    }));
+    const columns = mysqlFieldsToColumns(
+      fields as ReadonlyArray<{ name: string; type?: number }> | undefined,
+    );
     return {
       columns,
       rows: result as unknown as ReadonlyArray<ReadonlyArray<unknown>>,
@@ -155,12 +214,57 @@ async function execMysql(
  * `true` overwrites an explicit `false`. Instead we pin the query param itself to
  * `false` in the URL — mysql2 then parses that as the definitive value — and also
  * set the flag explicitly, so multi-statements can never be enabled via the URL.
+ *
+ * FIVE options are pinned in total, by that same double-pin, because every invariant
+ * this adapter now promises rests on them and each is URL-overridable (they all appear
+ * in mysql2's `validOptions` and are parsed by `parseUrl`):
+ *
+ *  - `supportBigNumbers: true` + `bigNumberStrings: true` (DW-35). Without them a
+ *    `BIGINT` above 2^53 decodes into a lossy JS number and is displayed — and, worse,
+ *    WRITTEN BACK — rounded; with them mysql2 hands back the exact digit string,
+ *    matching what postgres.js already does for `int8`. NOTE what this pin does NOT do:
+ *    `DECIMAL`/`NEWDECIMAL` already come back as strings unconditionally (mysql2's
+ *    `text_parser.js` never numberifies them), so the big-number pin materially affects
+ *    `LONGLONG` only — `DECIMAL` precision is protected by `decimalNumbers` below.
+ *  - `decimalNumbers: false`. A `?decimalNumbers=true` in the URL would turn every
+ *    `DECIMAL` into a JS number and reintroduce exactly the lossy rounding DW-35 exists
+ *    to close, on the one type the big-number flags do not cover.
+ *  - `dateStrings: false`. The mapper's contract is that a temporal column arrives as a
+ *    JS `Date` (it then renders a tz-less one as a literal wall clock, DW-34); a
+ *    `?dateStrings=true` would hand it pre-formatted strings instead and silently change
+ *    the shape every downstream classification is written against.
+ *  - `timezone: "local"`. The wall-clock rendering reads LOCAL `Date` getters precisely
+ *    because mysql2 builds a tz-less `DATETIME` in the host's local zone; a `?timezone=Z`
+ *    would build it in UTC and the printed wall clock would silently shift by the host
+ *    offset.
+ *
+ * The pin DIRECTION differs per option, which is why both halves are always written.
+ * mysql2's URI merge is `if (options[key]) continue;`, i.e. only a TRUTHY explicit option
+ * survives it: `supportBigNumbers`/`bigNumberStrings`/`timezone` are therefore safe as
+ * explicit options and the query params merely close the reverse hole, while
+ * `multipleStatements`/`decimalNumbers`/`dateStrings` are falsy and would be OVERWRITTEN
+ * by the URI — for those the query param is the load-bearing half. All six keys are
+ * independent, so no pin can displace another.
+ *
  * Exported so the enforcement is unit-testable without a live mysql.
  */
 export function buildMysqlConfig(url: string): ConnectionOptions {
   const u = new URL(url);
   u.searchParams.set("multipleStatements", "false");
-  return { uri: u.toString(), multipleStatements: false };
+  u.searchParams.set("supportBigNumbers", "true");
+  u.searchParams.set("bigNumberStrings", "true");
+  u.searchParams.set("decimalNumbers", "false");
+  u.searchParams.set("dateStrings", "false");
+  u.searchParams.set("timezone", "local");
+  return {
+    uri: u.toString(),
+    multipleStatements: false,
+    supportBigNumbers: true,
+    bigNumberStrings: true,
+    decimalNumbers: false,
+    dateStrings: false,
+    timezone: "local",
+  };
 }
 
 /**

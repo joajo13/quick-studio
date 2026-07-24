@@ -2,7 +2,7 @@
 title: 'SQL-dataType-aware, integer-precision-safe result contract'
 type: 'feature'
 created: '2026-07-18'
-status: 'in-review'
+status: 'blocked'
 baseline_revision: '2c0fc3c'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -108,3 +108,5 @@ if (value instanceof Date && !Number.isNaN(value.getTime())) {
 **Commands:**
 - `bunx tsc --noEmit` -- expected: passes (new signatures thread cleanly through driver/executor/server/frozen-map/row-mutations).
 - `bun test` -- expected: all pass, including the new bigint/decimal/naive-date/unknown-fallback/bigint-PK cases in `frozen-map.test.ts`, `driver.test.ts`, `row-mutations.test.ts`.
+
+> **SUPERSEDED (2026-07-24).** `status` set to `blocked`: this spec was never implemented — its task checkboxes were ticked but no code ever landed. It is fully superseded by `spec-result-datatype-and-exact-integers.md`, which carries DW-30/DW-34/DW-35/DW-40 to completion. Do not re-drive this file.

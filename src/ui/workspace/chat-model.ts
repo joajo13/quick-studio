@@ -11,6 +11,7 @@
  * classifier. No I/O, no React, no `window`.
  */
 
+import { frozenColumnDisplayKind } from "../../shared/contract.ts";
 import type {
   ChatContextSummary,
   ChatStreamChunk,
@@ -166,16 +167,53 @@ export type ResultKpi = {
  * value carries a fractional part (a decimal/money-shaped number, the finest signal
  * FrozenData's single `number` type exposes), else `kind:"count"`. Any multi-column or
  * multi-row result degrades to just the row-count KPI (+ the mini table). Pure, DOM-free.
+ *
+ * The gate is the column's DISPLAY kind, not its runtime `type`, and the scalar may
+ * arrive as a `string` cell: MySQL's `COUNT(*)`/`SUM(...)` is a `LONGLONG`, which the
+ * adapter now decodes as an exact digit STRING (DW-35) in a column typed `bigint`. Keyed
+ * on the raw `type` this card would silently disappear on MySQL — a scalar count would
+ * degrade to a bare row-count. The non-finite rejection is kept for both representations,
+ * and an exact INTEGER digit-string is formatted from its characters (never via
+ * `Number()`, which would misgroup a `SUM(...)` above 2^53).
  */
 export function deriveResultKpis(data: FrozenData): ReadonlyArray<ResultKpi> {
   const rowKpi: ResultKpi = { label: "rows", value: formatKpiValue(data.rows.length), kind: "count" };
-  if (data.rows.length === 1 && data.columns.length === 1 && data.columns[0]?.type === "number") {
+  const col = data.columns[0];
+  if (
+    data.rows.length === 1 &&
+    data.columns.length === 1 &&
+    col !== undefined &&
+    frozenColumnDisplayKind(col) === "number"
+  ) {
     const cell = data.rows[0]?.[0];
-    // Non-finite scalars (NaN/±Infinity, reachable from float columns) are NOT surfaced
-    // as a KPI — they would render literally as "NaN"/"∞" in a money-colored card.
-    if (cell !== undefined && cell.kind === "number" && Number.isFinite(cell.value)) {
-      const kind: "money" | "count" = Number.isInteger(cell.value) ? "count" : "money";
-      return [{ label: data.columns[0].name, value: formatKpiValue(cell.value), kind }, rowKpi];
+    // EXACT path first. `Number("9007199254740993")` is `9007199254740992` — the KPI card
+    // would render a MySQL `SELECT SUM(amount_cents)` above 2^53 with the wrong digits,
+    // which is precisely the loss DW-35 exists to prevent. So a string cell whose text is
+    // an INTEGER literal is grouped straight from its characters, never through `Number()`.
+    // Such a value is always `kind:"count"`: it has no fractional part by construction.
+    if (cell !== undefined && cell.kind === "string") {
+      const text = cell.value.trim();
+      if (EXACT_INTEGER_LITERAL_RE.test(text)) {
+        return [{ label: col.name, value: groupIntegerDigits(text), kind: "count" }, rowKpi];
+      }
+    }
+    // Everything else — a real `number` cell, or a string carrying a fractional/exotic
+    // literal — goes through the JS-number path. Precision there is best-effort by
+    // nature (a `double` column never had more), so the parse is honest, not lossless.
+    const scalar =
+      cell === undefined
+        ? undefined
+        : cell.kind === "number"
+          ? cell.value
+          : cell.kind === "string" && cell.value.trim() !== ""
+            ? Number(cell.value)
+            : undefined;
+    // Non-finite scalars (NaN/±Infinity, reachable from float columns, and now also from
+    // an unparseable string) are NOT surfaced as a KPI — they would render literally as
+    // "NaN"/"∞" in a money-colored card.
+    if (scalar !== undefined && Number.isFinite(scalar)) {
+      const kind: "money" | "count" = Number.isInteger(scalar) ? "count" : "money";
+      return [{ label: col.name, value: formatKpiValue(scalar), kind }, rowKpi];
     }
   }
   return [rowKpi];
@@ -185,9 +223,32 @@ export function deriveResultKpis(data: FrozenData): ReadonlyArray<ResultKpi> {
  * Human-format a KPI number: thousands grouping, at most two fractional digits, and
  * NEVER scientific notation — so a float sum (`0.1 + 0.2`) shows `0.3` not
  * `0.30000000000000004`, and a huge scalar shows its grouped digits not `1e+21`.
+ *
+ * Takes a JS `number`, so it is only as exact as one: an exact digit STRING wider than
+ * 2^53 must go through {@link groupIntegerDigits} instead, never through here.
  */
 function formatKpiValue(value: number): string {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(value);
+}
+
+/** A bare integer literal with an optional sign — the shape {@link groupIntegerDigits} formats. */
+const EXACT_INTEGER_LITERAL_RE = /^[+-]?\d+$/;
+
+/**
+ * Group an INTEGER digit-string with `en-US` thousands separators, working on the
+ * CHARACTERS — no `Number()`, so `"9007199254740993"` renders as `9,007,199,254,740,993`
+ * rather than the `…992` a round-trip through a JS double would produce. Matches
+ * `Intl.NumberFormat("en-US")` for every value a double can represent, and stays exact
+ * beyond it, which is the whole point.
+ *
+ * Normalizes the way `Intl` does: a leading `+` is dropped, leading zeros are stripped
+ * (`"007"` → `"7"`), and a signed zero prints as plain `0`.
+ */
+function groupIntegerDigits(literal: string): string {
+  const negative = literal.startsWith("-");
+  const digits = literal.replace(/^[+-]/, "").replace(/^0+(?=\d)/, "");
+  const grouped = digits.replace(/\B(?=(\d{3})+$)/g, ",");
+  return negative && grouped !== "0" ? `-${grouped}` : grouped;
 }
 
 /**

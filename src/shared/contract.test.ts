@@ -5,9 +5,14 @@ import {
   ISO_UTC_RE,
   SANDBOX_PROTOCOL_VERSION,
   assertIsoUtc,
+  classifySqlDisplayKind,
   decode,
   encode,
   errorReply,
+  frozenColumnDisplayKind,
+  isExactIntegerType,
+  isExactNumericType,
+  isNaiveDateTimeType,
   isSandboxInbound,
   isSandboxOutbound,
   normalizeIsoUtc,
@@ -131,6 +136,208 @@ describe("frozen-data round-trip", () => {
     const badRows = { ...fixture, rows: null } as unknown as FrozenData;
     expect(() => encode(badCols)).toThrow();
     expect(() => encode(badRows)).toThrow();
+  });
+});
+
+// The optional SQL `dataType` (DW-30/34/35/40) rides on FrozenColumn WITHOUT a schema
+// bump, so the two laws that matter are: it survives the whitelist rebuild, and its
+// ABSENCE is byte-for-byte the pre-change shape.
+describe("FrozenColumn.dataType — carried, optional, schema-version-neutral", () => {
+  const typed: FrozenData = {
+    schemaVersion: FROZEN_SCHEMA_VERSION,
+    columns: [
+      { name: "id", type: "string", dataType: "bigint" },
+      { name: "amount", type: "string", dataType: "numeric" },
+      { name: "at", type: "string", dataType: "timestamp without time zone" },
+      { name: "plain", type: "string" },
+    ],
+    rows: [
+      [
+        { kind: "string", value: "9007199254740993" },
+        { kind: "string", value: "1.5" },
+        { kind: "string", value: "2026-07-22T18:14:13" },
+        { kind: "string", value: "x" },
+      ],
+    ],
+  };
+
+  test("the schema version is NOT bumped by the added field", () => {
+    expect(FROZEN_SCHEMA_VERSION).toBe(1);
+  });
+
+  test("dataType survives encode/decode and the real JSON wire boundary", () => {
+    expect(decode(encode(typed))).toEqual(typed);
+    expect(decode(JSON.parse(JSON.stringify(encode(typed))))).toEqual(typed);
+  });
+
+  test("the rebuild stays a WHITELIST — an unknown extra column property is dropped", () => {
+    const smuggled = {
+      ...typed,
+      columns: [{ name: "id", type: "string", dataType: "bigint", evil: "payload" }],
+      rows: [[{ kind: "string", value: "1" }]],
+    } as unknown as FrozenData;
+    const out = encode(smuggled).columns[0] as Record<string, unknown>;
+    expect(out).toEqual({ name: "id", type: "string", dataType: "bigint" });
+    expect("evil" in out).toBe(false);
+  });
+
+  test("an absent dataType does not materialize the key (legacy shape preserved)", () => {
+    const legacy = encode(fixture);
+    expect(legacy.columns.every((c) => !("dataType" in c))).toBe(true);
+    expect(legacy.columns).toEqual(fixture.columns);
+  });
+
+  test("a null/non-object column entry throws a LABELLED boundary error", () => {
+    // The `dataType` loop is the first thing in the assertion to dereference a column
+    // entry, so it owns the entry's shape check — otherwise a hostile frame dies with an
+    // unlabelled `Cannot read properties of null` and the caller cannot tell which entry.
+    const nulled = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [null],
+      rows: [[{ kind: "null" }]],
+    } as unknown as FrozenData;
+    expect(() => encode(nulled)).toThrow(/column 0 is not an object/);
+    expect(() => decode(nulled)).toThrow(/column 0 is not an object/);
+    const stringy = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: ["id"],
+      rows: [[{ kind: "null" }]],
+    } as unknown as FrozenData;
+    expect(() => encode(stringy)).toThrow(/column 0 is not an object \(got string\)/);
+  });
+
+  test("an ARRAY column entry throws a LABELLED boundary error", () => {
+    // An array passes `typeof === "object"` and carries `name: undefined` /
+    // `type: undefined`, so without an explicit check it sails through `rebuildColumn`
+    // and lands in an exported snapshot whose header renders as `[object Object]`.
+    const arrayed = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [[]],
+      rows: [[{ kind: "null" }]],
+    } as unknown as FrozenData;
+    expect(() => encode(arrayed)).toThrow(/column 0 is not an object \(got array\)/);
+    expect(() => decode(arrayed)).toThrow(/column 0 is not an object \(got array\)/);
+  });
+
+  test("a non-string column `name` throws a LABELLED boundary error", () => {
+    // The assertion interpolates `name` into its own error messages and the grid renders
+    // it as a header, so the rest of the pipeline already assumes it is a string.
+    for (const name of [undefined, 7, null, { toString: () => "id" }]) {
+      const bad = {
+        schemaVersion: FROZEN_SCHEMA_VERSION,
+        columns: [{ name, type: "null" }],
+        rows: [[{ kind: "null" }]],
+      } as unknown as FrozenData;
+      expect(() => encode(bad)).toThrow(/column 0: name must be a string/);
+      expect(() => decode(bad)).toThrow(/column 0: name must be a string/);
+    }
+  });
+
+  test("a column `type` outside the FrozenCell kinds throws a LABELLED boundary error", () => {
+    // The cell-kind rule compares each cell's `kind` against this field. A bogus `type`
+    // makes that comparison vacuously reject every non-null cell — or, on an all-NULL
+    // page, pass silently and ship a column whose declared kind names nothing.
+    for (const type of ["bigint", "", undefined, 3]) {
+      const bad = {
+        schemaVersion: FROZEN_SCHEMA_VERSION,
+        columns: [{ name: "id", type }],
+        rows: [[{ kind: "null" }]],
+      } as unknown as FrozenData;
+      expect(() => encode(bad)).toThrow(/column 0 \('id'\): type must be one of/);
+      expect(() => decode(bad)).toThrow(/column 0 \('id'\): type must be one of/);
+    }
+    // All five legal kinds still pass (an all-NULL page is admissible in any column).
+    for (const type of ["null", "string", "number", "boolean", "date"]) {
+      const ok = {
+        schemaVersion: FROZEN_SCHEMA_VERSION,
+        columns: [{ name: "id", type }],
+        rows: [[{ kind: "null" }]],
+      } as unknown as FrozenData;
+      expect(() => encode(ok)).not.toThrow();
+    }
+  });
+
+  test("a non-string dataType is rejected at the boundary", () => {
+    const bad = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "id", type: "number", dataType: 20 }],
+      rows: [[{ kind: "number", value: 1 }]],
+    } as unknown as FrozenData;
+    expect(() => encode(bad)).toThrow();
+    expect(() => decode(bad)).toThrow();
+  });
+});
+
+describe("SQL dataType classification helpers", () => {
+  test("isExactNumericType covers exactly bigint/int8/numeric/decimal", () => {
+    for (const t of ["bigint", "int8", "numeric", "decimal"]) {
+      expect(isExactNumericType(t)).toBe(true);
+    }
+    for (const t of ["integer", "int4", "double precision", "text", "timestamp"]) {
+      expect(isExactNumericType(t)).toBe(false);
+    }
+    expect(isExactNumericType(undefined)).toBe(false);
+  });
+
+  test("isExactIntegerType is the fraction-free SUBSET of the exact numerics", () => {
+    // The write-side split: `12.5` is legal for `numeric`, never for `bigint`.
+    for (const t of ["bigint", "int8", " BIGINT "]) {
+      expect(isExactIntegerType(t)).toBe(true);
+      expect(isExactNumericType(t)).toBe(true);
+    }
+    for (const t of ["numeric", "decimal"]) {
+      expect(isExactIntegerType(t)).toBe(false);
+      expect(isExactNumericType(t)).toBe(true);
+    }
+    for (const t of ["integer", "int", "smallint", "text", undefined]) {
+      expect(isExactIntegerType(t)).toBe(false);
+    }
+  });
+
+  test("isNaiveDateTimeType is the tz-LESS set only — a bare `timestamp` is AWARE", () => {
+    expect(isNaiveDateTimeType("timestamp without time zone")).toBe(true);
+    expect(isNaiveDateTimeType("datetime")).toBe(true);
+    // MySQL's bare TIMESTAMP is session-tz converted, so it keeps the UTC date cell.
+    expect(isNaiveDateTimeType("timestamp")).toBe(false);
+    expect(isNaiveDateTimeType("timestamptz")).toBe(false);
+    expect(isNaiveDateTimeType("timestamp with time zone")).toBe(false);
+    expect(isNaiveDateTimeType(undefined)).toBe(false);
+  });
+
+  test("names are canonicalized (trimmed + case-folded) before lookup", () => {
+    expect(isExactNumericType("  BIGINT  ")).toBe(true);
+    expect(isNaiveDateTimeType("TIMESTAMP WITHOUT TIME ZONE")).toBe(true);
+    expect(classifySqlDisplayKind("  Numeric ")).toBe("number");
+    // A blank string is as good as absent — never a lookup for the empty type.
+    expect(classifySqlDisplayKind("   ")).toBeUndefined();
+  });
+
+  test("classifySqlDisplayKind maps numerics/temporals/booleans and nothing else", () => {
+    for (const t of ["bigint", "numeric", "int4", "smallint", "double precision", "money"]) {
+      expect(classifySqlDisplayKind(t)).toBe("number");
+    }
+    for (const t of ["timestamp", "timestamptz", "timestamp without time zone", "datetime"]) {
+      expect(classifySqlDisplayKind(t)).toBe("date");
+    }
+    expect(classifySqlDisplayKind("boolean")).toBe("boolean");
+    // Unmapped engine types fall through to the neutral cell kind at the caller.
+    for (const t of ["inet", "geometry", "uuid", "json", "text", undefined]) {
+      expect(classifySqlDisplayKind(t)).toBeUndefined();
+    }
+  });
+
+  test("frozenColumnDisplayKind prefers the SQL type and falls back to the cell kind", () => {
+    // DW-30: a driver-stringified bigint DISPLAYS as numeric though it travels as a string.
+    expect(frozenColumnDisplayKind({ name: "id", type: "string", dataType: "bigint" })).toBe("number");
+    // DW-34: a wall-clock string column still reads as temporal.
+    expect(
+      frozenColumnDisplayKind({ name: "at", type: "string", dataType: "timestamp without time zone" }),
+    ).toBe("date");
+    // No dataType, or an unmapped one → the neutral cell kind, i.e. today's behavior.
+    expect(frozenColumnDisplayKind({ name: "s", type: "string" })).toBe("string");
+    expect(frozenColumnDisplayKind({ name: "n", type: "number" })).toBe("number");
+    expect(frozenColumnDisplayKind({ name: "a", type: "string", dataType: "inet" })).toBe("string");
+    expect(frozenColumnDisplayKind({ name: "x", type: "null" })).toBe("null");
   });
 });
 

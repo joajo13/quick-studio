@@ -133,6 +133,69 @@ describe("frozenToRecords", () => {
   });
 });
 
+// DW-30/35 — this Ring-3 renderer feeds three OTHER live paths (the MDX sandbox guest,
+// the exported static snapshot and the exported live report), so it must be exactly as
+// display-kind aware as Ring 2's `report-chart.ts`. Left flattening `cell.value` verbatim,
+// a MySQL `COUNT(*)` (a string cell since the big-number pin) makes Plot infer a
+// CATEGORICAL y-scale — the same report block would render correctly in-app and wrong in
+// every export.
+describe("frozenToRecords — string-encoded numerics (DW-30/35)", () => {
+  const typed: FrozenData = {
+    schemaVersion: FROZEN_SCHEMA_VERSION,
+    columns: [
+      { name: "day", type: "string" },
+      { name: "total", type: "string", dataType: "bigint" },
+      { name: "amount", type: "string", dataType: "numeric" },
+      { name: "code", type: "string" },
+    ],
+    rows: [
+      [
+        { kind: "string", value: "d1" },
+        { kind: "string", value: "1284" },
+        { kind: "string", value: "12.50" },
+        { kind: "string", value: "0042" },
+      ],
+      [
+        { kind: "string", value: "d2" },
+        { kind: "string", value: "9007199254740993" },
+        { kind: "null" },
+        { kind: "string", value: "0043" },
+      ],
+    ],
+  };
+
+  test("a string cell in a numerically-TYPED column becomes a JS number", () => {
+    const records = frozenToRecords(typed);
+    expect(records[0]).toEqual({ day: "d1", total: 1284, amount: 12.5, code: "0042" });
+    expect(typeof records[1]?.total).toBe("number");
+    expect(records[1]?.amount).toBeNull();
+  });
+
+  test("an untyped TEXT column of digit-looking strings is NEVER numberified", () => {
+    // `code` keeps its leading zero: no dataType means no numeric claim.
+    expect(frozenToRecords(typed).map((r) => r.code)).toEqual(["0042", "0043"]);
+  });
+
+  test("an unparseable string in a numeric column falls through as the string", () => {
+    const messy: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "n", type: "string", dataType: "bigint" }],
+      rows: [[{ kind: "string", value: "n/a" }], [{ kind: "string", value: "" }]],
+    };
+    // Better a string Plot ignores than a NaN that breaks the whole axis domain.
+    expect(frozenToRecords(messy)).toEqual([{ n: "n/a" }, { n: "" }]);
+  });
+
+  test("a string-cell bigint reaches Plot as a numeric y channel", () => {
+    const options = buildPlotOptions({ mark: "bar", x: "day", y: "total" }, typed);
+    const info = markInfo((options.marks as unknown[])[0]);
+    expect(yField(info.channels)).toBe("total");
+    // The record array Plot received carries numbers, not strings — that is what keeps
+    // the y-scale quantitative instead of categorical.
+    expect(frozenToRecords(typed).map((r) => typeof r.total)).toEqual(["number", "number"]);
+  });
+});
+
 describe("buildPlotOptions", () => {
   test("maps every whitelisted mark to the right Plot mark with x/y channels", () => {
     const ariaByMark: Record<string, string> = { line: "line", bar: "bar", dot: "dot", area: "area" };

@@ -673,10 +673,11 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
       const countResult = await seams.runQuery(plan.countSql, []);
       const total = readTotal(countResult.rows);
       const dataResult = await seams.runQuery(plan.selectSql, []);
-      const data = rowsToFrozenData(
-        plan.columns.map((c) => c.name),
-        dataResult.rows,
-      );
+      // `plan.columns` are introspected `SchemaColumnInfo`s, so they ALREADY carry the
+      // engine's own `data_type`; passing the descriptors (not just the names) is what
+      // gives the browse grid its SQL-typed colour/alignment and its wall-clock naive
+      // timestamps (DW-30/34) with no extra query.
+      const data = rowsToFrozenData(plan.columns, dataResult.rows);
       return okReply({ data, page: plan.page, pageSize: plan.pageSize, total });
     } catch (err) {
       if (err instanceof NoConnectionTargetError) {

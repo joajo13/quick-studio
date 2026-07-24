@@ -163,6 +163,17 @@ export function mysqlSessionModes(sqlMode: unknown): SessionModes {
 /** One column descriptor of a {@link DriverQueryResult} — its live name, verbatim. */
 export type DriverColumn = {
   readonly name: string;
+  /**
+   * The column's SQL type, canonicalized to the same lowercase engine names
+   * `information_schema.columns.data_type` reports (`bigint`, `numeric`,
+   * `timestamp without time zone`, …) — the AD-HOC query path's substitute for the
+   * introspection the browse path already has. Each adapter derives it from the
+   * wire-protocol metadata it already receives (postgres.js's column OID, mysql2's
+   * numeric field-type code) and leaves it `undefined` for anything outside its
+   * canonical map, so an unmapped engine type degrades to today's value-inferred
+   * behavior rather than to a wrong one.
+   */
+  readonly dataType?: string;
 };
 
 /**

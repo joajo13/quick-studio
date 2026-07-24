@@ -23,6 +23,7 @@ import * as Plot from "@observablehq/plot";
 import type { Markish, PlotOptions } from "@observablehq/plot";
 import { micromark } from "micromark";
 import type { ChartSpec } from "../shared/chart-spec.ts";
+import { frozenColumnDisplayKind } from "../shared/contract.ts";
 import type { FrozenCell, FrozenData } from "../shared/contract.ts";
 
 /**
@@ -76,13 +77,32 @@ export function renderMarkdownToHtml(md: string): string {
   );
 }
 
-/** Flatten one tagged {@link FrozenCell} to the plain JS value Plot reads (dates stay ISO strings). */
-function cellValue(cell: FrozenCell): unknown {
+/**
+ * Flatten one tagged {@link FrozenCell} to the plain JS value Plot reads (dates stay ISO
+ * strings).
+ *
+ * `displayKind` is the OWNING column's display classification (`frozenColumnDisplayKind`),
+ * and it matters for exactly one case: a numeric column whose values travel as STRINGS —
+ * a Postgres `int8`/`numeric`, or, since the MySQL big-number pin, any MySQL `BIGINT`
+ * including a plain `COUNT(*)`/`SUM(...)`. Plot infers its scales from the JS types in the
+ * records, so a string `y` silently produces a CATEGORICAL axis: the chart draws, it just
+ * draws the wrong thing. This is the exact parallel of the Ring-2 `report-chart.ts` fix,
+ * and it must exist separately because this module feeds three OTHER live consumers — the
+ * MDX sandbox guest, the exported static snapshot and the exported live report — so
+ * without it the same report block renders correctly in-app and wrong in every export.
+ * An unparseable value falls through as the original string rather than becoming a
+ * chart-breaking `NaN`. Precision is irrelevant at this boundary (a pixel coordinate
+ * cannot express 2^53+1) and nothing here ever flows back into a row.
+ */
+function cellValue(cell: FrozenCell, displayKind: FrozenCell["kind"]): unknown {
   switch (cell.kind) {
     case "null":
       return null;
-    case "string":
-      return cell.value;
+    case "string": {
+      if (displayKind !== "number" || cell.value.trim() === "") return cell.value;
+      const n = Number(cell.value);
+      return Number.isFinite(n) ? n : cell.value;
+    }
     case "number":
       return cell.value;
     case "boolean":
@@ -99,14 +119,17 @@ function cellValue(cell: FrozenCell): unknown {
 /**
  * Convert canonical {@link FrozenData} to an array of plain `{ [columnName]: value }`
  * records — the row shape Observable Plot consumes. Pure and total; column order is the
- * schema's order, and a `null` cell becomes JS `null` (Plot treats it as missing).
+ * schema's order, a `null` cell becomes JS `null` (Plot treats it as missing), and a
+ * string-encoded value in a numerically-TYPED column becomes a JS number (see
+ * {@link cellValue}).
  */
 export function frozenToRecords(data: FrozenData): Record<string, unknown>[] {
   const names = data.columns.map((c) => c.name);
+  const kinds = data.columns.map((c) => frozenColumnDisplayKind(c));
   return data.rows.map((row) => {
     const record: Record<string, unknown> = {};
     for (let i = 0; i < names.length; i++) {
-      record[names[i] as string] = cellValue(row[i] as FrozenCell);
+      record[names[i] as string] = cellValue(row[i] as FrozenCell, kinds[i] as FrozenCell["kind"]);
     }
     return record;
   });

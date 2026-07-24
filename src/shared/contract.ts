@@ -37,10 +37,40 @@ export type FrozenCell =
   | { readonly kind: "boolean"; readonly value: boolean }
   | { readonly kind: "date"; readonly iso: string };
 
+/**
+ * The five legal {@link FrozenCell} kinds, as runtime data. Exists because the boundary
+ * validator has to CHECK a column's declared `type` against them — TypeScript's union
+ * evaporates at runtime, and a `columns` array arriving from a `postMessage` frame or a
+ * persisted snapshot has never been through the compiler. Kept adjacent to the union so
+ * a new kind cannot be added to one without the other staring back.
+ */
+const FROZEN_CELL_KINDS: ReadonlySet<FrozenCell["kind"]> = new Set([
+  "null",
+  "string",
+  "number",
+  "boolean",
+  "date",
+]);
+
 export type FrozenColumn = {
   readonly name: string;
   /** Neutral cell kind expected for this column. */
   readonly type: FrozenCell["kind"];
+  /**
+   * The column's SQL type as the engine names it, canonicalized to trimmed lowercase
+   * (e.g. `bigint`, `numeric`, `double precision`, `timestamp without time zone`) —
+   * a parallel DISPLAY/BINDING hint, never the runtime cell kind (DW-30/34/35/40).
+   *
+   * OPTIONAL by design, so {@link FROZEN_SCHEMA_VERSION} stays `1`: a persisted
+   * snapshot, a hand-built fixture, or a driver with no type metadata simply has none
+   * and every consumer must reproduce its pre-`dataType` behavior byte-for-byte.
+   * `type` remains the TRUTHFUL runtime kind (a driver-stringified `bigint` is a
+   * `string` column; a tz-less wall-clock is a `string` column), which is what keeps
+   * `assertWellFormed`'s kind-matches-type rule and the `date`-cell `Z` invariant
+   * intact — `dataType` only tells the grid how to COLOUR/ALIGN it and tells the
+   * mutation builder to bind it as an exact string rather than through `Number()`.
+   */
+  readonly dataType?: string;
 };
 
 export type FrozenRow = ReadonlyArray<FrozenCell>;
@@ -54,6 +84,146 @@ export type FrozenData = {
   readonly columns: ReadonlyArray<FrozenColumn>;
   readonly rows: ReadonlyArray<FrozenRow>;
 };
+
+/* ------------------------------------------------------------------ *
+ * SQL `dataType` classification — the one ring-neutral source of truth
+ * ------------------------------------------------------------------ */
+
+/**
+ * The exact-INTEGER SQL types: the subset of the exact numerics that admits no
+ * fractional part at all. Split out because the two halves validate DIFFERENTLY on
+ * write — a `12.5` typed into a `bigint` cell must be rejected client-side rather than
+ * shipped to an engine that would round it (Postgres) or error (MySQL strict mode) —
+ * even though both halves bind as exact strings. `int8` is the Postgres internal
+ * spelling of `bigint`; both appear depending on whether the name came from
+ * `information_schema` or from the ad-hoc OID map.
+ */
+const EXACT_INTEGER_TYPES: ReadonlySet<string> = new Set(["bigint", "int8"]);
+
+/** The exact-DECIMAL SQL types: arbitrary-precision, fractional part allowed. */
+const EXACT_DECIMAL_TYPES: ReadonlySet<string> = new Set(["numeric", "decimal"]);
+
+/**
+ * The exact-numeric SQL types (DW-35/DW-40): values that do NOT fit a JS `number`
+ * without silently losing digits. They travel as STRINGS end-to-end — on read (both
+ * drivers hand back strings), on write, and in PK addressing — so no code path may
+ * ever run one through `Number()`.
+ */
+const EXACT_NUMERIC_TYPES: ReadonlySet<string> = new Set([
+  ...EXACT_INTEGER_TYPES,
+  ...EXACT_DECIMAL_TYPES,
+]);
+
+/**
+ * Numeric SQL types that are DISPLAY-only: they fit a JS `number` losslessly (or are
+ * inexact by nature), so they need the grid's numeric colour/label/right-alignment but
+ * no exact-string binding. Deliberately disjoint from {@link EXACT_NUMERIC_TYPES}.
+ */
+const DISPLAY_NUMERIC_TYPES: ReadonlySet<string> = new Set([
+  "integer",
+  "int",
+  "int2",
+  "int4",
+  "smallint",
+  "mediumint",
+  "tinyint",
+  "real",
+  "float",
+  "double",
+  "double precision",
+  "money",
+]);
+
+/**
+ * The tz-LESS temporal types (DW-34). A value in one of these has no instant attached:
+ * `2026-07-22 18:14:13` means that wall-clock reading, not a moment in UTC. Both drivers
+ * nonetheless materialize it as a LOCAL-time JS `Date`, so routing it through `toIsoUtc`
+ * would stamp a false `Z` and shift the printed value by the host's offset. It is
+ * therefore mapped to a literal wall-clock `string` cell instead — never a `date` cell
+ * with a stripped suffix, which would violate the `date`-cell `Z` invariant.
+ *
+ * Note MySQL's bare `timestamp` is deliberately ABSENT (it is session-tz converted, i.e.
+ * genuinely tz-aware) while MySQL's `datetime` is present; Postgres never emits a bare
+ * `timestamp` from `information_schema.columns`, so the name is unambiguous.
+ */
+const NAIVE_DATETIME_TYPES: ReadonlySet<string> = new Set([
+  "timestamp without time zone",
+  "datetime",
+]);
+
+/** The tz-AWARE temporal types — these keep today's UTC `date` cell, untouched. */
+const AWARE_DATETIME_TYPES: ReadonlySet<string> = new Set([
+  "timestamp with time zone",
+  "timestamptz",
+  "timestamp",
+]);
+
+/** Canonicalize an engine type name for lookup: trimmed, lowercase. */
+function canonicalSqlType(dataType: string | undefined): string | null {
+  if (typeof dataType !== "string") return null;
+  const t = dataType.trim().toLowerCase();
+  return t.length === 0 ? null : t;
+}
+
+/**
+ * True iff `dataType` names an exact-numeric SQL type whose values must be carried,
+ * bound, and PK-addressed as STRINGS (see {@link EXACT_NUMERIC_TYPES}). Total: an
+ * absent/unknown `dataType` is `false`, which is exactly the pre-`dataType` behavior.
+ */
+export function isExactNumericType(dataType?: string): boolean {
+  const t = canonicalSqlType(dataType);
+  return t !== null && EXACT_NUMERIC_TYPES.has(t);
+}
+
+/**
+ * True iff `dataType` names an exact-numeric type that admits NO fractional part
+ * (see {@link EXACT_INTEGER_TYPES}) — the write-side gate that rejects `12.5` for a
+ * `bigint` column while `numeric` accepts it. A strict subset of
+ * {@link isExactNumericType}; total in the same way.
+ */
+export function isExactIntegerType(dataType?: string): boolean {
+  const t = canonicalSqlType(dataType);
+  return t !== null && EXACT_INTEGER_TYPES.has(t);
+}
+
+/**
+ * True iff `dataType` names a tz-less temporal type whose values must be emitted as
+ * literal wall-clock strings rather than UTC `date` cells (DW-34). Total: an absent or
+ * unrecognized `dataType` is `false`, so the aware/legacy path is unchanged.
+ */
+export function isNaiveDateTimeType(dataType?: string): boolean {
+  const t = canonicalSqlType(dataType);
+  return t !== null && NAIVE_DATETIME_TYPES.has(t);
+}
+
+/**
+ * Classify a SQL `dataType` into the neutral cell kind the UI should DISPLAY it as —
+ * independent of how the value is actually represented on the wire. This is what makes
+ * a string-encoded `bigint`/`numeric` render as a right-aligned numeric column (DW-30)
+ * and a wall-clock `string` column still read as temporal.
+ *
+ * Returns `undefined` for an absent `dataType` AND for any engine type outside the
+ * canonical maps (`inet`, `geometry`, `date`, `time`, `uuid`, `json`, …), so the caller
+ * falls back to the neutral cell kind — the pre-change behavior, byte-for-byte.
+ */
+export function classifySqlDisplayKind(dataType?: string): "number" | "date" | "boolean" | undefined {
+  const t = canonicalSqlType(dataType);
+  if (t === null) return undefined;
+  if (EXACT_NUMERIC_TYPES.has(t) || DISPLAY_NUMERIC_TYPES.has(t)) return "number";
+  if (NAIVE_DATETIME_TYPES.has(t) || AWARE_DATETIME_TYPES.has(t)) return "date";
+  if (t === "boolean") return "boolean";
+  return undefined;
+}
+
+/**
+ * The kind a {@link FrozenColumn} should be PRESENTED as: its SQL classification when
+ * one exists, else its neutral runtime `type`. The single accessor every display-side
+ * decision (type colour, type label, right-alignment, `tabular-nums`) goes through, so
+ * a column with no `dataType` behaves exactly as it did before this field existed.
+ */
+export function frozenColumnDisplayKind(col: FrozenColumn): FrozenCell["kind"] {
+  return classifySqlDisplayKind(col.dataType) ?? col.type;
+}
 
 /* ------------------------------------------------------------------ *
  * ISO-8601 UTC date helpers — pure & total, throw on invalid
@@ -173,6 +343,53 @@ function assertWellFormed(data: FrozenData): void {
     throw new TypeError("FrozenData.columns and FrozenData.rows must both be arrays");
   }
   const width = data.columns.length;
+  // This loop is the FIRST thing in the whole assertion to dereference a column entry,
+  // so it owns the entry's ENTIRE shape check — nothing downstream re-validates it, and
+  // `rebuildColumn` copies `name`/`type` through verbatim. Four rules, in the order a
+  // malformed entry would otherwise blow up:
+  //
+  //  1. The entry is a non-null, non-ARRAY object. `columns: [null]` would otherwise die
+  //     with an unlabelled `Cannot read properties of null`, losing the index that tells
+  //     the caller WHICH entry is bad; `columns: [[]]` is worse still — an array passes
+  //     `typeof === "object"`, carries `name: undefined`/`type: undefined`, and sails
+  //     through to an exported snapshot that renders the header as `[object Object]`.
+  //  2. `name` is a string. It is interpolated into this function's own error messages
+  //     (below, and in the cell-kind loop), so the rest of the assertion already assumes
+  //     it — and it becomes a rendered column header downstream.
+  //  3. `type` is one of the five {@link FrozenCell} kinds. The cell-kind rule below
+  //     compares each cell's `kind` against it; a bogus `type` makes that comparison
+  //     vacuously reject every non-null cell (or, on an all-null page, pass silently and
+  //     ship a column whose declared kind names nothing).
+  //  4. `dataType`, which is OPTIONAL, is a STRING when present — it is carried verbatim
+  //     through encode/decode and read by the grid and the mutation builder, so a
+  //     non-string (a number, an object from a hand-edited snapshot or a `postMessage`
+  //     frame) must be rejected here rather than reaching those consumers.
+  //
+  // All four produce the same LABELLED boundary error shape (`column <index>`), because
+  // the caller's only handle on a rejected frame is which entry failed and why.
+  for (let c = 0; c < width; c++) {
+    const col = data.columns[c] as FrozenColumn | null | undefined;
+    if (typeof col !== "object" || col === null || Array.isArray(col)) {
+      const got = col === null ? "null" : Array.isArray(col) ? "array" : typeof col;
+      throw new TypeError(`FrozenData column ${c} is not an object (got ${got})`);
+    }
+    if (typeof col.name !== "string") {
+      throw new TypeError(`FrozenData column ${c}: name must be a string, got ${typeof col.name}`);
+    }
+    if (!FROZEN_CELL_KINDS.has(col.type)) {
+      throw new TypeError(
+        `FrozenData column ${c} ('${col.name}'): ` +
+          `type must be one of ${[...FROZEN_CELL_KINDS].join("/")}, got ${JSON.stringify(col.type)}`,
+      );
+    }
+    const dataType = col.dataType;
+    if (dataType !== undefined && typeof dataType !== "string") {
+      throw new TypeError(
+        `FrozenData column ${c} ('${col.name}'): ` +
+          `dataType must be a string when present, got ${typeof dataType}`,
+      );
+    }
+  }
   for (let i = 0; i < data.rows.length; i++) {
     const row = data.rows[i];
     if (!Array.isArray(row)) {
@@ -211,7 +428,7 @@ export function encode(data: FrozenData): FrozenData {
     );
   }
   assertWellFormed(data);
-  const columns = data.columns.map((c) => ({ name: c.name, type: c.type }));
+  const columns = data.columns.map(rebuildColumn);
   const rows = data.rows.map((row) => row.map(encodeCell));
   return { schemaVersion: FROZEN_SCHEMA_VERSION, columns, rows };
 }
@@ -229,9 +446,24 @@ export function decode(data: FrozenData): FrozenData {
     );
   }
   assertWellFormed(data);
-  const columns = data.columns.map((c) => ({ name: c.name, type: c.type }));
+  const columns = data.columns.map(rebuildColumn);
   const rows = data.rows.map((row) => row.map(decodeCell));
   return { schemaVersion: FROZEN_SCHEMA_VERSION, columns, rows };
+}
+
+/**
+ * Rebuild ONE column from an explicit field WHITELIST — deliberately not a blind
+ * `{...c}` spread, so an unknown/hostile property on an inbound frame can never be
+ * laundered into the canonical wire shape. `dataType` joins the whitelist (it is real
+ * contract, not decoration) and is OMITTED ENTIRELY when absent rather than written as
+ * `dataType: undefined`: a pre-`dataType` payload must round-trip to a byte-identical
+ * object, and `JSON.stringify` would drop the key anyway — leaving it in would make
+ * `decode(encode(x))` differ from `x` under a strict structural comparison.
+ */
+function rebuildColumn(c: FrozenColumn): FrozenColumn {
+  return c.dataType === undefined
+    ? { name: c.name, type: c.type }
+    : { name: c.name, type: c.type, dataType: c.dataType };
 }
 
 function encodeCell(cell: FrozenCell): FrozenCell {
@@ -998,6 +1230,26 @@ export type StructuredColumnValue = {
 export type StructuredPk = {
   readonly column: string;
   readonly value: unknown;
+  /**
+   * Set when the PK column's SQL type is EXACT-numeric (`bigint`/`int8`/`numeric`/
+   * `decimal`, see `isExactNumericType`), i.e. when `value` is a digit STRING carrying
+   * more precision than a JS `number` could hold (DW-40).
+   *
+   * It exists because binding those digits as a string is not sufficient on MySQL:
+   * mysql2 escapes a JS string into a QUOTED SQL literal, and MySQL compares an integer
+   * column against a string operand as a FLOATING-POINT number — the manual's own
+   * example, `SELECT '18015376320243458' = 18015376320243459`, yields `1`. So
+   * `WHERE id='9007199254740993'` also matches `…992`, and neither the composed UPDATE
+   * nor the DELETE carries a `LIMIT 1`. The executor therefore wraps the placeholder in
+   * `CAST(? AS DECIMAL(65,30))` when this flag is set AND the engine is MySQL, forcing
+   * the exact-decimal comparison path. Postgres needs no cast (postgres.js sends the
+   * parameter untyped and the server parses it into the column's own type exactly), so
+   * the flag is a HINT the executor may act on per engine — never an unconditional cast.
+   *
+   * OPTIONAL: an absent flag means "not known to be exact-numeric" and reproduces the
+   * pre-`dataType` behavior on both engines.
+   */
+  readonly exactNumeric?: boolean;
 };
 
 /**

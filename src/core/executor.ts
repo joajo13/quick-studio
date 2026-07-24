@@ -19,6 +19,7 @@
 
 import {
   errorReply,
+  isExactNumericType,
   okReply,
   type DbEngine,
   type ExecuteResult,
@@ -383,10 +384,12 @@ function riskFor(verb: string): string {
 
 /** Map a driver read result into a Core-capped `rows` outcome. */
 function toRowsResult(result: DriverQueryResult): ExecuteResult {
-  const names = result.columns.map((c) => c.name);
   const truncated = result.rows.length > MAX_RESULT_ROWS;
   const capped = truncated ? result.rows.slice(0, MAX_RESULT_ROWS) : result.rows;
-  const data = rowsToFrozenData(names, capped);
+  // The full DESCRIPTORS go through, not just the names: the adapters derive each
+  // column's canonical SQL `dataType` from the wire protocol's type metadata, and the
+  // mapper needs it to classify wide integers and tz-less temporals (DW-30/34/35/40).
+  const data = rowsToFrozenData(result.columns, capped);
   return { status: "rows", data, truncated };
 }
 
@@ -468,6 +471,39 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   /** Engine-correct positional placeholder: postgres `$n`, mysql `?`. */
   function placeholder(engine: DbEngine, index: number): string {
     return engine === "postgres" ? `$${index}` : "?";
+  }
+
+  /**
+   * The PK placeholder of an `update`/`delete` WHERE clause — the ONE spot where a
+   * wide-integer address can still go wrong after DW-40's string binding (see
+   * `StructuredPk.exactNumeric` in the contract).
+   *
+   * mysql2 escapes a JS string parameter into a QUOTED SQL literal, and MySQL compares
+   * an integer column against a string operand as a FLOATING-POINT number — the manual's
+   * own example, `SELECT '18015376320243458' = 18015376320243459`, evaluates to `1`. So
+   * on a `BIGINT` PK holding both `9007199254740992` and `9007199254740993`, the bare
+   * `WHERE id=?` bound with the exact digit string float-matches BOTH rows, and neither
+   * the composed UPDATE nor the DELETE carries a `LIMIT 1`. Wrapping the placeholder in
+   * `CAST(? AS DECIMAL(65,<scale>))` forces MySQL's EXACT decimal comparison path instead.
+   *
+   * `scale` is `null` for "no cast at all", else the number of FRACTIONAL digits in the
+   * validated PK literal (see {@link resolvePkCastScale}) — never client-supplied text.
+   * The precision stays at MySQL's maximum of 65 TOTAL digits, of which `65 - scale` are
+   * integral. A fixed `DECIMAL(65,30)` therefore held only 35 integral digits, which a
+   * legal `DECIMAL(40,0)` PK overflows: the cast CLAMPS the value, the WHERE matches
+   * nothing, `affectedRows` is 0 and the executor still reports `status:"ok"` — a delete
+   * that "succeeded" and changed nothing. Deriving the scale from the literal gives an
+   * integer PK the full 65 integral digits (MySQL's own ceiling, so nothing storable can
+   * overflow) while a fractional PK keeps its fraction exactly.
+   *
+   * Postgres deliberately keeps its bare `$n`: postgres.js sends the parameter UNTYPED
+   * and the server parses the literal directly into the column's own type, which is
+   * already exact. The cast is therefore engine-gated, never unconditional — do not
+   * "simplify" it into an always-on wrapper.
+   */
+  function pkPlaceholder(engine: DbEngine, index: number, scale: number | null): string {
+    const ph = placeholder(engine, index);
+    return engine === "mysql" && scale !== null ? `CAST(${ph} AS DECIMAL(65,${scale}))` : ph;
   }
 
   /* ---- Path (b): raw SQL ------------------------------------------------ */
@@ -582,9 +618,17 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const target = await resolveSinglePkTable(getSchema, table.schema, table.table, pk.column);
     if ("error" in target) return bad(target.error);
 
+    // Validate the untrusted `exactNumeric` hint against the RESOLVED table's own
+    // introspected PK column before it can change composition (see `resolvePkCastScale`).
+    const cast = resolvePkCastScale(target.table, pk);
+    if ("error" in cast) return bad(cast.error);
+
     const engine = await getEngine();
     const setSql = set.values.map((c, idx) => `${quoteIdent(c.column)}=${placeholder(engine, idx + 1)}`);
-    const wherePh = placeholder(engine, set.values.length + 1);
+    // The PK placeholder — CAST on MySQL when the address is verified exact-numeric, bare
+    // `$n` on Postgres (see `pkPlaceholder`). The SET placeholders keep the plain form: an
+    // assignment does not go through the integer-vs-string comparison rule.
+    const wherePh = pkPlaceholder(engine, set.values.length + 1, cast.scale);
     const sql = `UPDATE ${qualified(quoteIdent, target.table.schema, target.table.name)} SET ${setSql.join(", ")} WHERE ${quoteIdent(pk.column)}=${wherePh}`;
     const params = [...set.values.map((c) => c.value), pk.value];
     const result = await runQuery(sql, params);
@@ -605,8 +649,14 @@ export function createExecutor(deps: ExecutorDeps): Executor {
     const target = await resolveSinglePkTable(getSchema, table.schema, table.table, pk.column);
     if ("error" in target) return bad(target.error);
 
+    // Same schema-verified, engine-gated exact-numeric PK cast as the UPDATE path — a
+    // DELETE that float-matches a neighbouring wide-integer row (or, with an unvalidated
+    // hint on a TEXT PK, every row that coerces to 0) is the worse of the two failures.
+    const cast = resolvePkCastScale(target.table, pk);
+    if ("error" in cast) return bad(cast.error);
+
     const engine = await getEngine();
-    const sql = `DELETE FROM ${qualified(quoteIdent, target.table.schema, target.table.name)} WHERE ${quoteIdent(pk.column)}=${placeholder(engine, 1)}`;
+    const sql = `DELETE FROM ${qualified(quoteIdent, target.table.schema, target.table.name)} WHERE ${quoteIdent(pk.column)}=${pkPlaceholder(engine, 1, cast.scale)}`;
     const params = [pk.value];
 
     // Row DELETE requires explicit confirmation — but the PK verification above still
@@ -819,8 +869,70 @@ function readColumnValues(
   return { values };
 }
 
-/** Read a structured `pk` — one non-empty `column` + a PRESENT `value` key. */
-function readPk(raw: unknown): { column: string; value: unknown } | { error: string } {
+/**
+ * A well-formed exact numeric LITERAL, with an optional sign and an optional fractional
+ * part: `42`, `-7`, `+0.5`, `.5`. No exponent, no whitespace, no separators, no
+ * `Infinity`/`NaN` — the same shape the mutation builder's client-side gate admits, and
+ * the only shape whose fractional-digit count can be read off the characters.
+ */
+const PK_EXACT_NUMERIC_LITERAL_RE = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+
+/** MySQL's `DECIMAL` maxima: 65 total digits, of which at most 30 may be fractional. */
+const MYSQL_DECIMAL_MAX_SCALE = 30;
+
+/**
+ * Decide how an `update`/`delete` PK placeholder must be composed — the SERVER-SIDE
+ * validation of the client's `exactNumeric` hint (see `StructuredPk.exactNumeric`).
+ *
+ * `pk.exactNumeric` arrives on an RPC payload and is therefore UNTRUSTED, yet it changes
+ * SQL COMPOSITION. Taken at face value, a frame setting it `true` on a TEXT primary key
+ * composes `WHERE name=CAST(? AS DECIMAL(65,30))`; MySQL then coerces the VARCHAR column
+ * to a number as well, EVERY non-numeric row evaluates to `0`, and a single-row
+ * UPDATE/DELETE silently hits MANY rows. The flag is consequently honored only when the
+ * server's own introspected schema agrees, which it can check right here because
+ * `resolveSinglePkTable` has already resolved the real table and its `SchemaColumnInfo`
+ * carries `dataType`:
+ *
+ *  (a) the RESOLVED PK column's own `dataType` must be exact-numeric. If it is not, the
+ *      hint is IGNORED ENTIRELY and the plain placeholder is emitted — today's safe
+ *      behavior, and a lie in the payload costs the caller nothing but the cast.
+ *  (b) `String(pk.value)` must be a well-formed numeric literal. If (a) holds but (b)
+ *      fails, we cannot compose a comparison we can promise is exact (and the scale is
+ *      unreadable), so this is a `bad_request` rather than a quiet fallback to a
+ *      float-compared placeholder.
+ *
+ * Returns the CAST's scale — the literal's fractional-digit count, clamped to MySQL's
+ * 0..30 — or `null` for "no cast". The scale is a small integer computed HERE from a
+ * regex-validated literal; no client text is ever interpolated into SQL.
+ */
+function resolvePkCastScale(
+  table: SchemaTableInfo,
+  pk: { column: string; value: unknown; exactNumeric: boolean },
+): { scale: number | null } | { error: string } {
+  if (!pk.exactNumeric) return { scale: null };
+  const col = table.columns.find((c) => c.name === pk.column);
+  if (col === undefined || !isExactNumericType(col.dataType)) return { scale: null };
+  const literal = String(pk.value);
+  if (!PK_EXACT_NUMERIC_LITERAL_RE.test(literal)) {
+    return {
+      error: `pk value for '${pk.column}' is not a well-formed exact-numeric literal — refusing to compose an inexact comparison`,
+    };
+  }
+  const dot = literal.indexOf(".");
+  const fractionDigits = dot < 0 ? 0 : literal.length - dot - 1;
+  return { scale: Math.min(fractionDigits, MYSQL_DECIMAL_MAX_SCALE) };
+}
+
+/**
+ * Read a structured `pk` — one non-empty `column` + a PRESENT `value` key, plus the
+ * OPTIONAL `exactNumeric` hint (DW-40). The hint is accepted only as a real boolean
+ * `true`; anything else (absent, `"true"`, `1`) degrades to `false`. It is a HINT and
+ * nothing more: {@link resolvePkCastScale} re-derives the truth from the introspected
+ * schema before it can influence composition.
+ */
+function readPk(
+  raw: unknown,
+): { column: string; value: unknown; exactNumeric: boolean } | { error: string } {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return { error: "op requires a 'pk' object with a single column and value" };
   }
@@ -831,7 +943,7 @@ function readPk(raw: unknown): { column: string; value: unknown } | { error: str
   if (!Object.hasOwn(rec, "value")) {
     return { error: "pk is missing its 'value' (an absent pk value must never compose WHERE pk=NULL)" };
   }
-  return { column: rec.column, value: rec.value };
+  return { column: rec.column, value: rec.value, exactNumeric: rec.exactNumeric === true };
 }
 
 /**

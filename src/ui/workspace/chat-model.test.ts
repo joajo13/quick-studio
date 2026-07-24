@@ -263,4 +263,101 @@ describe("deriveResultKpis (Story 7.5 KPI strip — real data only)", () => {
     };
     expect(deriveResultKpis(data)).toEqual([{ label: "rows", value: "0", kind: "count" }]);
   });
+
+  // DW-35 fallout: a MySQL `COUNT(*)`/`SUM(...)` is a LONGLONG, which the adapter now
+  // decodes as an exact digit STRING in a column typed `bigint`. Gated on the raw
+  // `type` this card would silently vanish on MySQL and degrade to a bare row count.
+  test("a string-encoded bigint scalar (MySQL COUNT(*)) still surfaces as a KPI", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "count", type: "string", dataType: "bigint" }],
+      rows: [[{ kind: "string", value: "1284" }]],
+    };
+    expect(deriveResultKpis(data)).toEqual([
+      { label: "count", value: "1,284", kind: "count" },
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+  });
+
+  test("a string-encoded numeric SUM surfaces as a money KPI", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "revenue", type: "string", dataType: "numeric" }],
+      rows: [[{ kind: "string", value: "4218.40" }]],
+    };
+    expect(deriveResultKpis(data)).toEqual([
+      { label: "revenue", value: "4,218.4", kind: "money" },
+      { label: "rows", value: "1", kind: "count" },
+    ]);
+  });
+
+  test("an unparseable / empty string in a numeric column degrades to the row count", () => {
+    const withValue = (value: string): FrozenData => ({
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "n", type: "string", dataType: "bigint" }],
+      rows: [[{ kind: "string", value }]],
+    });
+    for (const bad of ["", "   ", "not a number"]) {
+      expect(deriveResultKpis(withValue(bad))).toEqual([{ label: "rows", value: "1", kind: "count" }]);
+    }
+  });
+
+  // DW-35 proper: `Number("9007199254740993")` is `9007199254740992`. Routing an exact
+  // digit-string through a JS double to format it renders a MySQL `SUM(amount_cents)`
+  // above 2^53 with the WRONG digits — precisely the loss this story exists to prevent.
+  // An integer-shaped string is therefore grouped from its CHARACTERS.
+  test("a wide-integer scalar is grouped EXACTLY, never via Number()", () => {
+    const wide = (value: string): FrozenData => ({
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "total", type: "string", dataType: "bigint" }],
+      rows: [[{ kind: "string", value }]],
+    });
+    expect(deriveResultKpis(wide("9007199254740993"))[0]).toEqual({
+      label: "total",
+      value: "9,007,199,254,740,993",
+      kind: "count",
+    });
+    // The lossy path would have produced `…992`; assert the difference explicitly.
+    expect(String(Number("9007199254740993"))).toBe("9007199254740992");
+    // Far beyond a double's integer range, where `Number()` also goes exponential.
+    expect(deriveResultKpis(wide("123456789012345678901234567890"))[0]?.value).toBe(
+      "123,456,789,012,345,678,901,234,567,890",
+    );
+    // Sign and leading-zero normalization matches what `Intl` does for small values.
+    expect(deriveResultKpis(wide("-1234567"))[0]?.value).toBe("-1,234,567");
+    expect(deriveResultKpis(wide("+7"))[0]?.value).toBe("7");
+    expect(deriveResultKpis(wide("007"))[0]?.value).toBe("7");
+    expect(deriveResultKpis(wide("-0"))[0]?.value).toBe("0");
+  });
+
+  test("the exact grouping agrees with Intl for every double-representable integer", () => {
+    for (const n of [0, 7, 42, 1284, 1000000, 987654321, Number.MAX_SAFE_INTEGER, -1284]) {
+      const data: FrozenData = {
+        schemaVersion: FROZEN_SCHEMA_VERSION,
+        columns: [{ name: "n", type: "string", dataType: "bigint" }],
+        rows: [[{ kind: "string", value: String(n) }]],
+      };
+      expect(deriveResultKpis(data)[0]?.value).toBe(new Intl.NumberFormat("en-US").format(n));
+    }
+  });
+
+  test("a FRACTIONAL string scalar still goes through the numeric path (money card)", () => {
+    // Only the integer shape gets the character-exact treatment; a decimal keeps the
+    // existing at-most-two-fractional-digits formatting and its `money` classification.
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "revenue", type: "string", dataType: "numeric" }],
+      rows: [[{ kind: "string", value: "1234.567" }]],
+    };
+    expect(deriveResultKpis(data)[0]).toEqual({ label: "revenue", value: "1,234.57", kind: "money" });
+  });
+
+  test("a plain TEXT string scalar is still NOT a KPI (no dataType, no gate)", () => {
+    const data: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "name", type: "string" }],
+      rows: [[{ kind: "string", value: "1284" }]],
+    };
+    expect(deriveResultKpis(data)).toEqual([{ label: "rows", value: "1", kind: "count" }]);
+  });
 });

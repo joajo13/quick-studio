@@ -15,13 +15,20 @@
  */
 
 import { useEffect, useRef, useState } from "react";
+import { frozenColumnDisplayKind } from "../../shared/contract.ts";
 import type { FrozenCell, FrozenColumn, FrozenData, FrozenRow } from "../../shared/contract.ts";
 import { revealInsertDraft, shouldRevealInsertDraft } from "./insert-draft-ux.ts";
 import type { CellEdit } from "./row-mutations.ts";
 
-/** Map a neutral column type to its DESIGN.md `t-*` color var + a short SQL-ish label. */
-function typeMeta(type: FrozenColumn["type"]): { readonly color: string; readonly label: string } {
-  switch (type) {
+/**
+ * Map a column's DISPLAY kind — `frozenColumnDisplayKind`, i.e. its SQL `dataType`
+ * classification when it has one, else its neutral cell type — to its DESIGN.md `t-*`
+ * color var + a short SQL-ish label. Keying on the display kind rather than the raw
+ * `type` is what makes a driver-stringified `bigint`/`numeric` read as a numeric column
+ * instead of TEXT (DW-30); a column with no `dataType` is unaffected.
+ */
+function typeMeta(kind: FrozenCell["kind"]): { readonly color: string; readonly label: string } {
+  switch (kind) {
     case "number":
       return { color: "var(--t-int)", label: "num" };
     case "date":
@@ -105,6 +112,11 @@ function CellEditor({
   onCommit: (edit: CellEdit) => void;
   onCancel: () => void;
 }): React.JSX.Element {
+  // The `<select>` branch stays keyed on the RAW `column.type`: it is a REPRESENTATION
+  // decision (the cell genuinely holds a JS boolean), not a display one — and the intent
+  // forbids DB-type-aware editors, so `dataType` may only change the text input's
+  // alignment class below, never which control is rendered.
+  const displayKind = frozenColumnDisplayKind(column);
   // A boolean editor opened on a NULL cell has an empty seed, which matches no <option>:
   // the <select> would DISPLAY "true" while its state is "" and commit an empty raw
   // (→ coercion error). Seed a valid default so the shown option is what commits; the
@@ -145,7 +157,7 @@ function CellEditor({
         }}
         onClick={(e) => e.stopPropagation()}
         className={`w-full min-w-[6rem] rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--background)] px-1 py-0.5 font-mono text-xs text-[var(--foreground)] outline-none focus-visible:border-[var(--coral)] ${
-          column.type === "number" ? "text-right tabular-nums" : ""
+          displayKind === "number" ? "text-right tabular-nums" : ""
         }`}
       />
     );
@@ -297,7 +309,7 @@ function InsertDraftRow({
                 autoComplete="off"
                 onChange={(e) => setValues((v) => ({ ...v, [col.name]: e.target.value }))}
                 className={`w-full min-w-[5rem] rounded-[var(--radius)] border border-[var(--coral-line)] bg-[var(--background)] px-1 py-0.5 font-mono text-xs text-[var(--foreground)] outline-none focus-visible:border-[var(--coral)] disabled:opacity-50 ${
-                  col.type === "number" ? "text-right tabular-nums" : ""
+                  frozenColumnDisplayKind(col) === "number" ? "text-right tabular-nums" : ""
                 }`}
               />
               <button
@@ -409,9 +421,12 @@ export function DataGrid({
         <thead className="sticky top-0 z-10">
           <tr className="bg-[var(--muted)]" style={{ borderBottom: "1px solid var(--border)" }}>
             {data.columns.map((col) => {
-              const meta = typeMeta(col.type);
+              // One display kind per column drives BOTH the type tag and the alignment,
+              // so a `bigint`/`numeric` column carried as strings still reads as numeric.
+              const displayKind = frozenColumnDisplayKind(col);
+              const meta = typeMeta(displayKind);
               const isPk = pkSet.has(col.name);
-              const numeric = col.type === "number";
+              const numeric = displayKind === "number";
               return (
                 <th
                   key={col.name}
@@ -460,7 +475,7 @@ export function DataGrid({
               >
                 {row.map((cell, c) => {
                   const col = data.columns[c];
-                  const numeric = col?.type === "number";
+                  const numeric = col !== undefined && frozenColumnDisplayKind(col) === "number";
                   // PK-column cells render in ink `--coral` (the prototype's `.pk-cell`);
                   // string/number cells inherit it, while pill/date/null set their own.
                   const isPk = col !== undefined && pkSet.has(col.name);

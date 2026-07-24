@@ -91,3 +91,122 @@ describe("mapChart", () => {
     expect(out?.records[0]?.note).toBeNull();
   });
 });
+
+// DW-30/35 — a `bigint`/`numeric` column is genuinely numeric even though it travels as
+// STRINGS, and since the MySQL big-number pin that includes every MySQL `BIGINT` (a
+// `COUNT(*)`/`SUM(...)` included). Gated on the runtime `type`, every such chart would
+// have silently degraded to a table; flattened without column context, Recharts would
+// have plotted the strings as blanks.
+describe("string-encoded numeric columns (DW-30/35)", () => {
+  const bigints: FrozenData = {
+    schemaVersion: FROZEN_SCHEMA_VERSION,
+    columns: [
+      { name: "day", type: "date" },
+      { name: "total", type: "string", dataType: "bigint" },
+      { name: "amount", type: "string", dataType: "numeric" },
+      { name: "code", type: "string" },
+    ],
+    rows: [
+      [
+        { kind: "date", iso: "2026-01-01T00:00:00Z" },
+        { kind: "string", value: "1284" },
+        { kind: "string", value: "12.50" },
+        { kind: "string", value: "0042" },
+      ],
+      [
+        { kind: "date", iso: "2026-01-02T00:00:00Z" },
+        { kind: "string", value: "9007199254740993" },
+        { kind: "null" },
+        { kind: "string", value: "0043" },
+      ],
+    ],
+  };
+
+  test("mapChart accepts a string-cell bigint as the y channel", () => {
+    const out = mapChart(bigints, { mark: "bar", x: "day", y: "total" });
+    expect(out).not.toBeNull();
+    expect(out?.yKey).toBe("total");
+    expect(mapChart(bigints, { mark: "bar", x: "day", y: "amount" })).not.toBeNull();
+    // A plain TEXT column of digit-looking strings is still declined — no dataType.
+    expect(mapChart(bigints, { mark: "bar", x: "day", y: "code" })).toBeNull();
+  });
+
+  test("frozenToRecords emits NUMBERS for numerically-typed columns only", () => {
+    const records = frozenToRecords(bigints);
+    expect(records[0]).toEqual({
+      day: "2026-01-01T00:00:00Z",
+      total: 1284,
+      amount: 12.5,
+      code: "0042", // untyped text keeps its leading zero — never numberified
+    });
+    expect(records[1]?.amount).toBeNull();
+    expect(typeof records[1]?.total).toBe("number");
+  });
+
+  test("an unparseable string in a numeric column falls through as the string", () => {
+    const messy: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [{ name: "n", type: "string", dataType: "bigint" }],
+      rows: [[{ kind: "string", value: "n/a" }], [{ kind: "string", value: "" }]],
+    };
+    // Better a string Recharts ignores than a NaN that breaks the whole axis domain.
+    expect(frozenToRecords(messy)).toEqual([{ n: "n/a" }, { n: "" }]);
+  });
+});
+
+// Moving the y-gate to the DISPLAY kind alone would have removed the documented
+// degrade-to-table fallback: a display-numeric SQL type does not guarantee a
+// numeric-LOOKING value, so `mapChart` would return non-null, `Number(...)` would yield
+// NaN, and the user would get a BLANK chart instead of the table the AC promises.
+describe("mapChart degrades to the table when nothing in y parses (DW-30 fallback)", () => {
+  const yOnly = (dataType: string, values: ReadonlyArray<string | null>): FrozenData => ({
+    schemaVersion: FROZEN_SCHEMA_VERSION,
+    columns: [
+      { name: "x", type: "string" },
+      { name: "y", type: "string", dataType },
+    ],
+    rows: values.map((v, i) => [
+      { kind: "string", value: `r${i}` } as const,
+      v === null ? ({ kind: "null" } as const) : ({ kind: "string", value: v } as const),
+    ]),
+  });
+  const spec: ChartSpec = { mark: "bar", x: "x", y: "y" };
+
+  test("a Postgres `money` column of locale-formatted text degrades to the table", () => {
+    // postgres.js returns `money` as `"$1,234.00"`. `money` is in the display-numeric
+    // set, so the kind gate alone passes it — and `Number("$1,234.00")` is NaN.
+    expect(mapChart(yOnly("money", ["$1,234.00", "$99.00"]), spec)).toBeNull();
+  });
+
+  test("a Postgres `numeric` column holding 'NaN' degrades to the table", () => {
+    // `'NaN'` is a legal value for a Postgres `numeric`.
+    expect(mapChart(yOnly("numeric", ["NaN", "NaN"]), spec)).toBeNull();
+  });
+
+  test("an all-NULL numeric column degrades to the table — nothing to plot", () => {
+    expect(mapChart(yOnly("bigint", [null, null]), spec)).toBeNull();
+  });
+
+  test("ONE parseable cell is enough — a partly-null/partly-junk column still charts", () => {
+    expect(mapChart(yOnly("numeric", [null, "NaN", "12.5"]), spec)).not.toBeNull();
+    expect(mapChart(yOnly("bigint", ["9007199254740993", null]), spec)).not.toBeNull();
+  });
+
+  test("a real `number`-cell column is unaffected (finite values still chart)", () => {
+    const numeric: FrozenData = {
+      schemaVersion: FROZEN_SCHEMA_VERSION,
+      columns: [
+        { name: "x", type: "string" },
+        { name: "y", type: "number" },
+      ],
+      rows: [[{ kind: "string", value: "a" }, { kind: "number", value: 1 }]],
+    };
+    expect(mapChart(numeric, spec)).not.toBeNull();
+    // …but an all-NaN float column degrades, exactly as a blank chart would be worse.
+    const nan: FrozenData = {
+      ...numeric,
+      rows: [[{ kind: "string", value: "a" }, { kind: "number", value: Number.NaN }]],
+    };
+    expect(mapChart(nan, spec)).toBeNull();
+  });
+});

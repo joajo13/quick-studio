@@ -2,7 +2,7 @@
 title: 'Plumb result-column SQL dataType through the frozen contract (DW-30, DW-34)'
 type: 'feature'
 created: '2026-07-22'
-status: 'in-review'
+status: 'blocked'
 baseline_revision: 'f7953767b53aab17e42dc32f5d3ae8f356426ee8'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -101,3 +101,5 @@ Numeric name set (normalized lowercase): `numeric, decimal, bigint, integer, int
 - `bunx tsc --noEmit` (or the project's typecheck script) -- expected: no type errors from the signature/contract changes.
 </content>
 </invoke>
+
+> **SUPERSEDED (2026-07-24).** `status` set to `blocked`: this spec was never implemented — its task checkboxes were ticked but no code ever landed. It is fully superseded by `spec-result-datatype-and-exact-integers.md`, which carries DW-30/DW-34/DW-35/DW-40 to completion. Do not re-drive this file.

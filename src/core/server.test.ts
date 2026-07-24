@@ -1416,7 +1416,11 @@ describe("targeted read RPCs resolve by connectionId (Story 10.4)", () => {
       expect(res.status).toBe(200);
       const reply = JSON.parse(raw);
       expect(reply.ok).toBe(true);
-      expect(reply.result.data.columns).toEqual([{ name: "id", type: "number" }]);
+      // The browse path passes the introspected `SchemaColumnInfo` DESCRIPTORS through, so
+      // the column carries the target catalog's own `data_type` alongside the neutral kind.
+      expect(reply.result.data.columns).toEqual([
+        { name: "id", type: "number", dataType: "integer" },
+      ]);
       expect(reply.result.total).toBe(1);
       // The target's driver was opened — and it is the target's URL, resolved in Core.
       expect(opened).toEqual([TARGET_URL]);

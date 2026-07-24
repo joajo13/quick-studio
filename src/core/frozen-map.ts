@@ -2,16 +2,19 @@
  * quick-studio Core — driver-rows → FrozenData mapping (pure, total).
  *
  * The one place raw driver values become tagged {@link FrozenCell}s (Story 3.2).
- * `rowsToFrozenData` takes ordered column names and position-aligned raw row
- * arrays (as `Driver.query` yields) and produces a well-formed {@link FrozenData}:
- * one neutral `type` per column, inferred from that column's non-null values, and
- * every cell tagged to match. It never throws for ordinary data — an unknown /
- * heterogeneous value falls back to a `string` cell so the result always satisfies
- * `assertWellFormed` (cell kind matches column type, or is `null`).
+ * `rowsToFrozenData` takes ordered column DESCRIPTORS (name + optional canonical SQL
+ * `dataType`) and position-aligned raw row arrays (as `Driver.query` yields) and
+ * produces a well-formed {@link FrozenData}: one neutral `type` per column, inferred
+ * from that column's non-null values, and every cell tagged to match. It never throws
+ * for ordinary data — an unknown / heterogeneous value falls back to a `string` cell so
+ * the result always satisfies `assertWellFormed` (cell kind matches column type, or is
+ * `null`). The `dataType` rides along as a display/binding hint and steers exactly one
+ * mapping decision: tz-less temporals become literal wall-clock strings (DW-34).
  */
 
 import {
   FROZEN_SCHEMA_VERSION,
+  isNaiveDateTimeType,
   toIsoUtc,
   type FrozenCell,
   type FrozenColumn,
@@ -60,9 +63,43 @@ function coerceString(value: unknown): string {
   return String(value);
 }
 
-/** Build one tagged cell for `value` under an already-decided column `kind`. */
-function cellFor(value: unknown, kind: ValueKind): FrozenCell {
+/** Two-digit (or `w`-digit) zero-padded decimal — the wall-clock formatter's only helper. */
+const pad = (n: number, w = 2): string => String(n).padStart(w, "0");
+
+/**
+ * Render a tz-LESS temporal `Date` as the literal wall clock the database holds (DW-34):
+ * `2026-07-22T18:14:13`, with `.sss` appended only when the millisecond field is non-zero.
+ *
+ * It reads LOCAL getters on purpose. Both drivers parse a tz-less `timestamp`/`DATETIME`
+ * into a Date constructed in the HOST's local zone, so the local field values are exactly
+ * the digits the database returned — on any `TZ`. Going through `toIsoUtc` instead would
+ * shift those digits by the host offset AND stamp a `Z` the value never had. The result is
+ * deliberately NOT `Z`-suffixed and therefore lands in a `string` cell, never a `date`
+ * cell — the `date`-cell ISO-UTC invariant stays absolute.
+ *
+ * The YEAR is zero-padded to four digits like every other field: a raw `getFullYear()`
+ * would render a Postgres `timestamp` of `0500-01-01 00:00:00` as the malformed
+ * `500-01-01T00:00:00` — and that malformed string is exactly what the inline editor
+ * then seeds and would commit straight back into the row.
+ */
+function wallClock(d: Date): string {
+  const base =
+    `${pad(d.getFullYear(), 4)}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}` +
+    `T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  return d.getMilliseconds() === 0 ? base : `${base}.${pad(d.getMilliseconds(), 3)}`;
+}
+
+/**
+ * Build one tagged cell for `value` under an already-decided column `kind`. `naive` marks
+ * a tz-less temporal column (see {@link wallClock}): a valid `Date` in one is rendered as
+ * a literal wall-clock STRING instead of being coerced through the UTC path. Every other
+ * value — and every column with `naive` false — takes the byte-identical original route.
+ */
+function cellFor(value: unknown, kind: ValueKind, naive = false): FrozenCell {
   if (value === null || value === undefined) return { kind: "null" };
+  if (naive && value instanceof Date && !Number.isNaN(value.getTime())) {
+    return { kind: "string", value: wallClock(value) };
+  }
   switch (kind) {
     case "number":
       // Guaranteed a finite number by the column-kind consistency check; a stray
@@ -116,17 +153,47 @@ function inferColumnKind(rows: ReadonlyArray<ReadonlyArray<unknown>>, col: numbe
 }
 
 /**
- * Map ordered column names + raw driver rows into a well-formed {@link FrozenData}.
+ * A column DESCRIPTOR as this mapper needs it: the live name plus the OPTIONAL canonical
+ * SQL type. Structural on purpose, so both read paths pass what they already hold with no
+ * adaptation — the ad-hoc path its `DriverColumn`s, the browse path its `SchemaColumnInfo`s.
+ */
+export type ColumnDescriptor = {
+  readonly name: string;
+  readonly dataType?: string;
+};
+
+/**
+ * Map ordered column descriptors + raw driver rows into a well-formed {@link FrozenData}.
  * Pure and total: per-column type inference then per-cell tagging, so the output
  * always satisfies the contract's `assertWellFormed` invariant. Columns are always
  * present even when `rows` is empty (the empty-table / past-end page case).
+ *
+ * A descriptor's `dataType` is carried onto the emitted {@link FrozenColumn} verbatim
+ * (the display/binding hint for DW-30/DW-40) and changes the MAPPING in exactly one
+ * case: a tz-less temporal column (DW-34) is forced to kind `"string"` and its `Date`
+ * values become literal wall-clock strings, because a naive value has no instant to
+ * express as a UTC `date` cell. A descriptor with NO `dataType` — a legacy caller, a
+ * driver without type metadata, an unmapped engine type — infers exactly as before.
  */
 export function rowsToFrozenData(
-  columnNames: ReadonlyArray<string>,
+  columnDescriptors: ReadonlyArray<ColumnDescriptor>,
   rows: ReadonlyArray<ReadonlyArray<unknown>>,
 ): FrozenData {
-  const kinds: ValueKind[] = columnNames.map((_name, col) => inferColumnKind(rows, col));
-  const columns: FrozenColumn[] = columnNames.map((name, col) => ({ name, type: kinds[col]! }));
-  const frozenRows: FrozenRow[] = rows.map((row) => columnNames.map((_n, col) => cellFor(row[col], kinds[col]!)));
+  // Per column: the naive-temporal verdict, then the kind. A naive column short-circuits
+  // inference to `"string"` — it is the only kind a wall-clock literal can legally take.
+  const naives: boolean[] = columnDescriptors.map((c) => isNaiveDateTimeType(c.dataType));
+  const kinds: ValueKind[] = columnDescriptors.map((_c, col) =>
+    naives[col]! ? "string" : inferColumnKind(rows, col),
+  );
+  const columns: FrozenColumn[] = columnDescriptors.map((c, col) =>
+    // Omit `dataType` entirely when absent, so a descriptor without one produces the
+    // byte-identical `{name, type}` column this mapper has always produced.
+    c.dataType === undefined
+      ? { name: c.name, type: kinds[col]! }
+      : { name: c.name, type: kinds[col]!, dataType: c.dataType },
+  );
+  const frozenRows: FrozenRow[] = rows.map((row) =>
+    columnDescriptors.map((_c, col) => cellFor(row[col], kinds[col]!, naives[col]!)),
+  );
   return { schemaVersion: FROZEN_SCHEMA_VERSION, columns, rows: frozenRows };
 }

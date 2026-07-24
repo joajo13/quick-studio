@@ -251,9 +251,53 @@ const FORCE_EXTENDED = { simple: false } as unknown as { prepare?: boolean };
  * catch `null`, and the declared type stays honest about the real runtime shape.
  */
 type PgUnsafeResult = ReadonlyArray<ReadonlyArray<unknown>> & {
-  readonly columns?: ReadonlyArray<{ readonly name: string }> | null;
+  readonly columns?: ReadonlyArray<{ readonly name: string; readonly type?: number }> | null;
   readonly count?: number | null;
 };
+
+/**
+ * Postgres type OID → the canonical lowercase type name (DW-30/34/40). The ad-hoc SQL
+ * path has no `information_schema` to lean on, but postgres.js already carries the
+ * RowDescription's type OID on each column descriptor — this map turns it into EXACTLY
+ * the same spelling `information_schema.columns.data_type` yields for the browse path,
+ * so both read paths classify identically and there is one canonical vocabulary.
+ *
+ * OIDs are stable, built-in `pg_type` values. Anything absent (a domain, an enum, an
+ * extension type, `inet`, `geometry`, …) is deliberately left UNMAPPED: `dataType` stays
+ * `undefined` and display falls back to the value-inferred cell kind rather than to a
+ * guess. Note `1114` (`timestamp`) maps to the SPELLED-OUT `timestamp without time zone`
+ * — the naive form (DW-34) — never the bare `timestamp`, which is MySQL's tz-aware type.
+ *
+ * Every name here is the `information_schema.columns.data_type` SPELLING, not the
+ * internal `pg_type` alias and not a collapsed display bucket: `integer` (not `int4`),
+ * `smallint` (not `int2`), `character varying` (not `text`), `jsonb` (not `json`),
+ * `time without time zone` (not `time`). `dataType` is a whitelisted PUBLIC field
+ * documented as "the SQL type as the engine names it", so the ad-hoc path must not
+ * invent a private vocabulary that disagrees with the browse path for the same logical
+ * column — even where both spellings land in the same display bucket TODAY, the next
+ * consumer that keys on the spelling (a richer type label, a CREATE TABLE round-trip, an
+ * AI prompt) would inherit a field that lies depending on which read path produced it.
+ */
+const PG_OID_TO_DATA_TYPE: ReadonlyMap<number, string> = new Map([
+  [20, "bigint"],
+  [1700, "numeric"],
+  [21, "smallint"],
+  [23, "integer"],
+  [700, "real"],
+  [701, "double precision"],
+  [16, "boolean"],
+  [1114, "timestamp without time zone"],
+  [1184, "timestamp with time zone"],
+  [1082, "date"],
+  [1083, "time without time zone"],
+  [1266, "time with time zone"],
+  [25, "text"],
+  [1043, "character varying"],
+  [1042, "character"],
+  [2950, "uuid"],
+  [114, "json"],
+  [3802, "jsonb"],
+]);
 
 /**
  * Map a postgres.js VALUES-mode result into the neutral {@link DriverQueryResult}.
@@ -266,7 +310,13 @@ type PgUnsafeResult = ReadonlyArray<ReadonlyArray<unknown>> & {
  * array itself; `rowsAffected` comes from `result.count`, falling back to `rows.length`.
  */
 export function mapUnsafeResult(result: PgUnsafeResult): DriverQueryResult {
-  const columns = (result.columns ?? []).map((c) => ({ name: c.name }));
+  // The type OID rides on each column descriptor; map it to a canonical SQL type name
+  // (DW-30) and OMIT the key entirely when the OID is absent or unmapped, so a result
+  // with no usable type metadata is the byte-identical `{name}` shape it always was.
+  const columns = (result.columns ?? []).map((c) => {
+    const dataType = c.type === undefined ? undefined : PG_OID_TO_DATA_TYPE.get(c.type);
+    return dataType === undefined ? { name: c.name } : { name: c.name, dataType };
+  });
   // `result` IS the positional row array (its declared base type), so no cast is needed.
   const rows: ReadonlyArray<ReadonlyArray<unknown>> = result;
   return { columns, rows, rowsAffected: result.count ?? rows.length };
