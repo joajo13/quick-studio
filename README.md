@@ -98,6 +98,46 @@ quick-studio prints the bound URL to stderr on start, e.g.
 `quick-studio Core listening on http://127.0.0.1:<port>`. Open that URL in your
 browser.
 
+### First run
+
+A bare `quick-studio` with nothing configured yet still boots Persistent mode —
+it never refuses to boot just because there is no saved connection — but it
+prints one terse hint right after the listening-URL line:
+
+```
+quick-studio: no connections saved yet — this looks like a first run.
+  - Add one in the UI at the URL above: the "Settings" Tab, "connections" section.
+  - Or start a throwaway session directly: quick-studio <database-url>
+```
+
+When this is also the first time the workspace itself is opened — nothing saved,
+nothing to restore — the UI lands straight on the **Settings** Tab's
+**connections** form instead of an empty tree, so the next step is obvious without
+reading the hint at all (with `--no-open`/`QS_NO_OPEN` no browser is launched, but
+the page you open yourself still lands there). If a workspace *was* saved earlier,
+it is restored as-is and nothing is re-focused — your tabs are never hijacked, and
+the hint above is the only nudge you get. The database URL is asked for **in that
+form** — quick-studio never prompts for one on the terminal.
+
+That onboarding Tab is opened for the session, not written to your saved
+workspace: it is not what a later launch restores, and closing it is respected —
+it will not reappear the next time you start.
+
+Once quick-studio has a local store, a bare `quick-studio` boots as it did before
+this hint existed: the listening-URL line only, and the workspace opens wherever
+you last left it — no new prompt, and no new work beyond a handful of file-exists
+checks before the server starts. Ephemeral mode
+(`quick-studio <database-url>`, `--ephemeral`, or `QS_MODE=ephemeral`) never
+consults this check at all and never touches the app-data directory.
+
+The check is deliberately coarse: it asks *"has this machine ever been set up?"*,
+not *"does a connection exist?"*. So it stops firing as soon as anything is stored
+locally — a saved connection, but equally a saved AI provider key, or the store
+that the passphrase setup creates on a host with no OS keychain. On those hosts
+the hint appears once, on the very first boot, and not again; from then on the
+UI's own empty state ("Sin conexión activa — Agregá una conexión en Ajustes") is
+what points the way. Nothing is ever written just to answer this question.
+
 ### Flags
 
 - **`-h, --help`** — print usage and exit 0 (stdout; the Core never boots).

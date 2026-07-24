@@ -190,5 +190,5 @@ development_status:
   11-4-npm-platform-packages: done        # Story 11.4: Platform packages + end-to-end publish workflow
   11-5-update-check-and-command: done     # Story 11.5: TTL update check (ephemeral-safe) + delegating `update` command
   11-6-persistent-first-run-setup: done   # Story 11.6: First-run setup for Persistent mode (interactive passphrase)
-  11-7-bare-command-routing: backlog         # Story 11.7: Bare-command routing — boot or onboard
+  11-7-bare-command-routing: done         # Story 11.7: Bare-command routing — boot or onboard
   epic-11-retrospective: optional

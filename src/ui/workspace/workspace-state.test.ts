@@ -11,6 +11,7 @@ import {
   bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
+  initialWorkspace,
   isTabConnectionMissing,
   openOrFocusCreateTable,
   openOrFocusSettings,
@@ -20,6 +21,7 @@ import {
   restoreWorkspace,
   sanitizePanelSizes,
   setTabConnection,
+  shouldRouteToOnboarding,
   toWorkspaceSnapshot,
   type WorkspaceState,
 } from "./workspace-state.ts";
@@ -214,6 +216,95 @@ describe("openOrFocusSettings (Story 8.6 — singleton)", () => {
     s = openTab(s, "settings"); // second call focuses, does not append
     expect(settingsTabs()).toHaveLength(1);
     expect(s.nextId).toBe(nextIdAfterOpen); // no id burned on the focus path
+  });
+});
+
+describe("initialWorkspace (Story 11.7 — first-run onboarding routing)", () => {
+  test("firstRun: false returns the SAME object reference (true no-op)", () => {
+    const base = openMany("table", "query");
+    expect(initialWorkspace(base, false)).toBe(base);
+  });
+
+  test("firstRun: true over emptyWorkspace() yields exactly one settings tab, active", () => {
+    const s = initialWorkspace(emptyWorkspace(), true);
+    expect(s.tabs).toHaveLength(1);
+    expect(s.tabs[0]).toEqual({ id: 1, kind: "settings", title: "Settings" });
+    expect(s.activeTabId).toBe(1);
+  });
+
+  test("firstRun: true over a restored state that already holds a settings tab FOCUSES it — no duplicate", () => {
+    const withSettings = openOrFocusSettings(openMany("table")); // settings id 2, active
+    const away = activateTab(withSettings, 1); // switch focus away from settings
+    const s = initialWorkspace(away, true);
+    expect(s.tabs.filter((t) => t.kind === "settings")).toHaveLength(1);
+    expect(s.tabs).toHaveLength(away.tabs.length); // no new tab minted
+    expect(s.activeTabId).toBe(2); // the existing settings tab is (re-)focused
+  });
+
+  test("firstRun: true over a restored state with other tabs preserves every one of them", () => {
+    const base = openMany("table", "query", "erd");
+    const s = initialWorkspace(base, true);
+    expect(s.tabs).toHaveLength(4); // the 3 originals + the injected settings tab
+    expect([...s.tabs.slice(0, 3)]).toEqual([...base.tabs]); // originals untouched, in order
+    const settingsTab = s.tabs[3];
+    expect(settingsTab?.kind).toBe("settings");
+    expect(s.activeTabId).toBe(settingsTab!.id); // settings is the one that gets focus
+  });
+
+  test("does not mutate the input state", () => {
+    const base = openMany("table");
+    const s = initialWorkspace(base, true);
+    expect(base.tabs).toHaveLength(1); // `base` itself is untouched
+    expect(s).not.toBe(base);
+  });
+});
+
+describe("shouldRouteToOnboarding (Story 11.7 — the routing predicate)", () => {
+  // A snapshot holding ZERO tabs: the user explicitly closed everything, possibly
+  // including a Settings tab this routing opened for them on an earlier launch.
+  const EMPTY_SNAPSHOT: WorkspaceSnapshot = {
+    version: 1,
+    panelSizes: [25, 75],
+    tabs: [],
+    activeTabId: null,
+    nextId: 1,
+  };
+  const RESTORED_SNAPSHOT: WorkspaceSnapshot = {
+    ...EMPTY_SNAPSHOT,
+    tabs: [{ id: 1, kind: "table", title: "Table 1" }],
+    activeTabId: 1,
+    nextId: 2,
+  };
+
+  test("first-run boot with nothing to restore → routes", () => {
+    expect(shouldRouteToOnboarding(true, null)).toBe(true);
+  });
+
+  test("a returning boot never routes, with or without a snapshot", () => {
+    expect(shouldRouteToOnboarding(false, null)).toBe(false);
+    expect(shouldRouteToOnboarding(false, RESTORED_SNAPSHOT)).toBe(false);
+  });
+
+  test("first-run boot with a RESTORED snapshot does not hijack it", () => {
+    // `__QS_FIRST_RUN__` is baked into the shell once per PROCESS, so it stays
+    // true all session — a page reload after saving the first connection must
+    // not re-steal focus from whatever tab the user is on.
+    expect(shouldRouteToOnboarding(true, RESTORED_SNAPSHOT)).toBe(false);
+  });
+
+  test("first-run boot with a snapshot holding ZERO tabs does not re-open Settings", () => {
+    // Strictly narrower than "no tabs to show": a deliberate close must survive
+    // the next launch, not be silently undone until a connection is saved.
+    expect(shouldRouteToOnboarding(true, EMPTY_SNAPSHOT)).toBe(false);
+  });
+
+  test("an `undefined` snapshot is read as nothing-to-restore, not as a restore", () => {
+    // The absence check is LOOSE on purpose. `workspace.load` types `snapshot` as
+    // `WorkspaceSnapshot | null` today, but a strict `=== null` would answer
+    // `false` on `undefined` while the caller's own truthiness check builds an
+    // `emptyWorkspace()` — an empty tree with no onboarding, the exact outcome
+    // this story exists to eliminate.
+    expect(shouldRouteToOnboarding(true, undefined)).toBe(true);
   });
 });
 

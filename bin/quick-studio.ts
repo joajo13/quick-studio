@@ -20,6 +20,7 @@ import { resolveBindHost } from "../src/core/binding.ts";
 import { openBrowser } from "../src/core/browser-open.ts";
 import { CliArgsError, parseCliArgs, type CliArgs } from "../src/core/cli-args.ts";
 import { runFirstRunSetup, type FirstRunSetupResult } from "../src/core/first-run-setup.ts";
+import { FIRST_RUN_HINT, isFirstRunBoot } from "../src/core/first-run-signal.ts";
 import { HELP_TEXT } from "../src/core/help-text.ts";
 import { createShutdownController, type ShutdownController } from "../src/core/lifecycle.ts";
 import { startCore } from "../src/core/server.ts";
@@ -97,6 +98,19 @@ try {
   // accurate — the Core genuinely failed to start.
   const port = resolvePort();
 
+  // Story 11.7: the bare-command routing/messaging signal, computed HERE — before
+  // the Story 11.6 pre-flight below has any chance to run. That pre-flight's create
+  // path (`runFirstRunSetup` -> `openCredentialStore` -> `openPersistent`) can write
+  // the app-data directory and, on a keychain-less host completing the passphrase
+  // create flow, the descriptor and the eager empty `.enc` too — all BEFORE
+  // `startCore` is ever reached. A probe read after that point would see its own
+  // just-created files and report "configured" on exactly the machine this hint
+  // exists for. Reading disk state as of process start is also the honest answer to
+  // "has this machine ever been set up?" (Design Notes). Total and cheap: a couple
+  // of `existsSync` calls, no decryption, no directory creation, and a hard no-op
+  // in Ephemeral mode.
+  const firstRun = isFirstRunBoot(cli.mode, process.env, process.platform);
+
   // First-run setup pre-flight (Story 11.6): on a Persistent boot with no OS
   // keychain reachable and no QS_PASSPHRASE/QS_PASSPHRASE_FD set, prompt
   // interactively BEFORE the Core boots — never after, since the registries open
@@ -135,6 +149,9 @@ try {
     // (Story 11.6), or undefined on `skip` so `startCore` resolves it exactly as
     // today (`resolvePassphraseProvider(process.env)`).
     passphraseProvider: setup.outcome === "provider" ? setup.provider : undefined,
+    // Routing/messaging only (Story 11.7) — never changes what boots. A returning
+    // user (firstRun === false) gets the served shell byte-for-byte unchanged.
+    firstRun,
   });
   controller = createShutdownController({ stop: core.stop, exit: () => process.exit(0) });
 
@@ -146,6 +163,11 @@ try {
 
   // stderr only, terse. Never log the session token.
   process.stderr.write(`quick-studio Core listening on ${core.url}\n`);
+
+  // Story 11.7: printed immediately after the listening-URL line — never before —
+  // so the hint's "the URL above" reference is always literally true. A hint, never
+  // an error: the exit code and the rest of boot are unaffected either way.
+  if (firstRun) process.stderr.write(FIRST_RUN_HINT);
 
   // TTL-cached update check (Story 11.5). Fire-and-forget, exactly like the
   // `openBrowser` call below: launched after the Core is listening, NEVER

@@ -47,6 +47,7 @@ import {
   bindTableToActiveTab,
   closeTab,
   emptyWorkspace,
+  initialWorkspace,
   openOrFocusCreateTable,
   openOrFocusSettings,
   openTab,
@@ -55,6 +56,7 @@ import {
   restoreWorkspace,
   sanitizePanelSizes,
   setTabConnection,
+  shouldRouteToOnboarding,
   toWorkspaceSnapshot,
   type TableRef,
   type TabKind,
@@ -71,6 +73,14 @@ declare global {
   interface Window {
     __QS_TOKEN__?: string;
     __QS_EXPOSURE__?: ExposureInfo;
+    /**
+     * First-run boot signal (Story 11.7) — known at boot and static for the
+     * session, exactly like `__QS_EXPOSURE__` (see `contract.ts`'s "known at
+     * boot and static — NOT an RPC" precedent). Routes the initial Tab onto
+     * Settings -> connections instead of an empty tree; absent/non-`true`
+     * (e.g. an older served shell) is read as `false` — never onboard by accident.
+     */
+    __QS_FIRST_RUN__?: boolean;
   }
 }
 
@@ -476,34 +486,75 @@ export function App(): React.JSX.Element {
     };
   }, []);
 
+  // First-run boot signal (Story 11.7) — injected at boot (static for the
+  // session), read once straight from the global exactly like `__QS_EXPOSURE__`
+  // below. Read here (not inside the effect) so its value is captured at the
+  // same render the effect closure itself is created from.
+  const firstRun = window.__QS_FIRST_RUN__ === true;
+
   // Restore-on-launch: the UI calls `workspace.load` unconditionally — it never
   // branches on run-mode itself. On a *successful* load, Persistent mode may
   // resolve a real snapshot; Ephemeral mode (and first launch) resolves
   // `snapshot: null`, the ordinary "start fresh" case. A *failed* load (error
   // reply) is deliberately NOT treated as "start fresh and save": it renders
   // fresh but leaves saving disabled so a good-but-unreadable file is never
-  // overwritten.
+  // overwritten. `firstRun` routing (Story 11.7) applies in BOTH branches — a
+  // first-run boot must land on the Settings Tab's connections form whether or not
+  // the load itself succeeded, since a genuinely first-run machine has no snapshot
+  // to fail on.
   useEffect(() => {
     let alive = true;
     void rpc<LoadWorkspaceResult>("workspace.load").then((reply) => {
       if (!alive) return;
       if (!reply.ok) {
         // Load errored — render fresh but keep auto-save OFF (data-loss guard).
+        // No `snapshot` exists on this path *as far as the UI can tell*, so the
+        // success branch's `snapshot === null` conjunct is trivially satisfied here
+        // and `firstRun` alone is the right guard: the reducer still holds its
+        // `emptyWorkspace()` default (nothing was restored), so there is nothing to
+        // hijack. If this branch ever gains a restore/recover path, it MUST grow the
+        // same "nothing was restored" conjunct or it will steal focus.
+        // Note this routing is presentational ONLY: `savingEnabled` stays false for
+        // the whole session, so the injected Settings Tab is never written to disk.
+        if (firstRun) dispatch({ type: "openSettings" });
         setWorkspaceReady(true);
         return;
       }
       const snapshot = reply.result.snapshot;
-      // The reducer state we will actually hold after this effect, and the panel
-      // sizes to render — computed up front so we can seed the "already on disk"
-      // baseline with exactly what a subsequent save would serialize (so an
-      // untouched Workspace does not re-save on launch).
-      const restored = snapshot ? restoreWorkspace(snapshot) : emptyWorkspace();
+      // `base` is the reducer state the load itself produces; `restored` is that
+      // state after the first-run onboarding decision (Story 11.7) — computed up
+      // front so we can seed the "already on disk" baseline (below) with exactly
+      // what a subsequent save would serialize (so an untouched, first-run-routed
+      // Workspace does not immediately re-save the injected Tab as a "change").
+      const base = snapshot ? restoreWorkspace(snapshot) : emptyWorkspace();
+      // Route onto onboarding ONLY when this machine has never persisted a Workspace
+      // at all. The intent is "onboard instead of an EMPTY TREE", so `snapshot` — not
+      // `base.tabs.length` — is the discriminator, and it is the STRICTER of the two:
+      //  - a snapshot that restored Tabs means the user has somewhere to be, and
+      //    hijacking `activeTabId` is a regression (`__QS_FIRST_RUN__` is baked into
+      //    the shell once per PROCESS, so it stays `true` all session — a page reload
+      //    after adding the first connection must not re-steal focus);
+      //  - a snapshot holding ZERO Tabs means the user explicitly CLOSED everything,
+      //    including a Settings Tab this routing opened for them. Re-opening it on the
+      //    next launch would silently undo that until a connection is saved.
+      // The decision itself lives in `workspace-state.ts` — `App.tsx` has no test
+      // harness (no jsdom, by repo convention), so a predicate written inline here
+      // could be inverted without a single test going red. Computed ONCE and reused
+      // by the `dispatch` below — the baseline seeded from `restored` and the state
+      // actually held cannot drift apart (see there).
+      // Known residual: a first-run session that never persisted anything (the
+      // baseline below matches disk exactly, so nothing is written) DOES re-route on
+      // an in-session page reload. Suppressing that needs a per-page-load answer,
+      // which the intent contract's "no new RPC" boundary rules out.
+      const routeToOnboarding = shouldRouteToOnboarding(firstRun, snapshot);
+      const restored = initialWorkspace(base, routeToOnboarding);
       const sizes = snapshot
         ? sanitizePanelSizes(snapshot.panelSizes, DEFAULT_PANEL_SIZES)
         : [...DEFAULT_PANEL_SIZES];
       // Seed ERD geometry from the snapshot, pruned to the restored tab set (a pre-4.2
-      // file has no `erdLayouts` → {} → dagre fallback).
-      const layouts = snapshot ? restoreErdLayouts(snapshot, restored.tabs) : {};
+      // file has no `erdLayouts` → {} → dagre fallback). Reads `base`, not `restored`:
+      // the first-run Settings Tab carries no ERD geometry of its own.
+      const layouts = snapshot ? restoreErdLayouts(snapshot, base.tabs) : {};
       // Seed the last-used provider default hint (Story 8.5): an unknown/absent value → null,
       // so a chat Tab falls back to single/first-connected.
       const provider = snapshot ? restoreLastProvider(snapshot) : null;
@@ -517,6 +568,13 @@ export function App(): React.JSX.Element {
         setErdLayouts(layouts);
         setLastProvider(provider);
       }
+      // A no-snapshot first launch never dispatches "restore" above (the reducer's
+      // own `emptyWorkspace()` default already matches `base`), so this singleton
+      // open-or-focus dispatch is what actually routes onboarding. It reuses the SAME
+      // `routeToOnboarding` binding `initialWorkspace` was given — one expression, not
+      // two that must be kept in lockstep — so the autosave baseline seeded on the
+      // next line always describes the state actually held.
+      if (routeToOnboarding) dispatch({ type: "openSettings" });
       lastPersistedRef.current = JSON.stringify(toWorkspaceSnapshot(restored, sizes, layouts, provider));
       setSavingEnabled(true);
       setWorkspaceReady(true);

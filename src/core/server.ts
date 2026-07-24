@@ -381,6 +381,15 @@ export type StartCoreOptions = {
    * shared by BOTH persistent stores.
    */
   passphraseProvider?: PassphraseProvider;
+  /**
+   * First-run boot signal (Story 11.7), pre-computed by `bin/` via
+   * `isFirstRunBoot` BEFORE the Story 11.6 pre-flight can create the app-data
+   * directory (or, on the passphrase-create path, the descriptor and `.enc`).
+   * Purely a UI-routing/messaging hint — it never changes what boots (Persistent
+   * still boots Persistent either way). Defaults to `false`, matching every
+   * existing call site's byte-for-byte behavior.
+   */
+  firstRun?: boolean;
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -432,15 +441,18 @@ function scriptJson(value: unknown): string {
  * Render the served HTML shell with the per-boot token injected. The UI reads
  * `window.__QS_TOKEN__` and sends it on every `/rpc` call, reads
  * `window.__QS_EXPOSURE__` (known at boot, static) to render the Port-Exposure
- * Warning banner, and reads `window.__QS_SANDBOX_ORIGIN__` (Story 5.5) to point the
- * untrusted iframe `src` at the Ring 3 origin. The token is hex-filtered
- * belt-and-suspenders; the sandbox origin is URL-charset-filtered the same way; the
- * exposure payload (arbitrary `host`) leans on `scriptJson`'s `<script>`-safe
- * escaping. Exported for unit-testing the injection without booting a real server.
+ * Warning banner, reads `window.__QS_SANDBOX_ORIGIN__` (Story 5.5) to point the
+ * untrusted iframe `src` at the Ring 3 origin, and reads `window.__QS_FIRST_RUN__`
+ * (Story 11.7) to route the initial Tab onto Settings -> connections instead of an
+ * empty tree. The token is hex-filtered belt-and-suspenders; the sandbox origin is
+ * URL-charset-filtered the same way; the exposure payload (arbitrary `host`) leans
+ * on `scriptJson`'s `<script>`-safe escaping; `firstRun` is a plain boolean with no
+ * untrusted content to escape. Exported for unit-testing the injection without
+ * booting a real server.
  *
  * `nonce` is the per-boot CSP nonce (DW-2) and MUST be the same value
  * `shellCspHeaders` puts in the response header's `script-src 'nonce-…'` source: all
- * three of these scripts are INLINE, so under the strict shell CSP they execute only
+ * four of these scripts are INLINE, so under the strict shell CSP they execute only
  * if they carry it — and without them the UI has no token, no exposure banner, and no
  * sandbox origin, i.e. a blank app. It is validated here by the SAME
  * {@link safeCspNonce} helper the builder calls — one function, one rule, so the two
@@ -459,6 +471,7 @@ export function renderIndexHtml(
   exposure: ExposureInfo,
   sandboxOrigin: string,
   nonce: string,
+  firstRun = false,
 ): string {
   const safeToken = token.replace(/[^0-9a-fA-F]/g, "");
   // The SHARED gate (not a copy of it), on the raw value — the same function, given the
@@ -486,6 +499,7 @@ export function renderIndexHtml(
     <script${nonceAttr}>window.__QS_TOKEN__ = ${scriptJson(safeToken)};</script>
     <script${nonceAttr}>window.__QS_EXPOSURE__ = ${scriptJson(exposure)};</script>
     <script${nonceAttr}>window.__QS_SANDBOX_ORIGIN__ = ${scriptJson(safeSandboxOrigin)};</script>
+    <script${nonceAttr}>window.__QS_FIRST_RUN__ = ${scriptJson(firstRun)};</script>
   </head>
   <body>
     <div id="root"></div>
@@ -1003,11 +1017,18 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // Rendered after `server` so the exposure payload can carry the real bound
   // port. Bun only invokes `fetch` once this synchronous setup completes, so
   // the closure's reference is always resolved by request time.
+  // Story 11.7: purely a UI-routing hint, resolved by `bin/` BEFORE this boot ever
+  // starts (see `StartCoreOptions.firstRun`'s doc for why the order is load-bearing).
+  // Defaulted here — not just in the type — so a caller that omits it entirely
+  // (every pre-11.7 call site, including this file's own tests) renders `false`.
+  const firstRun = options.firstRun ?? false;
+
   const indexHtmlTemplate = renderIndexHtml(
     token,
     { exposed, host: bindHost, port: boundPort },
     sandboxOrigin,
     cspNonce,
+    firstRun,
   );
 
   // The shell's strict CSP (DW-2). Built HERE, not at module scope, because it is the
