@@ -16,7 +16,9 @@ import type { DatabaseSchema, SchemaRelationKind } from "../shared/contract.ts";
 import {
   DriverConnectionError,
   INTROSPECTION_TIMEOUT_MS,
+  SAFE_FALLBACK_SESSION_MODES,
   assembleSchema,
+  mysqlSessionModes,
   toDriverConnectionError,
   withTimeout,
   type Driver,
@@ -25,6 +27,7 @@ import {
   type IntrospectedForeignKey,
   type IntrospectedIndex,
   type IntrospectedPrimaryKey,
+  type SessionModes,
 } from "./driver.ts";
 
 /**
@@ -227,6 +230,10 @@ function databaseOf(url: string): string | null {
 export function createMysqlDriver(url: string): Driver {
   const database = databaseOf(url);
   let connection: Connection | null = null;
+  // DW-39: the connection's detected SQL-parsing modes, filled by the best-effort probe in
+  // `connect()`. Initialized to the over-reject-safe fallback so an un-probed connection reads
+  // backslash-literal modes (fail-closed) rather than assuming server defaults.
+  let modes: SessionModes = SAFE_FALLBACK_SESSION_MODES;
   // Serializes `query`/`queryReadOnly` on the single shared connection so the
   // multi-step read-only transaction can never interleave with another query.
   const runExclusive = createMutex();
@@ -241,6 +248,15 @@ export function createMysqlDriver(url: string): Driver {
         connection = await mysql.createConnection(buildMysqlConfig(url));
       } catch (err) {
         throw toDriverConnectionError(err);
+      }
+      // Best-effort SQL-mode detection (DW-39): never fails the connection — a probe error
+      // degrades to the over-reject-safe fallback.
+      try {
+        const [rows] = await connection.query("SELECT @@session.sql_mode AS sql_mode");
+        const raw = (rows as ReadonlyArray<{ readonly sql_mode?: unknown }>)[0]?.sql_mode;
+        modes = mysqlSessionModes(raw);
+      } catch {
+        modes = SAFE_FALLBACK_SESSION_MODES;
       }
     },
 
@@ -436,6 +452,8 @@ export function createMysqlDriver(url: string): Driver {
         }
       });
     },
+
+    sessionModes: () => modes,
 
     quoteIdent(ident: string): string {
       // MySQL back-tick-quotes identifiers; an embedded backtick is escaped by doubling.

@@ -15,11 +15,13 @@
 
 import type { ConnectResult, DatabaseSchema, DbEngine } from "../shared/contract.ts";
 import {
+  SAFE_FALLBACK_SESSION_MODES,
   DriverConnectionError,
   createDriver as realCreateDriver,
   type Driver,
   type DriverFactory,
   type DriverQueryResult,
+  type SessionModes,
 } from "./driver.ts";
 
 /**
@@ -73,6 +75,17 @@ export type ConnectionManager = {
    * like `getSchema`.
    */
   getEngine(): Promise<DbEngine>;
+  /**
+   * The connection's detected SQL-parsing modes (DW-39) — the inputs the raw-statement
+   * splitter needs beyond the engine. Opens the driver lazily+once (which populates the
+   * memo) and reads the modes straight off the driver, deliberately WITHOUT honoring the
+   * stale flag: like {@link ConnectionManager.getEngine}, modes are a property of the
+   * CONNECTION (fixed at connect — no `SET` is issued, no DDL changes them), not of the
+   * catalog, so `refreshIfStale` is irrelevant and a schema-mutating statement never
+   * re-probes them. Throws if the connection cannot be opened or was closed, exactly like
+   * `getEngine`.
+   */
+  getSessionModes(): Promise<SessionModes>;
   /**
    * Run a row-returning query on the live connection (Story 3.2 browse path).
    * Opens the driver lazily+once; throws if unopenable or closed. The caller
@@ -423,6 +436,18 @@ export function createConnectionManager(
       // Defensive: a live driver with no cached schema (shouldn't happen) — introspect
       // under the SAME pinned scope, mirroring `getSchema`'s own fallback.
       return (await d.listSchema(pinnedSchema)).engine;
+    },
+
+    async getSessionModes(): Promise<SessionModes> {
+      // Modes are fixed at connect (a connection property, not catalog state) — like getEngine,
+      // read them straight off the driver without honoring the stale flag. The `??` fallback is a
+      // fake-driver concession only: every real adapter implements `sessionModes` (with its own
+      // probe-failure safety), so this branch is unreachable in production. It resolves to the
+      // over-reject-safe fallback (NOT DEFAULT) so that a hypothetical adapter omitting the method
+      // fails CLOSED (backslash-literal ⇒ over-count) rather than assuming backslash-active — the
+      // same fail-closed posture every probe-failure path already takes.
+      const d = await ensureDriver();
+      return d.sessionModes?.() ?? SAFE_FALLBACK_SESSION_MODES;
     },
 
     async query(text: string, params?: ReadonlyArray<unknown>): Promise<DriverQueryResult> {

@@ -12,7 +12,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ConnectResult, DatabaseSchema } from "../shared/contract.ts";
 import type { ConnectionManager } from "./connection.ts";
-import type { DriverQueryResult } from "./driver.ts";
+import { DEFAULT_SESSION_MODES, type DriverQueryResult } from "./driver.ts";
 import { createConnectionTargets, type StoredUrlLookup } from "./connection-targets.ts";
 
 const SCHEMA: DatabaseSchema = { engine: "postgres", tables: [] };
@@ -43,6 +43,7 @@ function fakeManager(url: string, schema?: string) {
       engineReads++;
       return SCHEMA.engine;
     },
+    getSessionModes: async () => DEFAULT_SESSION_MODES,
     query: async (text: string): Promise<DriverQueryResult> => {
       queries.push(text);
       return { columns: [], rows: [], rowsAffected: 0 };

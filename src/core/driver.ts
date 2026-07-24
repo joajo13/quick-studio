@@ -72,7 +72,93 @@ export type Driver = {
   quoteIdent(ident: string): string;
   /** Release the connection/pool. Idempotent and never throws for the caller. */
   close(): Promise<void>;
+  /**
+   * The connection's detected SQL-parsing modes (DW-39), captured at `connect`. Real adapters
+   * always implement this; a probe failure degrades to over-reject-safe modes inside `connect`,
+   * never a throw. Optional only so a pre-DW-39 fake driver still type-checks (the
+   * `rowsAffected?` precedent) — every real adapter populates it.
+   */
+  sessionModes?(): SessionModes;
 };
+
+/**
+ * The session's SQL-parsing modes, detected at connect (DW-39). These are the ONLY inputs —
+ * besides the engine — the raw-statement splitter needs to decide where a quoted string/
+ * identifier begins and ends, so a `;` smuggled inside a crafted escape string is never
+ * mistaken for a top-level separator. Engine-gated: a postgres connection reads
+ * `standardConformingStrings`; a mysql connection reads `noBackslashEscapes` + `ansiQuotes`.
+ * The other engine's fields are don't-cares (carried as documented defaults) — the splitter
+ * only ever consults the field(s) relevant to its own `engine`.
+ */
+export type SessionModes = {
+  readonly standardConformingStrings: boolean;
+  readonly noBackslashEscapes: boolean;
+  readonly ansiQuotes: boolean;
+};
+
+/**
+ * The documented DEFAULT server session config (modern PG `standard_conforming_strings=on`;
+ * default MySQL: backslash active, `"` a string). Used as the splitter's parameter default so
+ * a two-arg `splitStatements(sql, engine)` call is byte-identical to pre-DW-39 behavior — the
+ * whole existing splitter battery stays green — and as the fake-driver concession in
+ * `connection.ts` (a real adapter always reports its own detected modes).
+ */
+export const DEFAULT_SESSION_MODES: SessionModes = {
+  standardConformingStrings: true,
+  noBackslashEscapes: false,
+  ansiQuotes: false,
+};
+
+/**
+ * Over-reject-safe fallback used when a mode probe cannot run (DW-39): backslash treated as
+ * LITERAL everywhere, so a quoted string closes ASAP and a `;` smuggled after a `\'` stays a
+ * top-level separator → the statement splits → multi-statement rejection (preserving the
+ * executor's fail-closed posture).
+ *
+ * Safe-direction proof: if the splitter assumed backslash-ON but the server had it OFF it
+ * would UNDER-count (a string swallows a real `;` — a smuggle); if it assumed backslash-OFF
+ * but the server had it ON it only OVER-counts (a false multi-statement rejection — safe). So
+ * an unknown mode must resolve to backslash-LITERAL: `scs=true, nbse=true`. (`ansiQuotes` is a
+ * no-op once `nbse:true` — the `dqBackslash` formula already yields `false` — so it is left
+ * `false`.)
+ */
+export const SAFE_FALLBACK_SESSION_MODES: SessionModes = {
+  standardConformingStrings: true,
+  noBackslashEscapes: true,
+  ansiQuotes: false,
+};
+
+/**
+ * Parse a postgres `standard_conforming_strings` setting value into {@link SessionModes}
+ * (DW-39). Only an EXPLICIT off/false flips `scs` off (making plain `'…'` strings
+ * backslash-active); anything else — `on`, an unknown string, `null`, `undefined` — yields
+ * `scs=true` (backslash-literal, the over-reject-safe side), so a garbled probe value can
+ * never make the splitter under-count. The mysql fields are don't-cares on a pg connection and
+ * carry their documented defaults. Pure and exported so the boundary is unit-testable.
+ */
+export function postgresSessionModes(scs: unknown): SessionModes {
+  const v = typeof scs === "string" ? scs.trim().toLowerCase() : scs;
+  const scsOff = v === "off" || v === false;
+  return { standardConformingStrings: !scsOff, noBackslashEscapes: false, ansiQuotes: false };
+}
+
+/**
+ * Parse a mysql `@@session.sql_mode` value into {@link SessionModes} (DW-39). A non-string
+ * (the probe failed, or returned an odd shape) resolves to the over-reject-safe
+ * {@link SAFE_FALLBACK_SESSION_MODES} rather than assuming defaults. `@@sql_mode` returns the
+ * fully-EXPANDED mode list, so a composite mode like `ANSI` (which implies `ANSI_QUOTES`) is
+ * already spelled out in the string and covered by the substring check — no need to expand
+ * composites here. Pure and exported so the boundary is unit-testable.
+ */
+export function mysqlSessionModes(sqlMode: unknown): SessionModes {
+  if (typeof sqlMode !== "string") return SAFE_FALLBACK_SESSION_MODES;
+  const m = sqlMode.toUpperCase();
+  return {
+    standardConformingStrings: true,
+    noBackslashEscapes: m.includes("NO_BACKSLASH_ESCAPES"),
+    ansiQuotes: m.includes("ANSI_QUOTES"),
+  };
+}
 
 /** One column descriptor of a {@link DriverQueryResult} — its live name, verbatim. */
 export type DriverColumn = {

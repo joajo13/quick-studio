@@ -15,7 +15,9 @@ import type { DatabaseSchema, SchemaRelationKind } from "../shared/contract.ts";
 import {
   DriverConnectionError,
   INTROSPECTION_TIMEOUT_MS,
+  SAFE_FALLBACK_SESSION_MODES,
   assembleSchema,
+  postgresSessionModes,
   toDriverConnectionError,
   withTimeout,
   type Driver,
@@ -24,6 +26,7 @@ import {
   type IntrospectedForeignKey,
   type IntrospectedIndex,
   type IntrospectedPrimaryKey,
+  type SessionModes,
 } from "./driver.ts";
 
 /**
@@ -316,6 +319,12 @@ export function createPostgresDriver(url: string): Driver {
     onnotice: () => {},
   });
 
+  // DW-39: the connection's detected SQL-parsing modes, filled by the best-effort probe in
+  // `connect()`. Initialized to the over-reject-safe fallback so that if `connect` is never
+  // reached — or the probe throws — the splitter reads backslash-literal modes (fail-closed)
+  // rather than assuming server defaults.
+  let modes: SessionModes = SAFE_FALLBACK_SESSION_MODES;
+
   return {
     async connect(): Promise<void> {
       try {
@@ -324,6 +333,17 @@ export function createPostgresDriver(url: string): Driver {
         await sql`select 1`;
       } catch (err) {
         throw toDriverConnectionError(err);
+      }
+      // Best-effort SQL-mode detection (DW-39). Kept separate from the `select 1` liveness
+      // round-trip and swallowed to the over-reject-safe fallback: a server that chokes on the
+      // probe still connects rather than regressing a previously-working connect.
+      try {
+        const [row] = (await sql`SHOW standard_conforming_strings`) as unknown as ReadonlyArray<{
+          readonly standard_conforming_strings?: unknown;
+        }>;
+        modes = postgresSessionModes(row?.standard_conforming_strings);
+      } catch {
+        modes = SAFE_FALLBACK_SESSION_MODES;
       }
     },
 
@@ -568,6 +588,8 @@ export function createPostgresDriver(url: string): Driver {
         reserved.release();
       }
     },
+
+    sessionModes: () => modes,
 
     quoteIdent(ident: string): string {
       // Postgres double-quotes identifiers; an embedded `"` is escaped by doubling.

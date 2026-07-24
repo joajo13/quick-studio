@@ -13,7 +13,7 @@ import { describe, expect, test } from "bun:test";
 import type { DatabaseSchema, DbEngine } from "../shared/contract.ts";
 import { NoConnectionTargetError } from "./connection.ts";
 import type { ConnectionSeams } from "./connection-targets.ts";
-import type { DriverQueryResult } from "./driver.ts";
+import { DEFAULT_SESSION_MODES, type DriverQueryResult, type SessionModes } from "./driver.ts";
 import {
   boundRawRead,
   createExecutor,
@@ -66,6 +66,8 @@ function makeSeams(opts: {
   readOnlyResult?: DriverQueryResult;
   /** When set, `runQuery` throws it — a failed mutation must NOT bust the memo. */
   queryThrows?: unknown;
+  /** DW-39: the detected SQL-parsing modes this target reports; default = server defaults. */
+  sessionModes?: SessionModes;
 } = {}) {
   const engine = opts.engine ?? "postgres";
   const schema = opts.schema ?? schemaFor(engine);
@@ -88,6 +90,7 @@ function makeSeams(opts: {
       return opts.readOnlyResult ?? { columns: [{ name: "n" }], rows: [[1]], rowsAffected: 0 };
     },
     getEngine: async () => engine,
+    getSessionModes: async () => opts.sessionModes ?? DEFAULT_SESSION_MODES,
     getSchema: async () => schema,
     quoteIdent: engine === "postgres" ? pgQuote : myQuote,
     connect: async () => ({ status: "connected", schema }),
@@ -103,6 +106,8 @@ function makeExecutor(opts: {
   schema?: DatabaseSchema;
   queryResult?: DriverQueryResult;
   readOnlyResult?: DriverQueryResult;
+  /** DW-39: forwarded to `makeSeams` so an end-to-end case can drive detected modes. */
+  sessionModes?: SessionModes;
 } = {}) {
   const { seams, queryCalls, readOnlyCalls } = makeSeams(opts);
   // Default resolver: every call (id present or not) resolves the SAME boot seams, so the
@@ -173,6 +178,44 @@ describe("splitStatements — top-level separator only", () => {
     // In a standard (non-E) postgres string a backslash is literal, so 'a\' closes at
     // that quote; the following `;` is a real separator → two statements.
     expect(one("SELECT 'a\\'; SELECT 2", "postgres")).toBe(2);
+  });
+
+  /* ---- DW-39: mode-aware string/identifier boundaries ------------------ */
+
+  // Detected modes are threaded as the THIRD arg. Each case pairs the SAME text with two
+  // mode-sets to prove the boundary shifts with the session, matching the I/O matrix.
+  const scsOff: SessionModes = { standardConformingStrings: false, noBackslashEscapes: false, ansiQuotes: false };
+  const mysqlDefault: SessionModes = { standardConformingStrings: true, noBackslashEscapes: false, ansiQuotes: false };
+  const mysqlNbse: SessionModes = { standardConformingStrings: true, noBackslashEscapes: true, ansiQuotes: false };
+  const mysqlAnsi: SessionModes = { standardConformingStrings: true, noBackslashEscapes: false, ansiQuotes: true };
+
+  test("PG scs=ON (default): plain '\\' is backslash-LITERAL → the `;` splits (2)", () => {
+    // Byte-identical to the two-arg default case above; asserted explicitly against DEFAULT
+    // modes so the matrix's scs=on row is pinned next to its scs=off counterpart.
+    expect(splitStatements("SELECT 'a\\'; SELECT 2", "postgres", DEFAULT_SESSION_MODES).length).toBe(2);
+  });
+  test("PG scs=OFF: plain '\\' escapes the quote → string swallows the `;` (1)", () => {
+    // With standard_conforming_strings=off the backslash escapes the following quote, so the
+    // string runs on and the `;` is hidden — matching the server. Under DEFAULT this is 2.
+    expect(splitStatements("SELECT 'a\\'; SELECT 2", "postgres", scsOff).length).toBe(1);
+  });
+  test("MySQL default: '\\' escapes the quote → 1 statement", () => {
+    expect(splitStatements("SELECT '\\'; SELECT 2", "mysql", mysqlDefault).length).toBe(1);
+  });
+  test("MySQL NO_BACKSLASH_ESCAPES: '\\' is literal → the `;` splits (2)", () => {
+    // NBSE makes the backslash literal, so the first quote closes the string and the `;` is a
+    // real separator — the server-faithful count.
+    expect(splitStatements("SELECT '\\'; SELECT 2", "mysql", mysqlNbse).length).toBe(2);
+  });
+  test("MySQL default: \"…\" is a backslash-escaped STRING → the `;` stays hidden (1)", () => {
+    // In default mode `"` is a string with backslash escapes, so `\"` does not close it; the
+    // `;` rides inside the string → one statement.
+    expect(splitStatements('SELECT "a\\"; b"', "mysql", mysqlDefault).length).toBe(1);
+  });
+  test("MySQL ANSI_QUOTES: \"…\" is an IDENTIFIER (no backslash) → `\\\"` closes, `;` splits (2)", () => {
+    // Under ANSI_QUOTES `"` is an identifier with no backslash escaping, so `"a\"` closes at
+    // the second quote and the following `;` is a top-level separator → two statements.
+    expect(splitStatements('SELECT "a\\"; b"', "mysql", mysqlAnsi).length).toBe(2);
   });
 });
 
@@ -418,6 +461,48 @@ describe("raw path — multi-statement rejection & smuggle", () => {
     expect(reply.ok).toBe(true);
     if (reply.ok) expect(reply.result.status).toBe("confirmation_required");
     expect(queryCalls.length).toBe(0);
+  });
+
+  /* ---- DW-39: detected modes drive the reject/accept decision end-to-end ---- */
+
+  test("PG scs=OFF (inverse): text that is 2 stmts under DEFAULT is 1 under detected modes → runs", async () => {
+    // `SELECT 'a\'; SELECT 2` splits to TWO under DEFAULT (backslash literal ⇒ the quote
+    // closes and the `;` separates), but under the detected scs=off the backslash escapes the
+    // quote so the string swallows the `;` → ONE statement. It must therefore RUN as a single
+    // read, NOT be rejected for multiplicity — the detected modes flip a would-be reject into
+    // a legitimate single read that matches the server.
+    const { exec, readOnlyCalls } = makeExecutor({
+      engine: "postgres",
+      sessionModes: { standardConformingStrings: false, noBackslashEscapes: false, ansiQuotes: false },
+    });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT 'a\\'; SELECT 2" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(readOnlyCalls.length).toBe(1);
+  });
+
+  test("MySQL NO_BACKSLASH_ESCAPES: a stmt that is 1 under DEFAULT is 2 under detected modes → rejected", async () => {
+    // `SELECT '\'; SELECT 2` is ONE statement under DEFAULT mysql (backslash escapes the
+    // quote), but under the detected NO_BACKSLASH_ESCAPES the backslash is literal so the `;`
+    // is a real separator → TWO statements → the multi-statement guard rejects it. Nothing runs.
+    const { exec, queryCalls, readOnlyCalls } = makeExecutor({
+      engine: "mysql",
+      sessionModes: { standardConformingStrings: true, noBackslashEscapes: true, ansiQuotes: false },
+    });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT '\\'; SELECT 2" });
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error.message).toBe("multiple statements are not allowed");
+    expect(queryCalls.length + readOnlyCalls.length).toBe(0);
+  });
+
+  test("MySQL default modes: the SAME NBSE text is ONE read that runs (inverse — not a false reject)", async () => {
+    // The inverse of the case above: under DEFAULT modes `SELECT '\'; SELECT 2` is one
+    // statement (the string swallows the `;`), so it is NOT rejected for multiplicity — it
+    // runs as a single read. This proves the rejection above is driven by the DETECTED modes,
+    // not by the text alone.
+    const { exec, readOnlyCalls } = makeExecutor({ engine: "mysql" });
+    const reply = await exec.execute({ shape: "raw", sql: "SELECT '\\'; SELECT 2" });
+    expect(reply.ok && reply.result.status).toBe("rows");
+    expect(readOnlyCalls.length).toBe(1);
   });
 });
 
@@ -1025,6 +1110,9 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
       getEngine: async () => {
         throw new NoConnectionTargetError();
       },
+      getSessionModes: async () => {
+        throw new NoConnectionTargetError();
+      },
       getSchema: async () => {
         throw new NoConnectionTargetError();
       },
@@ -1064,6 +1152,9 @@ describe("execute routes to the resolved target (Story 6.2)", () => {
         throw new NoConnectionTargetError();
       },
       getEngine: async () => {
+        throw new NoConnectionTargetError();
+      },
+      getSessionModes: async () => {
         throw new NoConnectionTargetError();
       },
       getSchema: async () => {

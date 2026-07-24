@@ -12,10 +12,14 @@ import postgres from "postgres";
 import mysql2 from "mysql2";
 import type { ConnectionFailureKind } from "../shared/contract.ts";
 import {
+  DEFAULT_SESSION_MODES,
   DriverConnectionError,
+  SAFE_FALLBACK_SESSION_MODES,
   assembleSchema,
   classifyConnectionError,
   createDriver,
+  mysqlSessionModes,
+  postgresSessionModes,
   withTimeout,
   type IntrospectedForeignKey,
   type IntrospectedIndex,
@@ -1120,5 +1124,80 @@ describe("mysql multi-statement backstop (no live DB)", () => {
     expect(
       buildMysqlConfig("mysql://u:p@h/db?multipleStatements=true").multipleStatements,
     ).toBe(false);
+  });
+});
+
+describe("session-mode parsers (DW-39)", () => {
+  // Both constants pin the splitter's expectations; assert their exact shapes so a drift in
+  // either (which would silently change every splitter decision) is caught here.
+  test("DEFAULT_SESSION_MODES is the documented server default (scs on, backslash active, `\"`=string)", () => {
+    expect(DEFAULT_SESSION_MODES).toEqual({
+      standardConformingStrings: true,
+      noBackslashEscapes: false,
+      ansiQuotes: false,
+    });
+  });
+  test("SAFE_FALLBACK_SESSION_MODES is over-reject-safe (backslash literal everywhere)", () => {
+    expect(SAFE_FALLBACK_SESSION_MODES).toEqual({
+      standardConformingStrings: true,
+      noBackslashEscapes: true,
+      ansiQuotes: false,
+    });
+  });
+
+  describe("postgresSessionModes", () => {
+    test("`on` ⇒ scs true (mysql fields defaulted)", () => {
+      expect(postgresSessionModes("on")).toEqual({
+        standardConformingStrings: true,
+        noBackslashEscapes: false,
+        ansiQuotes: false,
+      });
+    });
+    test("`off` ⇒ scs false", () => {
+      expect(postgresSessionModes("off").standardConformingStrings).toBe(false);
+    });
+    test("`OFF` is case-insensitive ⇒ scs false", () => {
+      expect(postgresSessionModes("OFF").standardConformingStrings).toBe(false);
+      expect(postgresSessionModes("  Off  ").standardConformingStrings).toBe(false);
+    });
+    test("boolean false ⇒ scs false", () => {
+      expect(postgresSessionModes(false).standardConformingStrings).toBe(false);
+    });
+    test("undefined / null / garbage ⇒ scs true (over-reject-safe side)", () => {
+      expect(postgresSessionModes(undefined).standardConformingStrings).toBe(true);
+      expect(postgresSessionModes(null).standardConformingStrings).toBe(true);
+      expect(postgresSessionModes("garbage").standardConformingStrings).toBe(true);
+      expect(postgresSessionModes(1).standardConformingStrings).toBe(true);
+    });
+  });
+
+  describe("mysqlSessionModes", () => {
+    test("a default expanded mode string ⇒ nbse/ansi both false", () => {
+      expect(
+        mysqlSessionModes("ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"),
+      ).toEqual({
+        standardConformingStrings: true,
+        noBackslashEscapes: false,
+        ansiQuotes: false,
+      });
+    });
+    test("a string containing NO_BACKSLASH_ESCAPES ⇒ nbse true", () => {
+      expect(mysqlSessionModes("STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES").noBackslashEscapes).toBe(true);
+    });
+    test("a string containing ANSI_QUOTES ⇒ ansi true", () => {
+      expect(mysqlSessionModes("ANSI_QUOTES,STRICT_TRANS_TABLES").ansiQuotes).toBe(true);
+    });
+    test("a composite string with BOTH ⇒ both true (case-insensitive)", () => {
+      expect(mysqlSessionModes("ansi_quotes,no_backslash_escapes")).toEqual({
+        standardConformingStrings: true,
+        noBackslashEscapes: true,
+        ansiQuotes: true,
+      });
+    });
+    test("a non-string (null / number) ⇒ SAFE_FALLBACK (probe-failed posture)", () => {
+      expect(mysqlSessionModes(null)).toEqual(SAFE_FALLBACK_SESSION_MODES);
+      expect(mysqlSessionModes(123)).toEqual(SAFE_FALLBACK_SESSION_MODES);
+      expect(mysqlSessionModes(undefined)).toEqual(SAFE_FALLBACK_SESSION_MODES);
+    });
   });
 });

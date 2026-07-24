@@ -321,7 +321,8 @@ origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-execut
 location: `executor.ts` (raw-SQL splitter)
 reason: Reviewer severity: low. `executor.ts` splitter activates backslash-escaping only for mysql strings and postgres `E'…'` strings. Under postgres `standard_conforming_strings=off`, plain `'…'` strings become backslash-active → splitter over-counts (valid statement falsely rejected — fail-safe). Under MySQL `NO_BACKSLASH_ESCAPES`, `'\''` is `\` + close-quote → splitter could under-count, but this is backstopped by the now-unconditional `multipleStatements:false`. All divergences are either over-reject (safe) or backstopped, and require a non-default server session config; the durable options are to read the session settings or document the assumption. No live exploit at default configs.
 decision: [2026-07-21, user] Detect the session's actual SQL modes and adapt the raw-SQL splitter's string/identifier parsing accordingly (the most-correct option; over document-and-force).
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-sql-mode-aware-statement-splitter
 
 ### DW-40: Bind bigint/int8/numeric columns without JS `Number` precision loss on both the write value and the PK address — a value beyond `Number.MAX_SAFE_INTEGER` is silently truncated on edit/insert, and a lossy PK read makes `WHERE pk = <lossy>` address the wrong row (or none) on update/delete
 
