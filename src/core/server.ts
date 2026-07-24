@@ -637,6 +637,25 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
    * neutral `bad_request` "no active connection" — NOT the generic `internal_error`. Any
    * OTHER driver/connection throw still propagates → `internal_error` (engine-neutral,
    * credentials never echoed).
+   *
+   * SNAPSHOT CAVEAT (DW-32) — accepted, not a bug to fix here: the COUNT and the page
+   * SELECT below are TWO independent round-trips with NO shared snapshot and NO
+   * enclosing transaction, so a concurrent writer between them makes the reply's `total`
+   * describe a different instant than its rows. Under concurrent writes an OFFSET-based
+   * pager can therefore also DRIFT — an insert/delete before the current offset shifts
+   * every later row, so a row can be seen twice or skipped across two page requests —
+   * and the last page can be reported non-empty yet come back empty. This is deliberately
+   * tolerated: quick-studio is a local, single-user browse tool where a best-effort
+   * snapshot is worth far more than the cost of holding a transaction (or a repeatable-read
+   * snapshot) open across the pager's lifetime. Keyset/seek pagination — the real fix — is
+   * deliberately NOT implemented. Removing the writers does NOT make contiguity universal:
+   * with no writers it is GUARANTEED only on `planTableRows`'s two TOTAL-order branches —
+   * the primary key and the physical row locator (`ctid`, DW-33). The orderable-column
+   * branch is best-effort (an ORDER BY over non-unique columns is not a total order, so
+   * rows sharing the ordered values may come back in a different relative order between two
+   * page requests even with zero writes), and a relation with no PK, no locator and no
+   * orderable column still gets NO ORDER BY at all — the documented DW-33 residual, whose
+   * page order is non-total by construction.
    */
   async function tableRows(params: unknown): Promise<RpcReply<TableRowsResult>> {
     const target = readConnectionId(params, "table.rows");

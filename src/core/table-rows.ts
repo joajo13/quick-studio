@@ -7,16 +7,42 @@
  * the schema and rendered only via the injected `quoteIdent`; `LIMIT`/`OFFSET` are
  * Core-computed, validated non-negative integers rendered as literals. NO user
  * value is ever concatenated into SQL. Pagination is deterministic — ORDER BY the
- * primary key (a total, repeatable order). Keyless tables have no total order to
- * lean on: the fallback orders by every ORDERABLE column (unorderable types like
- * `json`/`bytea` are skipped), which is best-effort and may not be strict when
- * rows are fully duplicated; if no column is orderable the ORDER BY is omitted.
+ * primary key (a total, repeatable order).
+ *
+ * ORDER BY precedence for ONE page (DW-33):
+ *  1. the primary key — a total, repeatable order; pages never overlap or skip;
+ *  2. the engine's PHYSICAL ROW LOCATOR when the relation provably has one (Postgres
+ *     `ctid` on a physically stored relation) — also total, and available even when
+ *     every column is of an unorderable type;
+ *  3. every ORDERABLE column, decided by a per-engine ALLOWLIST — best-effort, and not
+ *     strict when rows are fully duplicated;
+ *  4. no ORDER BY at all, when none of the above yields a column.
+ *
+ * The allowlist is the safety property: `planTableRows` must never compose an
+ * `ORDER BY` the target engine would REJECT (a type with no default ordering operator
+ * raises "could not identify an ordering operator" and collapses the whole page into
+ * `internal_error`). A denylist fails OPEN — an unknown/new type is assumed orderable
+ * and can hard-fail; the allowlist fails CLOSED — an unknown type is simply skipped,
+ * costing at worst a weaker order. Prevention only: there is deliberately no
+ * catch-and-retry degrade path.
+ *
+ * Residual, by design: a keyless relation with NO physical locator (a view, a
+ * partitioned parent) whose columns are all unorderable still gets no ORDER BY, so its
+ * page order is non-total. That is strictly better than also hard-failing, and closing it
+ * needs keyset pagination, which is out of scope. See also the DW-32 snapshot note on
+ * `tableRows` in `server.ts`: the COUNT and the page SELECT are two non-atomic
+ * round-trips, so `total` and the page can disagree under concurrent writes.
  *
  * Pure and dependency-injectable: `quoteIdent` is passed in so composition is
  * unit-testable without a live driver.
  */
 
-import type { DatabaseSchema, SchemaColumnInfo, SchemaTableInfo } from "../shared/contract.ts";
+import type {
+  DatabaseSchema,
+  DbEngine,
+  SchemaColumnInfo,
+  SchemaTableInfo,
+} from "../shared/contract.ts";
 
 /** Default rows-per-page when the request omits `pageSize`. */
 export const DEFAULT_PAGE_SIZE = 100;
@@ -60,30 +86,137 @@ function isPositiveInt(v: unknown): v is number {
 }
 
 /**
- * Known column types with no default ordering operator — `ORDER BY` on one of
- * these errors ("could not identify an ordering operator"), so the keyless
- * fallback skips them. Matched case-insensitively by prefix against `dataType`.
+ * The per-engine ALLOWLIST of column types that provably have a default ordering
+ * operator, i.e. the only types the keyless fallback may name in an `ORDER BY` (DW-33).
+ *
+ * Keyed on {@link DbEngine} and matched EXACTLY (not by prefix) against
+ * `dataType.toLowerCase().trim()`. `dataType` is `information_schema.columns.data_type`
+ * verbatim on both engines, so these are the spellings the catalogs actually report —
+ * Postgres says `character varying` and `timestamp without time zone`, and reports an
+ * enum/composite as `USER-DEFINED` and any array as `ARRAY`, none of which appear here.
+ *
+ * This REPLACES the former `UNORDERABLE_TYPE_PREFIXES` denylist, which failed open twice
+ * over: an unlisted-but-unorderable type (`USER-DEFINED`, `ARRAY`, `record`, `tsvector`,
+ * `pg_lsn`, MySQL `geometry`) sailed through and made the engine reject the page, and
+ * prefix matching mis-classified in both directions (`point` also matched a hypothetical
+ * `point_id`-ish type name). An unknown type is now NOT orderable — the conservative arm.
+ * Never widen this by adding a type that lacks a default ordering operator.
+ *
+ * The allowlist must also not UNDER-approximate: the recorded decision is "order by the
+ * FULL set of orderable columns", so a type the OLD denylist admitted and that provably
+ * DOES have a default ordering operator has to stay in, or a keyless relation silently
+ * loses an `ORDER BY` it used to have. Hence, each with its proof:
+ *  - MySQL `json` — MySQL defines a TOTAL ordering over JSON values since 5.7 (the
+ *    documented cross-type comparison order), so `ORDER BY <json col>` is accepted.
+ *  - MySQL `tinyblob`/`blob`/`mediumblob`/`longblob` — BLOBs sort as binary strings,
+ *    truncated to the first `max_sort_length` bytes; the engine accepts the sort (and the
+ *    old prefix denylist only ever matched the bare `blob` spelling anyway, so
+ *    `mediumblob`/`longblob`/`tinyblob` columns were ordered by before this change).
+ *  - Postgres `jsonb` — has had a btree opclass (`jsonb_ops`, a total ordering) since 9.4.
+ *    Plain `json` does NOT and must stay OUT: it has no equality/ordering operator at all
+ *    and `ORDER BY <json col>` raises "could not identify an ordering operator".
+ *  - Postgres `oid` and `name` — both are ordinary btree-ordered catalog types (`oid` is an
+ *    unsigned 4-byte integer, `name` a fixed-length C string) and reachable as a user
+ *    column type; both sorted fine under the old denylist.
  */
-const UNORDERABLE_TYPE_PREFIXES: ReadonlyArray<string> = [
-  "json",
-  "jsonb",
-  "xml",
-  "point",
-  "line",
-  "lseg",
-  "box",
-  "path",
-  "polygon",
-  "circle",
-  "bytea",
-  "blob",
-  "geometry",
-];
+const ORDERABLE_TYPES: Readonly<Record<DbEngine, ReadonlySet<string>>> = {
+  postgres: new Set([
+    "smallint",
+    "integer",
+    "bigint",
+    "numeric",
+    "decimal",
+    "real",
+    "double precision",
+    "money",
+    "boolean",
+    "character",
+    "character varying",
+    "text",
+    "uuid",
+    "date",
+    "timestamp without time zone",
+    "timestamp with time zone",
+    "time without time zone",
+    "time with time zone",
+    "interval",
+    "bytea",
+    "inet",
+    "cidr",
+    "macaddr",
+    "macaddr8",
+    "bit",
+    "bit varying",
+    // btree-ordered since 9.4 — unlike plain `json`, which has NO ordering operator.
+    "jsonb",
+    "oid",
+    "name",
+  ]),
+  mysql: new Set([
+    "tinyint",
+    "smallint",
+    "mediumint",
+    "int",
+    "integer",
+    "bigint",
+    "decimal",
+    "numeric",
+    "float",
+    "double",
+    "real",
+    "bit",
+    "char",
+    "varchar",
+    "binary",
+    "varbinary",
+    "tinytext",
+    "text",
+    "mediumtext",
+    "longtext",
+    "enum",
+    "set",
+    "date",
+    "datetime",
+    "timestamp",
+    "time",
+    "year",
+    // Total ordering over JSON values since 5.7.
+    "json",
+    // Sorted as binary strings (first `max_sort_length` bytes) — accepted by the engine.
+    "tinyblob",
+    "blob",
+    "mediumblob",
+    "longblob",
+  ]),
+};
 
-/** Is this column orderable — i.e. NOT one of the known-unorderable types? */
-function isOrderable(column: SchemaColumnInfo): boolean {
-  const t = column.dataType.toLowerCase().trim();
-  return !UNORDERABLE_TYPE_PREFIXES.some((prefix) => t.startsWith(prefix));
+/**
+ * Postgres's physical row locator: the system column every physically stored relation
+ * carries, giving a TOTAL order even when no column of the table is orderable. It is used
+ * for ordering ONLY — never projected into the SELECT list — so `TableRowsResult.data`
+ * keeps exactly the introspected columns. MySQL has no equivalent (InnoDB exposes no
+ * stable per-row locator as a selectable column), hence the postgres-only gate below.
+ */
+const PHYSICAL_ROW_LOCATOR = "ctid";
+
+/** Is this column's type in `engine`'s orderable allowlist? Unknown ⇒ NOT orderable. */
+function isOrderable(engine: DbEngine, column: SchemaColumnInfo): boolean {
+  return ORDERABLE_TYPES[engine].has(column.dataType.toLowerCase().trim());
+}
+
+/**
+ * May the browse plan order `target` by the engine's physical row locator (DW-33)?
+ *
+ * Only Postgres has one, and only on a PHYSICALLY STORED relation: `kind === "table"`
+ * (`pg_class.relkind` `r`/`m`). Everything else falls through to column ordering —
+ * a `view` (Postgres views ARE introspected and browsable, and never have a PK, so an
+ * unguarded "keyless ⇒ ctid" would turn every view browse into a hard engine error),
+ * an `other` (a partitioned parent or foreign table looks table-like but exposes no
+ * `ctid` of its own), and an ABSENT `kind`, which means "unknown" and must never be
+ * optimistically read as "table".
+ */
+function hasPhysicalRowLocator(engine: DbEngine, target: SchemaTableInfo): boolean {
+  return engine === "postgres" && target.kind === "table";
 }
 
 /**
@@ -162,20 +295,29 @@ export function planTableRows(
     return fail("bad_request", "table.rows 'page' is out of range");
   }
 
-  // Column list (select order) and deterministic ORDER BY: the primary key when
-  // present (a total, repeatable order so pages never overlap), else every
-  // ORDERABLE column (unorderable types like json/bytea are skipped — best-effort).
+  // Column list (select order) and deterministic ORDER BY, in strict precedence
+  // (DW-33): the primary key when present (a total, repeatable order so pages never
+  // overlap); else the engine's physical row locator when the relation provably has one
+  // (also total, and immune to the column types); else every ORDERABLE column, which is
+  // best-effort. Every name that reaches the clause comes from the live schema match or
+  // is the fixed locator literal — never from the request.
   const columns = target.columns;
   const orderCols =
     target.primaryKey.length > 0
       ? target.primaryKey
-      : columns.filter(isOrderable).map((c) => c.name);
+      : hasPhysicalRowLocator(schema.engine, target)
+        ? [PHYSICAL_ROW_LOCATOR]
+        : columns.filter((c) => isOrderable(schema.engine, c)).map((c) => c.name);
 
   const qualifiedTable = `${quoteIdent(target.schema)}.${quoteIdent(target.name)}`;
+  // The SELECT list is the introspected columns ONLY — the row locator orders the page
+  // but is never projected, so the wire result shape is unchanged.
   const colList = columns.map((c) => quoteIdent(c.name)).join(", ");
 
   // Omit ORDER BY entirely when no orderable column remains (rather than emit an
-  // empty clause). PK path always has at least one column.
+  // empty clause) — a non-total page order, but never one the engine rejects. The PK and
+  // row-locator paths always have at least one column. The locator goes through
+  // `quoteIdent` like every other identifier: no raw name is ever concatenated.
   const orderBy = orderCols.length > 0 ? ` ORDER BY ${orderCols.map((name) => quoteIdent(name)).join(", ")}` : "";
 
   // LIMIT/OFFSET are validated non-negative integers rendered as literals — no bind

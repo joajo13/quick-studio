@@ -17,6 +17,7 @@ import type {
   DatabaseSchema,
   DbEngine,
   SchemaIndexInfo,
+  SchemaRelationKind,
   SchemaTableInfo,
 } from "../shared/contract.ts";
 // The adapters import `DriverConnectionError`/`toDriverConnectionError` back from
@@ -102,6 +103,17 @@ export type DriverFactory = (url: string) => Driver;
  * its engine's `information_schema.columns` rows into this shape, pre-ordered by
  * schema → table → ordinal, and {@link assembleSchema} folds them into the
  * grouped {@link DatabaseSchema}. This is the one place engine rows become neutral.
+ *
+ * `relationKind` (DW-33) rides on the COLUMN row rather than in a list of its own: the
+ * owning relation's kind is a per-table constant, so each adapter reads it with a single
+ * correlated scalar subquery on the query it already issues (Postgres `pg_class.relkind`,
+ * MySQL `information_schema.tables.table_type`) — no extra round-trip, no N+1, and no new
+ * decorator fold. A name-based LEFT JOIN was deliberately NOT used: under a case-insensitive
+ * catalog match (e.g. MySQL `lower_case_table_names=0`, where `Foo` and `foo` coexist) a
+ * join can multiply or drop column rows, and this query gates ALL connect — so the scalar
+ * subquery is the load-bearing anti-duplication choice; do not "simplify" it back to a join
+ * (see each adapter's own comment). It is OPTIONAL: an adapter that cannot resolve it (or a
+ * hand-built fixture) simply omits it and the table's `kind` stays absent ⇒ unknown.
  */
 export type IntrospectedColumn = {
   readonly schema: string;
@@ -109,6 +121,7 @@ export type IntrospectedColumn = {
   readonly column: string;
   readonly dataType: string;
   readonly nullable: boolean;
+  readonly relationKind?: SchemaRelationKind;
 };
 
 /**
@@ -179,6 +192,10 @@ export type IntrospectedForeignKey = {
  * own key position, by index/position, and by constraint/position), so the wire shape
  * mirrors the live database's own ordering. Index, FK, and PK rows are grouped within
  * their table and only DECORATE tables the column query already produced. Pure.
+ *
+ * A column row may also carry the owning relation's `relationKind` (DW-33); it is stamped
+ * onto `SchemaTableInfo.kind` when the table is first created and omitted when no row
+ * supplies one — see {@link IntrospectedColumn}.
  */
 export function assembleSchema(
   engine: DbEngine,
@@ -188,7 +205,7 @@ export function assembleSchema(
   primaryKeys: readonly IntrospectedPrimaryKey[] = [],
 ): DatabaseSchema {
   const tables: SchemaTableInfo[] = [];
-  // Insertion-ordered index from "schema table" to the mutable columns array
+  // Insertion-ordered index from "schema\0table" to the mutable columns array
   // of the table being accumulated — the input is already grouped by ordering, but
   // keying defensively tolerates any adjacent-but-not-identical duplication.
   const index = new Map<
@@ -207,15 +224,35 @@ export function assembleSchema(
     }
   >();
 
-  const ensureEntry = (schema: string, table: string) => {
-    const key = `${schema} ${table}`;
+  // `relationKind` (DW-33) is stamped ONLY here, when the table is FIRST created: the
+  // kind is a per-table constant repeated on every one of its column rows, so the first
+  // row wins and the later ones are a no-op — which also keeps the fold order-independent
+  // (re-stamping per row would let a hypothetical disagreeing row flip the verdict).
+  // Absent ⇒ the `kind` key is OMITTED entirely rather than set to a sentinel, so the
+  // neutral shape stays byte-identical to pre-DW-33 for any adapter/fixture that does not
+  // supply it and every consumer reads "absent = unknown".
+  const ensureEntry = (schema: string, table: string, relationKind?: SchemaRelationKind) => {
+    // NUL-joined, and written as the `\0` ESCAPE rather than a raw byte so the invariant
+    // is visible in the source (and the file stays plain text for every tool that reads
+    // it). NUL is the one character no engine allows inside an identifier, so
+    // ("a", "b.c") and ("a.b", "c") — or any other pair — can never collide on this key.
+    // Every other lookup below must join with the SAME separator.
+    const key = `${schema}\0${table}`;
     let e = index.get(key);
     if (e === undefined) {
       const cols: SchemaColumnAccumulator = [];
       const pk: string[] = [];
       const idx: SchemaIndexAccumulator = [];
       const fk: SchemaForeignKeyAccumulator = [];
-      const info: SchemaTableInfo = { schema, name: table, columns: cols, primaryKey: pk, indexes: idx, foreignKeys: fk };
+      const info: SchemaTableInfo = {
+        schema,
+        name: table,
+        columns: cols,
+        primaryKey: pk,
+        indexes: idx,
+        foreignKeys: fk,
+        ...(relationKind === undefined ? {} : { kind: relationKind }),
+      };
       e = { cols, pk, idx, idxByName: new Map(), fk, fkByName: new Map() };
       index.set(key, e);
       tables.push(info);
@@ -224,7 +261,7 @@ export function assembleSchema(
   };
 
   for (const col of columns) {
-    const entry = ensureEntry(col.schema, col.table);
+    const entry = ensureEntry(col.schema, col.table, col.relationKind);
     entry.cols.push({ name: col.column, dataType: col.dataType, nullable: col.nullable });
   }
 
@@ -235,7 +272,7 @@ export function assembleSchema(
   // only DECORATE tables produced by column introspection: a PK row for a relation the
   // column query never listed is dropped rather than materializing a phantom table.
   for (const pk of primaryKeys) {
-    const entry = index.get(`${pk.schema} ${pk.table}`);
+    const entry = index.get(`${pk.schema}\0${pk.table}`);
     if (entry === undefined) continue;
     entry.pk.push(pk.column);
   }
@@ -247,7 +284,7 @@ export function assembleSchema(
   // `pg_toast` toast indexes and materialized-view indexes that `information_schema.columns`
   // never lists; without this guard each would spawn a phantom column-less table.)
   for (const ix of indexes) {
-    const entry = index.get(`${ix.schema} ${ix.table}`);
+    const entry = index.get(`${ix.schema}\0${ix.table}`);
     if (entry === undefined) continue;
     let colsAcc = entry.idxByName.get(ix.indexName);
     if (colsAcc === undefined) {
@@ -266,9 +303,10 @@ export function assembleSchema(
   // one per column. Like indexes, FK rows only DECORATE tables produced by column
   // introspection — a constraint on a relation the column query never listed is dropped
   // rather than materializing a phantom table. The map key mirrors `ensureEntry`'s
-  // NUL-joined `schema table` composite so a `.` in an identifier can never collide.
+  // NUL-joined `schema\0table` composite (see `ensureEntry`) so no separator character
+  // occurring INSIDE an identifier can ever make two distinct relations collide.
   for (const constraint of foreignKeys) {
-    const entry = index.get(`${constraint.schema} ${constraint.table}`);
+    const entry = index.get(`${constraint.schema}\0${constraint.table}`);
     if (entry === undefined) continue;
     let acc = entry.fkByName.get(constraint.constraintName);
     if (acc === undefined) {

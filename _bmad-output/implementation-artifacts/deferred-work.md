@@ -244,7 +244,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `naturalKind` (`frozen-map.ts`); `DataGrid.tsx`
 reason: postgres.js returns `numeric`/`decimal`/`int8` and mysql2 returns `DECIMAL`/`BIGINT` as JS strings (and `bigint` is deliberately forced to string for precision), so `naturalKind` in `frozen-map.ts` classifies them `string`; `DataGrid.tsx` then labels them `TEXT`, left-aligns, and drops `tabular-nums`. Values are correct — only the header type/alignment is wrong. The spec deliberately colors by neutral kind (and already defers `t-json` for the same reason); fixing both needs the SQL `dataType` carried alongside the result columns, a contract/plumbing decision beyond this story.
 decision: [2026-07-21, user] Plumb each column's SQL dataType into the result contract and classify numeric/decimal/bigint -> number (right-align + number color), decoupled from the FrozenCell kind. (This resolves the previously-stuck "datatype-result-contract".)
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-31: Report a composite `SchemaTableInfo.primaryKey` in the key's own ordinal order (`ORDER BY ordinal_position` in both PK introspection queries) rather than in table-column order
 
@@ -260,7 +261,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `tableRows` (`server.ts`)
 reason: `server.ts` `tableRows` issues `connectionManager.query(countSql)` then `query(selectSql)` with no shared snapshot/transaction; a concurrent insert/delete between them (or before the offset) makes `total` inconsistent with the returned page and shifts OFFSET-based pages. This is inherent to OFFSET pagination rather than a defect in the composition, and this is a read-only browse of a live DB (staleness is expected), so it is a known-limitation note rather than a Story 3.2 bug; keyset (seek) pagination on the PK is the durable fix if it becomes user-visible.
 decision: [2026-07-21, user] Accept for now — DOCUMENT that total/page are a best-effort snapshot (local single-user browse tool); revisit with keyset pagination only if it bites. (No code fix beyond documentation.)
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-browse-pagination-and-keyless-ordering
 
 ### DW-33: Make the keyless-table (no-PK) browse ordering robust — the static `UNORDERABLE_TYPE_PREFIXES` heuristic in `table-rows.ts` can both silently omit `ORDER BY` (rows overlap/skip across pages) and emit an `ORDER BY` the engine rejects (hard `internal_error`, blank grid), depending on the table's column types
 
@@ -268,7 +270,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `isOrderable` / `UNORDERABLE_TYPE_PREFIXES` (`src/core/table-rows.ts`)
 reason: `isOrderable` classifies orderability by a hardcoded type-prefix denylist. For a PK-less table it either (a) filters out every column and omits `ORDER BY` entirely — so two separate page requests can return rows in different physical orders (overlap/skip, silent corrupt paging even with no concurrent writes) — or (b) passes a column that *looks* orderable but has no default ordering operator (Postgres `USER-DEFINED`/composite/`record`/`tsvector`/`pg_lsn`, `ARRAY`, or MySQL variants the prefix list misses such as `mediumblob`), so the composed `ORDER BY` throws at the DB and the whole page collapses to `internal_error` instead of degrading. Only affects keyless tables with exotic column types (PK tables order by the PK and are unaffected); the robust fix is a design decision — engine-aware orderability (which would leak ordering semantics into the driver seam), catch-and-degrade, or keyset pagination — not a mechanical widening of the prefix list. Distinct from the non-atomic COUNT/SELECT drift entry (that is concurrent-write staleness; this is a non-total page order / hard failure under zero writes).
 decision: [2026-07-21, user] Use a physical row locator when the engine has one (Postgres `ctid`) for keyless-table ordering; otherwise order by the full set of orderable columns, and NEVER emit an ORDER BY the engine will reject (pre-validate by column type).
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-browse-pagination-and-keyless-ordering
 
 ### DW-34: Decide how a `timestamp without time zone` value should be represented in the neutral FrozenCell model — `rowsToFrozenData` stamps a UTC `Z` ISO string on every JS `Date`, so a tz-less wall-clock timestamp is displayed as though it were UTC
 
@@ -276,7 +279,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `rowsToFrozenData` / `toIsoUtc` (`frozen-map.ts`)
 reason: `frozen-map.ts` routes any `Date` through `toIsoUtc`, which serializes with a `Z`/UTC suffix. A Postgres `timestamp without time zone` (and MySQL `DATETIME`) carries no timezone, but postgres.js/mysql2 hand it back as a JS `Date`; tagging it UTC asserts a timezone the column does not have, shifting displayed times for any non-UTC-intending data. Genuine `timestamptz` round-trips correctly; the gap is representational and only visible for naive-timestamp columns. Correcting it needs a contract decision (carry a naive-vs-aware distinction, or the SQL `dataType`) rather than a one-line mapper tweak — adjacent to the deferred SQL-`dataType`-aware typing item.
 decision: [2026-07-21, user] Represent a `timestamp without time zone` as its literal wall-clock value (no `Z`, no UTC shift) — distinct from tz-aware timestamps.
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-35: Preserve MySQL `BIGINT` precision in the browse read path — the mysql2 connection uses default numeric handling, so a `BIGINT` above 2^53 comes back as a precision-lossy JS number and is displayed rounded
 
@@ -284,7 +288,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `driver-mysql.ts`; `naturalKind` (`frozen-map.ts`)
 reason: `driver-mysql.ts` opens the connection without `supportBigNumbers`/`bigNumberStrings`, so mysql2 decodes `BIGINT` columns to JS `number`; `frozen-map.ts` `naturalKind` then classifies the finite number as `"number"` and emits it verbatim, so a value like `9007199254740993` renders as `…992`. The mapper's bigint→string safety net only fires when the driver returns an actual `bigint`, which this config never produces for `BIGINT`. Rare (values beyond 2^53) and a driver-config/typing decision (enable big-number strings, or carry the SQL `dataType`) rather than a browse-composition bug; postgres.js already returns `int8` as a string and is unaffected.
 decision: [2026-07-21, user] Carry large integers (bigint/int8/numeric above 2^53) as exact STRINGS end-to-end — read AND write AND PK addressing — so nothing is silently truncated. (Shared resolution with DW-40.)
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-36: Bound the FETCH (not just the display slice) for auto-classified raw reads — push a `LIMIT MAX_RESULT_ROWS + 1` or use a server cursor so a `SELECT * FROM huge_table` cannot materialize the whole result set into Core memory before the 1000-row cap applies
 
@@ -324,7 +329,8 @@ origin: migrated from legacy ledger (code review of spec-3-3-edit-insert-delete-
 location: `coerceValue` / `pkForRow` / `cellToValue` (`row-mutations.ts`)
 reason: Reviewer severity: high (two independent review passes flagged it as the highest-consequence item in the diff). `row-mutations.ts` `coerceValue("number")` uses `Number(raw)` and `pkForRow`/`cellToValue` read the PK from `FrozenCell` as a JS `number` (`cell.value`). The precision loss originates upstream in Story 3.2's `FrozenCell` number representation (bigint already arrives as a lossy JS number from the browse read); Story 3.3 is the first to WRITE with it, exposing a silent wrong-value / wrong-row data-corruption path with no error surfaced. Story 3.3 explicitly scopes DB-type-aware editors via `SchemaColumnInfo` out (deferred) and documents the kind-inference limitation, so the durable fix (thread column types + carry wide integers as strings/bigint across the wire) belongs with that deferred type-threading work, not the 3.3 UI.
 decision: [2026-07-21, user] SAME as DW-35 — exact-string end-to-end for large integers on both the write value and the PK address (WHERE pk = <exact string>), so update/delete can never address the wrong row via a lossy Number.
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-41: Reset `createdTables` on connect/disconnect so optimistically-created tables don't accumulate across reconnects and shadow the re-introspected schema
 
@@ -780,7 +786,8 @@ origin: review-budget-followup
 source_spec: `spec-dw-2-csp-app-shell-hardening.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260722-181413-2b68; this entry preserves the lingering follow-up recommendation for a deliberate later review.
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-deferred-followup-review-dw-2-csp
 
 ### DW-72: The multi-root schema tree can strand permanently on the `loading` phase — no roots, no warning, no Reintentar — when a failed mount read, a "Reintentar", and a Settings mutation with a failing `connections.list` interleave
 origin: adversarial follow-up review of 10-5, 2026-07-23 (commit 4a49b52); escalation E1
@@ -997,4 +1004,14 @@ severity: low
 found_by: Edge Case Hunter review pass on 11-7
 summary: `resolveAppDir(env, platform, home?)` is documented as resolving "the OS-convention app-data directory for `platform`", and its `platform` argument selects the convention (`AppData\Roaming`, `Library/Application Support`, XDG) — but the `join` it builds the path with is the host's, not the platform's. Called with `platform: "win32"` from a POSIX host it returns e.g. `C:\Users\x\AppData\Roaming/quick-studio`, which the host's `isAbsolute` then reports as relative. Story 11.7's `isFirstRunBoot` short-circuits a non-absolute dir to "first run", so a cross-platform caller would always report first-run regardless of what is on disk. The function's `platform` parameter promises a portability it does not deliver.
 evidence: Verified by reading `app-dir.ts` (single `join` import from `node:path`, no `path.win32`/`path.posix` selection) against its own docstring. Pre-existing since Story 2.2 and NOT caused by 11.7 — production is unreachable, because every caller (`first-run-setup.ts:348`, `bin/quick-studio.ts` via `isFirstRunBoot`) passes `process.platform`, so host and argument always agree, and the tests that pass a foreign platform inject stub seams rather than exercising the real resolver. Deliberately not patched in 11.7: hardening only the consumer (`isFirstRunBoot` selecting `path.win32.isAbsolute`/`path.posix.isAbsolute` off its `platform` argument) would imply a cross-platform guarantee the resolver underneath still does not provide, which is worse than the current honest coupling. The coherent fix is to make `app-dir.ts` itself platform-parametric in its separator, or to narrow the docstring to say `platform` selects the convention for the HOST only.
+status: open
+
+### DW-94: The keyless-ordering PK branch fires unconditionally, so a Postgres legacy-inheritance parent WITH a primary key is ordered by that PK — a non-total order across child heaps that reintroduces the exact pagination drift DW-33 set out to remove
+origin: follow-up review of dw-32-33, 2026-07-24
+source_spec: `spec-dw-32-33-browse-pagination-and-keyless-ordering.md`
+location: `src/core/table-rows.ts:305-310` (`orderCols` precedence: `target.primaryKey.length > 0` is checked before the `ctid`/orderable-column branches)
+severity: low
+found_by: Edge Case Hunter follow-up review pass on dw-32-33
+summary: DW-33 hardened the physical-row-locator branch so a legacy inheritance parent (`relkind='r'` + `relhassubclass`) maps to `kind:"other"` and never gets a `ctid` (its `ctid` is non-unique across parent+child heaps). But the precedence ternary checks the primary key FIRST and unconditionally: an inheritance parent that HAS a PK takes `ORDER BY <pk>`. Child tables do not inherit the parent's PK constraint, so `SELECT ... FROM parent` can return duplicate PK values across the parent and every descendant heap — `ORDER BY pk` is therefore not a total order, and paging it can overlap/skip rows exactly like the DW-33 defect, just via the PK path the change left untouched.
+evidence: Verified by reading the precedence at `table-rows.ts:305-310`; the PK branch predates this story (DW-33 rewrote the composition but kept PK first), so this is a pre-existing gap surfaced by the follow-up review, not caused by the change — hence deferred, not patched. Not a trivial patch: `kind:"other"` collapses THREE relation shapes (legacy inheritance parent, declarative partitioned parent, foreign table), and a declarative partitioned parent's PK IS globally total (the partition key is included and enforced), so gating the PK branch on `kind !== "other"` would wrongly drop a valid total order for partitioned tables. A correct fix needs a distinguishing fact (legacy-inheritance-parent vs declarative-partition-parent) that is not currently carried into `SchemaTableInfo` — a contract widening that belongs to a focused pass. Legacy table inheritance is deprecated and rare, so real-world exposure is small.
 status: open
