@@ -2,12 +2,13 @@
 title: 'DW-47/DW-48: Ring-3 sandbox exposure posture — loopback-only bind + recorded exfil residual'
 type: 'bugfix'
 created: '2026-07-27'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
 warnings: [oversized]
 baseline_revision: '40b8d064a37a66f8ebc328798ebd8c1cc3b1ce17'
+final_revision: '2bf780056e63e1bbafd8d639c16684fb0d091861'
 ---
 
 <intent-contract>
