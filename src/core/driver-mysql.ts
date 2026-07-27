@@ -12,11 +12,13 @@
 
 import mysql from "mysql2/promise";
 import type { Connection, ConnectionOptions } from "mysql2/promise";
-import type { DatabaseSchema } from "../shared/contract.ts";
+import type { DatabaseSchema, SchemaRelationKind } from "../shared/contract.ts";
 import {
   DriverConnectionError,
   INTROSPECTION_TIMEOUT_MS,
+  SAFE_FALLBACK_SESSION_MODES,
   assembleSchema,
+  mysqlSessionModes,
   toDriverConnectionError,
   withTimeout,
   type Driver,
@@ -25,15 +27,22 @@ import {
   type IntrospectedForeignKey,
   type IntrospectedIndex,
   type IntrospectedPrimaryKey,
+  type SessionModes,
 } from "./driver.ts";
 
-/** One row of the MySQL `information_schema.columns` introspection query. */
+/**
+ * One row of the MySQL `information_schema.columns` introspection query.
+ * `table_type` is the owning relation's `information_schema.tables.table_type` carried in
+ * by the DW-33 correlated scalar subquery — `null` when no `tables` row matched, which
+ * maps to "kind unknown".
+ */
 type MysqlColumnRow = {
   readonly table_schema: string;
   readonly table_name: string;
   readonly column_name: string;
   readonly data_type: string;
   readonly is_nullable: string;
+  readonly table_type: string | null;
 };
 
 /** One row of the MySQL primary-key introspection query. */
@@ -181,6 +190,28 @@ export function mysqlSchemaScope(
       };
 }
 
+/**
+ * Map a raw `information_schema.tables.table_type` to the neutral
+ * {@link SchemaRelationKind} (DW-33). `BASE TABLE` is the physically stored relation,
+ * `VIEW`/`SYSTEM VIEW` are virtual, and anything else the server may report (a
+ * `TEMPORARY`/`SEQUENCE` row on a MySQL-compatible fork) is `"other"`; NULL/absent yields
+ * `undefined` ⇒ kind unknown. Compared case-insensitively and trimmed because the value
+ * is server-reported text, not an enum we control.
+ *
+ * MySQL has no physical row locator the planner can order by, so this kind never unlocks
+ * a `ctid`-style branch there — it exists so `SchemaTableInfo.kind` is EQUALLY honest on
+ * both engines rather than silently postgres-only (a consumer must never infer "kind
+ * absent ⇒ mysql"). Pure and exported for the same unit-testability reason as
+ * {@link mysqlSchemaScope}.
+ */
+export function mysqlRelationKind(tableType: string | null | undefined): SchemaRelationKind | undefined {
+  if (tableType === null || tableType === undefined) return undefined;
+  const t = tableType.trim().toUpperCase();
+  if (t === "BASE TABLE") return "table";
+  if (t === "VIEW" || t === "SYSTEM VIEW") return "view";
+  return "other";
+}
+
 /** Extract the target database name from the URL path (`/db` → `db`), or `null`. */
 function databaseOf(url: string): string | null {
   try {
@@ -199,6 +230,10 @@ function databaseOf(url: string): string | null {
 export function createMysqlDriver(url: string): Driver {
   const database = databaseOf(url);
   let connection: Connection | null = null;
+  // DW-39: the connection's detected SQL-parsing modes, filled by the best-effort probe in
+  // `connect()`. Initialized to the over-reject-safe fallback so an un-probed connection reads
+  // backslash-literal modes (fail-closed) rather than assuming server defaults.
+  let modes: SessionModes = SAFE_FALLBACK_SESSION_MODES;
   // Serializes `query`/`queryReadOnly` on the single shared connection so the
   // multi-step read-only transaction can never interleave with another query.
   const runExclusive = createMutex();
@@ -213,6 +248,15 @@ export function createMysqlDriver(url: string): Driver {
         connection = await mysql.createConnection(buildMysqlConfig(url));
       } catch (err) {
         throw toDriverConnectionError(err);
+      }
+      // Best-effort SQL-mode detection (DW-39): never fails the connection — a probe error
+      // degrades to the over-reject-safe fallback.
+      try {
+        const [rows] = await connection.query("SELECT @@session.sql_mode AS sql_mode");
+        const raw = (rows as ReadonlyArray<{ readonly sql_mode?: unknown }>)[0]?.sql_mode;
+        modes = mysqlSessionModes(raw);
+      } catch {
+        modes = SAFE_FALLBACK_SESSION_MODES;
       }
     },
 
@@ -232,12 +276,37 @@ export function createMysqlDriver(url: string): Driver {
       // Scope to the pinned schema, else the URL's database, else exclude the server's
       // system schemas — see {@link mysqlSchemaScope}. Parameterized so neither name
       // is ever string-spliced.
+      //
+      // DW-33: the owning relation's `table_type` rides along on the row this query
+      // ALREADY fetches (no extra round-trip and no per-table query — an N+1 would be a
+      // HALT condition).
+      //
+      // It is carried by a CORRELATED SCALAR SUBQUERY in the SELECT list, NOT by a join —
+      // deliberately, because this is the introspection query EVERY connection depends on:
+      // a bug here breaks `connect` outright, not just browse. A scalar subquery is
+      // structurally incapable of changing the column row set: it can neither MULTIPLY nor
+      // DROP a column row, whatever `information_schema.tables` happens to contain or
+      // whichever collation it is matched under. A join's row count, by contrast, is only
+      // as safe as its uniqueness argument — and with `lower_case_table_names=0` one schema
+      // can legitimately hold both `Foo` and `foo`, which the case-INSENSITIVE
+      // `information_schema` collation would have matched BOTH of, duplicating every column
+      // row of that relation. Semantics stay LEFT-JOIN-equivalent: no matching `tables` row
+      // ⇒ the scalar is NULL ⇒ kind unknown, and the columns are still returned.
+      //
+      // `mysqlSchemaScope`'s predicate stays spliced UNQUALIFIED and VERBATIM: with
+      // `information_schema.columns c` the ONLY source in the outer FROM, a bare
+      // `table_schema = ?` resolves unambiguously to `c` — so the derived table that used
+      // to exist purely to dodge that ambiguity is no longer needed.
       const { where, params } = mysqlSchemaScope(schema, database);
       const [rows] = await conn.query(
-        `SELECT table_schema, table_name, column_name, data_type, is_nullable
-         FROM information_schema.columns
+        `SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable,
+                (SELECT t.table_type
+                   FROM information_schema.tables t
+                  WHERE t.table_schema = c.table_schema AND t.table_name = c.table_name
+                  LIMIT 1) AS table_type
+         FROM information_schema.columns c
          WHERE ${where}
-         ORDER BY table_schema, table_name, ordinal_position`,
+         ORDER BY c.table_schema, c.table_name, c.ordinal_position`,
         [...params],
       );
 
@@ -320,14 +389,21 @@ export function createMysqlDriver(url: string): Driver {
         }),
       );
 
+      // DW-33: `relationKind` is spread CONDITIONALLY so an unmatched `tables` row (NULL
+      // `table_type`) leaves the property absent rather than explicitly `undefined` — the
+      // assembler then omits `SchemaTableInfo.kind` and consumers read it as unknown.
       const columns: IntrospectedColumn[] = (rows as unknown as readonly MysqlColumnRow[]).map(
-        (r) => ({
-          schema: r.table_schema,
-          table: r.table_name,
-          column: r.column_name,
-          dataType: r.data_type,
-          nullable: r.is_nullable === "YES",
-        }),
+        (r) => {
+          const relationKind = mysqlRelationKind(r.table_type);
+          return {
+            schema: r.table_schema,
+            table: r.table_name,
+            column: r.column_name,
+            dataType: r.data_type,
+            nullable: r.is_nullable === "YES",
+            ...(relationKind === undefined ? {} : { relationKind }),
+          };
+        },
       );
       return assembleSchema("mysql", columns, indexes, foreignKeys, primaryKeys);
       };
@@ -376,6 +452,8 @@ export function createMysqlDriver(url: string): Driver {
         }
       });
     },
+
+    sessionModes: () => modes,
 
     quoteIdent(ident: string): string {
       // MySQL back-tick-quotes identifiers; an embedded backtick is escaped by doubling.

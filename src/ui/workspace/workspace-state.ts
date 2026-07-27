@@ -217,6 +217,52 @@ export function openOrFocusSettings(state: WorkspaceState): WorkspaceState {
 }
 
 /**
+ * The first-run onboarding routing decision (Story 11.7). `base` is whatever the
+ * caller has already decided the launch state is (a restored snapshot, or
+ * {@link emptyWorkspace} on a fresh launch) — this function does not know or care
+ * which. When `firstRun` is true it routes onto Settings -> connections via
+ * {@link openOrFocusSettings}, which is what makes this safe to call
+ * unconditionally: the singleton guard means a restored state that ALREADY holds
+ * a Settings Tab is focused, never duplicated, and a restored state with other
+ * Tabs open keeps every one of them — onboarding only ever ADDS or FOCUSES the
+ * one system Tab, never drops data. When `firstRun` is false, `base` is returned
+ * BY REFERENCE (not a shallow copy) — callers that diff against object identity
+ * (e.g. an autosave-baseline seed) must see a true no-op, not a same-shaped clone.
+ * Pure — returns a new state (or the same reference) and never mutates `base`.
+ */
+export function initialWorkspace(base: WorkspaceState, firstRun: boolean): WorkspaceState {
+  return firstRun ? openOrFocusSettings(base) : base;
+}
+
+/**
+ * Whether a launch should route onto onboarding (Story 11.7) — the `firstRun`
+ * boot signal AND nothing to restore. Extracted here, rather than written inline
+ * at the one call site in `App.tsx`, because `App.tsx` has no test harness (no
+ * jsdom, by repo convention): an inline predicate could be inverted, or lose the
+ * `firstRun` conjunct, without a single test going red — and the failure mode is
+ * every returning user's `activeTabId` being hijacked on every boot.
+ *
+ * `snapshot` is the reply from `workspace.load`. The absence check is deliberately
+ * LOOSE (`== null`), so a reply that ever carries `undefined` — an optional field,
+ * a normalizer that drops null keys — is read as "nothing to restore" and still
+ * onboards. The strict form would answer `false` there while the caller's own
+ * truthiness check answered "empty workspace", which is exactly the empty-tree
+ * outcome this story exists to eliminate.
+ *
+ * Requiring "nothing to restore" is what keeps the coarse, once-per-PROCESS boot
+ * flag from becoming a nuisance: a snapshot that restored Tabs means the user has
+ * somewhere to be, and a snapshot holding ZERO Tabs means they explicitly closed
+ * everything — including, possibly, a Settings Tab this very routing opened for
+ * them. Re-opening it on the next launch would silently undo that.
+ */
+export function shouldRouteToOnboarding(
+  firstRun: boolean,
+  snapshot: WorkspaceSnapshot | null | undefined,
+): boolean {
+  return firstRun && snapshot == null;
+}
+
+/**
  * Open the create-table tab, or FOCUS it if one is already open (Story 9.4). Create-table
  * is a SINGLETON — you author one new table at a time — so this is the SOLE open seam:
  * if a `create-table` tab exists it delegates to {@link activateTab} (a no-op when it is

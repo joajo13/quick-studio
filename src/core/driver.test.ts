@@ -12,18 +12,28 @@ import postgres from "postgres";
 import mysql2 from "mysql2";
 import type { ConnectionFailureKind } from "../shared/contract.ts";
 import {
+  DEFAULT_SESSION_MODES,
   DriverConnectionError,
+  SAFE_FALLBACK_SESSION_MODES,
   assembleSchema,
   classifyConnectionError,
   createDriver,
+  mysqlSessionModes,
+  postgresSessionModes,
   withTimeout,
   type IntrospectedForeignKey,
   type IntrospectedIndex,
 } from "./driver.ts";
-import { buildMysqlConfig, createMutex, mysqlSchemaScope } from "./driver-mysql.ts";
+import {
+  buildMysqlConfig,
+  createMutex,
+  mysqlRelationKind,
+  mysqlSchemaScope,
+} from "./driver-mysql.ts";
 import {
   mapUnsafeResult,
   pgIndexColumnVisibility,
+  pgRelationKind,
   pgSchemaScope,
   pgSupportsConparentid,
 } from "./driver-postgres.ts";
@@ -228,6 +238,83 @@ describe("assembleSchema", () => {
       { schema: "public", table: "logs", column: "msg", dataType: "text", nullable: true },
     ]);
     expect(schema.tables[0]?.indexes).toEqual([]);
+  });
+});
+
+describe("assembleSchema — relation-kind stamping (DW-33)", () => {
+  test("stamps `kind` from the FIRST column row of each table", () => {
+    const schema = assembleSchema("postgres", [
+      { schema: "public", table: "users", column: "id", dataType: "integer", nullable: false, relationKind: "table" },
+      { schema: "public", table: "users", column: "email", dataType: "text", nullable: true, relationKind: "table" },
+      { schema: "public", table: "user_stats", column: "n", dataType: "bigint", nullable: true, relationKind: "view" },
+    ]);
+    expect(schema.tables.map((t) => t.kind)).toEqual(["table", "view"]);
+  });
+
+  test("first row wins — a later disagreeing row cannot flip the stamped kind", () => {
+    // The kind is a per-table constant, so the fold is order-independent by construction.
+    const schema = assembleSchema("postgres", [
+      { schema: "public", table: "t", column: "a", dataType: "integer", nullable: false, relationKind: "view" },
+      { schema: "public", table: "t", column: "b", dataType: "integer", nullable: false, relationKind: "table" },
+    ]);
+    expect(schema.tables[0]?.kind).toBe("view");
+  });
+
+  test("no `relationKind` supplied ⇒ the `kind` KEY is omitted entirely (unknown)", () => {
+    const schema = assembleSchema("postgres", [
+      { schema: "public", table: "logs", column: "msg", dataType: "text", nullable: true },
+    ]);
+    const table = schema.tables[0];
+    expect(table?.kind).toBeUndefined();
+    // Omitted, not set to `undefined`: the neutral shape stays byte-identical to pre-DW-33.
+    expect(Object.hasOwn(table as object, "kind")).toBe(false);
+  });
+
+  test("carries `other` through untouched (a partitioned parent / foreign table)", () => {
+    const schema = assembleSchema("mysql", [
+      { schema: "app", table: "part", column: "id", dataType: "int", nullable: false, relationKind: "other" },
+    ]);
+    expect(schema.tables[0]?.kind).toBe("other");
+  });
+});
+
+describe("pgRelationKind / mysqlRelationKind (DW-33)", () => {
+  test("postgres: only physically stored relkinds map to `table`", () => {
+    expect(pgRelationKind("r")).toBe("table"); // ordinary table
+    expect(pgRelationKind("m")).toBe("table"); // materialized view — has a real ctid
+    expect(pgRelationKind("v")).toBe("view");
+    // Partitioned parents and foreign tables look table-like but expose NO usable ctid.
+    expect(pgRelationKind("p")).toBe("other");
+    expect(pgRelationKind("f")).toBe("other");
+    expect(pgRelationKind("S")).toBe("other");
+    expect(pgRelationKind(null)).toBeUndefined();
+    expect(pgRelationKind(undefined)).toBeUndefined();
+  });
+
+  test("postgres: an `r` WITH children is a legacy inheritance parent ⇒ `other`, not `table`", () => {
+    // `SELECT … FROM parent` also scans every CHILD heap, and each child numbers its own
+    // tuples — so `ctid` is not unique over the result and `ORDER BY ctid` is not a TOTAL
+    // order (pages could duplicate/skip rows, the very defect DW-33 removes).
+    expect(pgRelationKind("r", true)).toBe("other");
+    // Both other arms of the flag keep the childless verdict: a plain, standalone table.
+    expect(pgRelationKind("r", false)).toBe("table");
+    expect(pgRelationKind("r", null)).toBe("table");
+    expect(pgRelationKind("r", undefined)).toBe("table");
+    // A partitioned parent also carries the flag, and was already `other` on relkind alone.
+    expect(pgRelationKind("p", true)).toBe("other");
+    // The flag never RESCUES a non-storage relkind either.
+    expect(pgRelationKind("v", true)).toBe("view");
+    expect(pgRelationKind(null, true)).toBeUndefined();
+  });
+
+  test("mysql: table_type mapped case-insensitively, unknown ⇒ other, null ⇒ undefined", () => {
+    expect(mysqlRelationKind("BASE TABLE")).toBe("table");
+    expect(mysqlRelationKind("  base table  ")).toBe("table");
+    expect(mysqlRelationKind("VIEW")).toBe("view");
+    expect(mysqlRelationKind("SYSTEM VIEW")).toBe("view");
+    expect(mysqlRelationKind("SEQUENCE")).toBe("other");
+    expect(mysqlRelationKind(null)).toBeUndefined();
+    expect(mysqlRelationKind(undefined)).toBeUndefined();
   });
 });
 
@@ -753,6 +840,97 @@ describe("pgIndexColumnVisibility — index/columns privilege alignment (Story 1
   });
 });
 
+// DW-33 — the COLUMN-INTROSPECTION SQL of both adapters, pinned.
+//
+// This is the query EVERY connection depends on: if it breaks, `connect` fails outright
+// (no schema, no tree, no browse), not merely the browse page that motivated DW-33. It is
+// only reachable through a live server, so — exactly like the 10.3 splice test above — it
+// is asserted against the adapter's own SOURCE TEXT, the one offline way to prove what
+// actually reaches the engine. No live database, no docker, no testcontainers.
+//
+// Three properties, each of which a plausible edit could break silently:
+//  (a) the relation-kind fact is still SELECTED (drop it and `kind` is silently always
+//      unknown — every keyless postgres table quietly loses its `ctid` ordering);
+//  (b) the scope predicate is still spliced VERBATIM and UNQUALIFIED (Story 10.2's pinned
+//      scope is built as a bare `table_schema …`; qualifying or rewording it at the splice
+//      site would change which schemas are introspected);
+//  (c) there is EXACTLY ONE row-producing source at the top level — the columns table.
+//      The relation-kind fact rides in a correlated SCALAR SUBQUERY precisely because a
+//      scalar subquery cannot multiply or drop a column row, whatever the catalog holds
+//      (a name-matching JOIN can: MySQL with `lower_case_table_names=0` may hold `Foo` and
+//      `foo` in one schema, and the case-insensitive `information_schema` collation would
+//      have matched BOTH and duplicated every column row). Re-introducing a join is the
+//      regression this locks out.
+describe("column-introspection SQL — one row source, scalar relation kind (DW-33)", () => {
+  /** The text of the template/string literal that starts at `marker` in `source`. */
+  const literalAfter = (source: string, marker: string): string => {
+    const start = source.indexOf(marker);
+    expect(start).toBeGreaterThan(-1);
+    const open = source.indexOf("`", start);
+    return source.slice(open + 1, source.indexOf("`", open + 1));
+  };
+
+  /**
+   * Every `FROM`/`JOIN` clause of `sql` at paren depth 0 — i.e. the row sources of the
+   * OUTER query. A source nested inside a `( … )` subquery sits at depth >= 1 and is
+   * excluded, which is the whole point: it cannot change the outer row count.
+   */
+  const topLevelRowSources = (sql: string): string[] => {
+    const found: string[] = [];
+    let depth = 0;
+    for (let i = 0; i < sql.length; i++) {
+      const ch = sql[i];
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      else if (depth === 0 && (sql.startsWith("FROM ", i) || sql.startsWith("JOIN ", i))) {
+        const eol = sql.indexOf("\n", i);
+        found.push(sql.slice(i, eol === -1 ? sql.length : eol).trim());
+      }
+    }
+    return found;
+  };
+
+  /** The statement's lines, trimmed — so a clause can be matched EXACTLY, not loosely. */
+  const lines = (sql: string): string[] => sql.split("\n").map((l) => l.trim());
+
+  test("postgres: relkind + relhassubclass as scalar subqueries over one columns source", async () => {
+    const source = await Bun.file(new URL("./driver-postgres.ts", import.meta.url).pathname).text();
+    const sql = literalAfter(source, "const rows = (await sql");
+
+    // (a) both DW-33 catalog facts are selected, each as its own correlated scalar.
+    expect(sql).toContain("(SELECT rel.relkind");
+    expect(sql).toContain(") AS relkind");
+    expect(sql).toContain("(SELECT rel.relhassubclass");
+    expect(sql).toContain(") AS relhassubclass");
+    // Correlated on the OUTER row, so the scalar describes that row's own relation.
+    expect(sql).toContain("WHERE ns.nspname = c.table_schema AND rel.relname = c.table_name");
+
+    // (b) the 10.2 scope predicate, spliced whole and unqualified.
+    expect(lines(sql)).toContain("WHERE ${colScope}");
+
+    // (c) one row source, and it is the columns table.
+    expect(topLevelRowSources(sql)).toEqual(["FROM information_schema.columns c"]);
+  });
+
+  test("mysql: table_type as a scalar subquery over one columns source", async () => {
+    const source = await Bun.file(new URL("./driver-mysql.ts", import.meta.url).pathname).text();
+    const sql = literalAfter(source, "const [rows] = await conn.query(");
+
+    // (a) the DW-33 relation-kind fact, as a correlated scalar.
+    expect(sql).toContain("(SELECT t.table_type");
+    expect(sql).toContain(") AS table_type");
+    expect(sql).toContain("WHERE t.table_schema = c.table_schema AND t.table_name = c.table_name");
+
+    // (b) `mysqlSchemaScope`'s predicate, spliced whole and unqualified — the derived table
+    // that used to exist only to disambiguate it is gone, and must not come back.
+    expect(lines(sql)).toContain("WHERE ${where}");
+    expect(sql).not.toContain("FROM (SELECT");
+
+    // (c) one row source, and it is the columns table.
+    expect(topLevelRowSources(sql)).toEqual(["FROM information_schema.columns c"]);
+  });
+});
+
 // Story 3.1 — mysql read-only-transaction ISOLATION: the driver serializes
 // `query`/`queryReadOnly` behind this mutex so two concurrent `execute` RPCs cannot
 // interleave the START/statement/ROLLBACK sequence on the single shared connection
@@ -946,5 +1124,80 @@ describe("mysql multi-statement backstop (no live DB)", () => {
     expect(
       buildMysqlConfig("mysql://u:p@h/db?multipleStatements=true").multipleStatements,
     ).toBe(false);
+  });
+});
+
+describe("session-mode parsers (DW-39)", () => {
+  // Both constants pin the splitter's expectations; assert their exact shapes so a drift in
+  // either (which would silently change every splitter decision) is caught here.
+  test("DEFAULT_SESSION_MODES is the documented server default (scs on, backslash active, `\"`=string)", () => {
+    expect(DEFAULT_SESSION_MODES).toEqual({
+      standardConformingStrings: true,
+      noBackslashEscapes: false,
+      ansiQuotes: false,
+    });
+  });
+  test("SAFE_FALLBACK_SESSION_MODES is over-reject-safe (backslash literal everywhere)", () => {
+    expect(SAFE_FALLBACK_SESSION_MODES).toEqual({
+      standardConformingStrings: true,
+      noBackslashEscapes: true,
+      ansiQuotes: false,
+    });
+  });
+
+  describe("postgresSessionModes", () => {
+    test("`on` ⇒ scs true (mysql fields defaulted)", () => {
+      expect(postgresSessionModes("on")).toEqual({
+        standardConformingStrings: true,
+        noBackslashEscapes: false,
+        ansiQuotes: false,
+      });
+    });
+    test("`off` ⇒ scs false", () => {
+      expect(postgresSessionModes("off").standardConformingStrings).toBe(false);
+    });
+    test("`OFF` is case-insensitive ⇒ scs false", () => {
+      expect(postgresSessionModes("OFF").standardConformingStrings).toBe(false);
+      expect(postgresSessionModes("  Off  ").standardConformingStrings).toBe(false);
+    });
+    test("boolean false ⇒ scs false", () => {
+      expect(postgresSessionModes(false).standardConformingStrings).toBe(false);
+    });
+    test("undefined / null / garbage ⇒ scs true (over-reject-safe side)", () => {
+      expect(postgresSessionModes(undefined).standardConformingStrings).toBe(true);
+      expect(postgresSessionModes(null).standardConformingStrings).toBe(true);
+      expect(postgresSessionModes("garbage").standardConformingStrings).toBe(true);
+      expect(postgresSessionModes(1).standardConformingStrings).toBe(true);
+    });
+  });
+
+  describe("mysqlSessionModes", () => {
+    test("a default expanded mode string ⇒ nbse/ansi both false", () => {
+      expect(
+        mysqlSessionModes("ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ENGINE_SUBSTITUTION"),
+      ).toEqual({
+        standardConformingStrings: true,
+        noBackslashEscapes: false,
+        ansiQuotes: false,
+      });
+    });
+    test("a string containing NO_BACKSLASH_ESCAPES ⇒ nbse true", () => {
+      expect(mysqlSessionModes("STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES").noBackslashEscapes).toBe(true);
+    });
+    test("a string containing ANSI_QUOTES ⇒ ansi true", () => {
+      expect(mysqlSessionModes("ANSI_QUOTES,STRICT_TRANS_TABLES").ansiQuotes).toBe(true);
+    });
+    test("a composite string with BOTH ⇒ both true (case-insensitive)", () => {
+      expect(mysqlSessionModes("ansi_quotes,no_backslash_escapes")).toEqual({
+        standardConformingStrings: true,
+        noBackslashEscapes: true,
+        ansiQuotes: true,
+      });
+    });
+    test("a non-string (null / number) ⇒ SAFE_FALLBACK (probe-failed posture)", () => {
+      expect(mysqlSessionModes(null)).toEqual(SAFE_FALLBACK_SESSION_MODES);
+      expect(mysqlSessionModes(123)).toEqual(SAFE_FALLBACK_SESSION_MODES);
+      expect(mysqlSessionModes(undefined)).toEqual(SAFE_FALLBACK_SESSION_MODES);
+    });
   });
 });

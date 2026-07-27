@@ -41,6 +41,62 @@ describe("parseCliArgs — mode precedence", () => {
     const cli = parseCliArgs(["--persistent"], { QS_MODE: "ephemeral" });
     expect(cli.mode).toBe("persistent");
   });
+
+  test("a normal run resolves action: \"run\"", () => {
+    const cli = parseCliArgs([], EMPTY_ENV);
+    expect(cli.action).toBe("run");
+  });
+
+  test("--ephemeral alone selects Ephemeral with no databaseUrl", () => {
+    const cli = parseCliArgs(["--ephemeral"], EMPTY_ENV);
+    expect(cli.action).toBe("run");
+    expect(cli.mode).toBe("ephemeral");
+    expect(cli.databaseUrl).toBeNull();
+  });
+
+  test("--ephemeral with a URL carries the URL through (redundant but harmless)", () => {
+    const cli = parseCliArgs(["--ephemeral", "postgres://u:p@host/db"], EMPTY_ENV);
+    expect(cli.mode).toBe("ephemeral");
+    expect(cli.databaseUrl).toBe("postgres://u:p@host/db");
+  });
+
+  test("--ephemeral overrides QS_MODE=persistent (an explicit flag outranks the env default)", () => {
+    const cli = parseCliArgs(["--ephemeral"], { QS_MODE: "persistent" });
+    expect(cli.mode).toBe("ephemeral");
+  });
+});
+
+describe("parseCliArgs — help / version early exits", () => {
+  test("--help resolves action: \"help\"", () => {
+    const cli = parseCliArgs(["--help"], EMPTY_ENV);
+    expect(cli.action).toBe("help");
+  });
+
+  test("-h resolves action: \"help\"", () => {
+    const cli = parseCliArgs(["-h"], EMPTY_ENV);
+    expect(cli.action).toBe("help");
+  });
+
+  test("--version resolves action: \"version\"", () => {
+    const cli = parseCliArgs(["--version"], EMPTY_ENV);
+    expect(cli.action).toBe("version");
+  });
+
+  test("-v resolves action: \"version\"", () => {
+    const cli = parseCliArgs(["-v"], EMPTY_ENV);
+    expect(cli.action).toBe("version");
+  });
+
+  test("--help wins over a URL and --persistent — short-circuits before the contradiction gate", () => {
+    const cli = parseCliArgs(["--help", "postgres://x", "--persistent"], EMPTY_ENV);
+    expect(cli.action).toBe("help");
+  });
+
+  test("--help wins over --version when both are passed", () => {
+    // Documented precedence: help is checked first, so it outranks version.
+    expect(parseCliArgs(["--help", "--version"], EMPTY_ENV).action).toBe("help");
+    expect(parseCliArgs(["--version", "--help"], EMPTY_ENV).action).toBe("help");
+  });
 });
 
 describe("parseCliArgs — rejections (typed CliArgsError, message only)", () => {
@@ -73,6 +129,16 @@ describe("parseCliArgs — rejections (typed CliArgsError, message only)", () =>
       parseCliArgs(["pg://a", "pg://b"], EMPTY_ENV);
     } catch (err) {
       expect((err as CliArgsError).message).toMatch(/too many arguments/i);
+    }
+  });
+
+  test("--ephemeral together with --persistent is contradictory", () => {
+    expect(() => parseCliArgs(["--ephemeral", "--persistent"], EMPTY_ENV)).toThrow(CliArgsError);
+    try {
+      parseCliArgs(["--ephemeral", "--persistent"], EMPTY_ENV);
+    } catch (err) {
+      expect(err).toBeInstanceOf(CliArgsError);
+      expect((err as CliArgsError).message).toMatch(/contradictory/i);
     }
   });
 });

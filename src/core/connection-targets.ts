@@ -30,7 +30,7 @@
 
 import { errorReply, type ConnectResult, type DatabaseSchema, type DbEngine, type RpcReply } from "../shared/contract.ts";
 import type { ConnectionManager } from "./connection.ts";
-import type { DriverQueryResult } from "./driver.ts";
+import type { DriverQueryResult, SessionModes } from "./driver.ts";
 
 /**
  * The side-effecting seams a Core read path is built over, bound to ONE connection (the
@@ -49,6 +49,13 @@ export type ConnectionSeams = {
    * (Opening a cold target still introspects once, as any seam on it would.)
    */
   readonly getEngine: () => Promise<DbEngine>;
+  /**
+   * The target's detected SQL-parsing modes (DW-39) — what the raw splitter needs beyond the
+   * engine. Read off the value captured at the connection's first open and never re-probed:
+   * modes are fixed at connect (no `SET` is issued, no DDL changes them), so this seam
+   * deliberately ignores `invalidateSchema`, exactly like {@link ConnectionSeams.getEngine}.
+   */
+  readonly getSessionModes: () => Promise<SessionModes>;
   readonly getSchema: () => Promise<DatabaseSchema>;
   readonly quoteIdent: (ident: string) => string;
   /**
@@ -120,6 +127,7 @@ function seamsFor(manager: ConnectionManager): ConnectionSeams {
     // fixed by the connection's url scheme. `manager.getEngine()` reads it off the already-
     // populated memo without honoring the stale flag, so only the FIRST open pays.
     getEngine: () => manager.getEngine(),
+    getSessionModes: () => manager.getSessionModes(),
     getSchema: () => manager.getSchema(),
     quoteIdent: (ident) => manager.quoteIdent(ident),
     connect: () => manager.connect(),

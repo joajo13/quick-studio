@@ -28,7 +28,7 @@ import { createExecutor } from "./executor.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 import { createLiveReportRegistry } from "./live-report-registry.ts";
 import { liveReportBundle } from "./live-report-bundle.generated.ts";
-import { resolvePassphraseProvider } from "./passphrase-provider.ts";
+import { resolvePassphraseProvider, type PassphraseProvider } from "./passphrase-provider.ts";
 import { createProviderRegistry } from "./provider-registry.ts";
 import { DEFAULT_RUN_MODE, type RunMode } from "./run-mode.ts";
 import { dispatch, type RpcContext } from "./rpc.ts";
@@ -370,6 +370,26 @@ export type StartCoreOptions = {
    * testability seam, mirroring `createDriver`.
    */
   startSandboxServer?: (options: StartSandboxServerOptions) => SandboxServer;
+  /**
+   * Pre-resolved passphrase provider (Story 11.6). Defaults to
+   * `resolvePassphraseProvider(process.env)` — today's env/fd behavior, byte-for-
+   * byte unchanged. `bin/`'s first-run pre-flight (`first-run-setup.ts`) prompts
+   * interactively BEFORE calling `startCore` and passes a
+   * `staticPassphraseProvider(passphrase)` closure here when it captured an
+   * answer, so the ONE-provider-per-boot invariant below still holds: whichever
+   * instance is resolved — the default or this override — is the single instance
+   * shared by BOTH persistent stores.
+   */
+  passphraseProvider?: PassphraseProvider;
+  /**
+   * First-run boot signal (Story 11.7), pre-computed by `bin/` via
+   * `isFirstRunBoot` BEFORE the Story 11.6 pre-flight can create the app-data
+   * directory (or, on the passphrase-create path, the descriptor and `.enc`).
+   * Purely a UI-routing/messaging hint — it never changes what boots (Persistent
+   * still boots Persistent either way). Defaults to `false`, matching every
+   * existing call site's byte-for-byte behavior.
+   */
+  firstRun?: boolean;
 };
 
 function jsonResponse(body: unknown, status: number): Response {
@@ -421,15 +441,18 @@ function scriptJson(value: unknown): string {
  * Render the served HTML shell with the per-boot token injected. The UI reads
  * `window.__QS_TOKEN__` and sends it on every `/rpc` call, reads
  * `window.__QS_EXPOSURE__` (known at boot, static) to render the Port-Exposure
- * Warning banner, and reads `window.__QS_SANDBOX_ORIGIN__` (Story 5.5) to point the
- * untrusted iframe `src` at the Ring 3 origin. The token is hex-filtered
- * belt-and-suspenders; the sandbox origin is URL-charset-filtered the same way; the
- * exposure payload (arbitrary `host`) leans on `scriptJson`'s `<script>`-safe
- * escaping. Exported for unit-testing the injection without booting a real server.
+ * Warning banner, reads `window.__QS_SANDBOX_ORIGIN__` (Story 5.5) to point the
+ * untrusted iframe `src` at the Ring 3 origin, and reads `window.__QS_FIRST_RUN__`
+ * (Story 11.7) to route the initial Tab onto Settings -> connections instead of an
+ * empty tree. The token is hex-filtered belt-and-suspenders; the sandbox origin is
+ * URL-charset-filtered the same way; the exposure payload (arbitrary `host`) leans
+ * on `scriptJson`'s `<script>`-safe escaping; `firstRun` is a plain boolean with no
+ * untrusted content to escape. Exported for unit-testing the injection without
+ * booting a real server.
  *
  * `nonce` is the per-boot CSP nonce (DW-2) and MUST be the same value
  * `shellCspHeaders` puts in the response header's `script-src 'nonce-…'` source: all
- * three of these scripts are INLINE, so under the strict shell CSP they execute only
+ * four of these scripts are INLINE, so under the strict shell CSP they execute only
  * if they carry it — and without them the UI has no token, no exposure banner, and no
  * sandbox origin, i.e. a blank app. It is validated here by the SAME
  * {@link safeCspNonce} helper the builder calls — one function, one rule, so the two
@@ -448,6 +471,7 @@ export function renderIndexHtml(
   exposure: ExposureInfo,
   sandboxOrigin: string,
   nonce: string,
+  firstRun = false,
 ): string {
   const safeToken = token.replace(/[^0-9a-fA-F]/g, "");
   // The SHARED gate (not a copy of it), on the raw value — the same function, given the
@@ -475,6 +499,7 @@ export function renderIndexHtml(
     <script${nonceAttr}>window.__QS_TOKEN__ = ${scriptJson(safeToken)};</script>
     <script${nonceAttr}>window.__QS_EXPOSURE__ = ${scriptJson(exposure)};</script>
     <script${nonceAttr}>window.__QS_SANDBOX_ORIGIN__ = ${scriptJson(safeSandboxOrigin)};</script>
+    <script${nonceAttr}>window.__QS_FIRST_RUN__ = ${scriptJson(firstRun)};</script>
   </head>
   <body>
     <div id="root"></div>
@@ -525,7 +550,12 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // provider instance would read `""` → decline and starve the second store. A single
   // memoized provider reads the fd at most once and serves the captured passphrase to
   // both the connection and provider-key registries (and to any retry within a store).
-  const passphraseProvider = resolvePassphraseProvider(process.env);
+  //
+  // `options.passphraseProvider` (Story 11.6) is the pre-flight's pre-resolved
+  // closure when `bin/` already prompted interactively before this boot; absent,
+  // this resolves EXACTLY as before. Either way it is still resolved ONCE, here,
+  // and this single instance is what flows into both registries below.
+  const passphraseProvider = options.passphraseProvider ?? resolvePassphraseProvider(process.env);
 
   const connectionRegistry = createConnectionRegistry({
     storeDeps: { mode, passphraseProvider },
@@ -607,6 +637,25 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
    * neutral `bad_request` "no active connection" — NOT the generic `internal_error`. Any
    * OTHER driver/connection throw still propagates → `internal_error` (engine-neutral,
    * credentials never echoed).
+   *
+   * SNAPSHOT CAVEAT (DW-32) — accepted, not a bug to fix here: the COUNT and the page
+   * SELECT below are TWO independent round-trips with NO shared snapshot and NO
+   * enclosing transaction, so a concurrent writer between them makes the reply's `total`
+   * describe a different instant than its rows. Under concurrent writes an OFFSET-based
+   * pager can therefore also DRIFT — an insert/delete before the current offset shifts
+   * every later row, so a row can be seen twice or skipped across two page requests —
+   * and the last page can be reported non-empty yet come back empty. This is deliberately
+   * tolerated: quick-studio is a local, single-user browse tool where a best-effort
+   * snapshot is worth far more than the cost of holding a transaction (or a repeatable-read
+   * snapshot) open across the pager's lifetime. Keyset/seek pagination — the real fix — is
+   * deliberately NOT implemented. Removing the writers does NOT make contiguity universal:
+   * with no writers it is GUARANTEED only on `planTableRows`'s two TOTAL-order branches —
+   * the primary key and the physical row locator (`ctid`, DW-33). The orderable-column
+   * branch is best-effort (an ORDER BY over non-unique columns is not a total order, so
+   * rows sharing the ordered values may come back in a different relative order between two
+   * page requests even with zero writes), and a relation with no PK, no locator and no
+   * orderable column still gets NO ORDER BY at all — the documented DW-33 residual, whose
+   * page order is non-total by construction.
    */
   async function tableRows(params: unknown): Promise<RpcReply<TableRowsResult>> {
     const target = readConnectionId(params, "table.rows");
@@ -987,11 +1036,18 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // Rendered after `server` so the exposure payload can carry the real bound
   // port. Bun only invokes `fetch` once this synchronous setup completes, so
   // the closure's reference is always resolved by request time.
+  // Story 11.7: purely a UI-routing hint, resolved by `bin/` BEFORE this boot ever
+  // starts (see `StartCoreOptions.firstRun`'s doc for why the order is load-bearing).
+  // Defaulted here — not just in the type — so a caller that omits it entirely
+  // (every pre-11.7 call site, including this file's own tests) renders `false`.
+  const firstRun = options.firstRun ?? false;
+
   const indexHtmlTemplate = renderIndexHtml(
     token,
     { exposed, host: bindHost, port: boundPort },
     sandboxOrigin,
     cspNonce,
+    firstRun,
   );
 
   // The shell's strict CSP (DW-2). Built HERE, not at module scope, because it is the

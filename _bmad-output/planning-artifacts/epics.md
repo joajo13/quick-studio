@@ -1253,3 +1253,167 @@ So that restoring my session reopens each tab against the right database.
 **Given** a restored tab whose connection no longer exists (it was removed)
 **When** the session is restored
 **Then** the tab lands in a "conexión no disponible" state with a reassign affordance — it must NEVER crash the workspace restore or tank the other tabs
+
+## Epic 11: One-Command Distribution & First-Run Setup
+
+**Goal.** Make quick-studio installable and runnable by anyone, anywhere, with one command — and make the three launch flows resolve correctly at the CLI level. Today the product is code-complete but **undistributed**: there is no git remote, no tag has ever been pushed, `release.yml` has never run, and `quick-studio` is not on npm (the name is free). Worse, the one channel that *is* wired is a trap — `package.json` points `bin` at `bin/quick-studio.ts` with a `#!/usr/bin/env bun` shebang, so `npm i -g quick-studio` installs cleanly on a machine without Bun and then dies at run time with `env: 'bun': No such file or directory` (Story 1.7's review caught this and "fixed" it by rewording the README). This epic makes npm the primary channel via the platform-package pattern (a Node-compatible shim plus one prebuilt-binary package per platform, resolved by `optionalDependencies`), so `npx quick-studio <db-url>` works with zero Bun, and npm itself supplies the install-if-missing / update / launch behavior that would otherwise need a bespoke bootstrapper.
+
+**The three flows this epic must close (the product-level acceptance):**
+
+1. `quick-studio <db-url>` → Ephemeral. Installs if missing, updates if stale, launches. (Mode selection already works — 11.1–11.5 supply the install/update half.)
+2. `quick-studio` (bare) → detects whether persistent config exists; boots the persistent workspace if it does, and routes to connection onboarding if it does not (11.7).
+3. `quick-studio --persistent` on a first run → runs the setup that is missing today, instead of silently booting a store it may be unable to unlock (11.6).
+
+**Hard invariants — must not break.** Default loopback binding, the per-boot session token, the Origin/Host gates, the RPC contract, and the Port-Exposure Warning stay byte-for-byte unchanged — this epic changes *packaging* and *pre-boot CLI decisions*, never the Core's security surface. The Epic 2 promise that **Ephemeral mode never writes to disk** binds every story here: an update check, a version cache, and a setup wizard are all disk writes, and none of them may happen in Ephemeral mode.
+
+**Platform scope — Windows and Linux are first-class; macOS is a later phase.** The product must be OS-agnostic, and this epic delivers that for **windows-x64, linux-x64, and linux-arm64**. macOS is deliberately deferred to a follow-up phase rather than half-shipped: the `@napi-rs/keyring` spike records darwin as *pending CI, expected GO* and never actually validated it, so shipping a darwin binary today would mean shipping an unvalidated keychain path. Every seam this epic builds — the platform map in the shim, the release matrix, the packaging script — must therefore be **table-driven, so adding darwin later is adding rows, not restructuring**. `docs/keyring-spike-decision.md` currently claims darwin binaries ship; that claim is false and 11.2 corrects it.
+
+**Package naming — decided.** Everything is **unscoped**: the main package is `quick-studio` (so the one-command promise stays `npx quick-studio <db-url>`) and the per-platform binary packages are `quick-studio-<platform>-<arch>` (`quick-studio-win32-x64`, `quick-studio-linux-x64`, `quick-studio-linux-arm64`). The `quick-studio` npm **organization name was unavailable**, and an unscoped layout needs no org at all. Its one weakness — an unscoped prefix reserves no namespace, so a future platform name could be squatted — is mitigated by publishing placeholder packages for the **darwin** names now, ahead of the macOS phase.
+
+**Out of scope:** macOS binaries (a later phase — see the platform-scope note above); code signing and notarization (Windows SmartScreen friction on the *standalone binary* channel is accepted and documented — npm is the recommended path precisely because it sidesteps it); Homebrew/Scoop/winget manifests; true in-place binary self-replacement (11.5 deliberately delegates instead — see its spec); Windows-on-ARM.
+
+**Manual prerequisites (NOT loop-executable — the operator does these once).** Publishing placeholder packages to hold all six names (npm cannot bootstrap a brand-new package via OIDC — the first publish of each is always manual), wiring the git remote, registering a **trusted publisher (OIDC)** for each published package — there is no publish token anywhere, because npm is retiring the 2FA-bypass tokens unattended publishing relied on — and pushing the first `v*` tag. See `epic-11-manual-prereqs.md`. Every story below is scoped to what a loop can actually do: code, workflows, generated manifests, and docs.
+
+### Story 11.1: CLI surface — `--help`, `--version`, and an explicit `--ephemeral`
+
+As a user who just installed quick-studio,
+I want `--help` and `--version` to work,
+So that the tool behaves like a real CLI instead of erroring on the first thing everyone types.
+
+**Acceptance Criteria:**
+
+**Given** a build of quick-studio
+**When** I run `quick-studio --help`
+**Then** I get a usage block on stdout listing the three launch forms, every flag (`--persistent`, `--ephemeral`, `--no-open`, `--help`, `--version`), and the honored environment variables (`QS_HOST`, `QS_PORT`, `QS_MODE`, `QS_NO_OPEN`, `QS_PASSPHRASE`, `QS_PASSPHRASE_FD`), and it exits **0** without booting the Core — today `parseArgs` runs with `strict: true` and knows only `persistent`/`no-open`, so `--help` is rejected as an unknown option and exits 1
+
+**Given** any distribution channel (compiled binary, npm platform package, or `bun run`)
+**When** I run `quick-studio --version`
+**Then** it prints the version and exits 0, reading it from a build-time **generated module** (mirroring the `ui-bundle.generated.ts` precedent) — never by reading `package.json` at run time, which does not exist inside a compiled binary
+
+**Given** the existing mode-selection rules
+**When** I pass `--ephemeral` with no database URL
+**Then** Ephemeral mode is selected explicitly (today it can only be reached by passing a URL positional or setting `QS_MODE=ephemeral`), and `--ephemeral` combined with `--persistent` is refused as contradictory, exactly like the existing URL-plus-`--persistent` refusal
+
+### Story 11.2: Release matrix on native runners, with checksums and a keyring gate
+
+As a Windows or Linux user on whatever machine I happen to have,
+I want a binary for my platform that actually works,
+So that "download and run" is not an x64-only promise — and so that adding macOS later is a change of data, not of design.
+
+**Acceptance Criteria:**
+
+**Given** a pushed `v*` tag
+**When** `release.yml` runs
+**Then** it produces binaries for **windows-x64, linux-x64, and linux-arm64** — each compiled **on its own native runner**, not cross-compiled, because `@napi-rs/keyring` is a native NAPI addon whose platform binding is resolved at build time and cannot be assumed to embed correctly across targets
+
+**Given** the matrix definition
+**When** macOS is added in a later phase
+**Then** it is adding entries to a table, not restructuring the workflow — the matrix, the shim's platform map (11.3), and the packaging script (11.4) are all driven from one platform list, and no darwin binary is published until its keyring leg has actually gone green
+
+**Given** each matrix leg
+**When** the binary is compiled
+**Then** the leg runs `scripts/keyring-native-check.ts` against the *compiled binary* (the check that already exists from the Story 2.1 spike) as a gate — a leg whose native addon fails to load from the binary fails the release rather than shipping a binary that cannot reach the OS keychain
+
+**Given** a completed release
+**When** I look at the release assets
+**Then** a `SHA256SUMS` file covering every binary is attached, so an install path can verify what it downloaded — and `docs/keyring-spike-decision.md` is updated to reflect the platforms actually shipped (it currently claims darwin binaries ship, which is false)
+
+### Story 11.3: Node-compatible launcher shim
+
+As a user with Node but not Bun,
+I want `npx quick-studio` to run,
+So that the npm channel is not a trap that installs fine and crashes on launch.
+
+**Acceptance Criteria:**
+
+**Given** a machine with Node >= 18 and **no Bun installed**
+**When** the published `quick-studio` package's `bin` entry runs
+**Then** it is a dependency-free CommonJS shim with a `#!/usr/bin/env node` shebang that resolves the prebuilt binary from the platform package matching the current `process.platform`/`process.arch`, spawns it with the arguments verbatim and `stdio: "inherit"`, and exits with the child's exit code — the current `bin/quick-studio.ts` Bun entry stays exactly as it is for development
+
+**Given** a signal sent to the shim (`SIGINT` from Ctrl-C, `SIGTERM`)
+**When** it is received
+**Then** it is forwarded to the child so the Core's existing clean-shutdown path runs unchanged, and the shim never exits before the child does — Ctrl-C must end the session as cleanly through the shim as it does today
+
+**Given** a platform with no published binary package (or a corrupted install where the optional dependency was skipped)
+**When** the shim cannot resolve a binary
+**Then** it fails with an actionable message naming the detected platform/arch, the supported list, and the fallback (download from Releases) — never a raw `MODULE_NOT_FOUND` stack
+
+### Story 11.4: Platform packages and an end-to-end publish workflow
+
+As a user,
+I want `npx quick-studio postgres://...` to just work,
+So that install, update, and launch collapse into the single command I already typed.
+
+**Acceptance Criteria:**
+
+**Given** the release binaries from 11.2
+**When** the packaging script runs
+**Then** it emits one npm package per platform, each containing only that platform's binary plus a generated manifest carrying the correct `os` and `cpu` fields (so npm installs exactly one of them), and a **generated manifest for the main package** that ships only the shim and declares the platform packages as `optionalDependencies` pinned to the exact same version
+
+**Given** the main package's generated manifest
+**When** it is published
+**Then** it carries **no runtime `dependencies`** and none of the repo's build scripts — publishing the repo's `package.json` verbatim would drag react, tailwind, mysql2, and the AI SDKs into a global install that the self-contained binary does not need, and would ship a `prepare` hook that assumes a Bun toolchain
+
+**Given** a pushed `v*` tag with `NPM_TOKEN` present in repository secrets
+**When** the publish workflow runs
+**Then** it publishes **every platform package before the main package** (the reverse order leaves the main package briefly uninstallable, because its optional dependencies would not yet resolve), every package carries the tag's version, and a failed leg does not leave a half-published version tagged `latest`
+
+### Story 11.5: Update availability check and the `update` command
+
+As a user running an installed copy,
+I want to know when a newer version exists,
+So that I am not silently stuck on an old build — without the tool ever updating itself behind my back.
+
+**Acceptance Criteria:**
+
+**Given** a Persistent-mode boot and a cache older than the TTL (24h)
+**When** the Core starts
+**Then** the version check runs **non-blockingly** against the npm registry with a short timeout, caches `{ checkedAt, latest }` under the app-data directory, and — if a newer version exists — prints a single terse stderr line naming the new version and the command to get it. Boot is never gated on the network, and an offline machine, a DNS failure, or a registry 5xx is a **silent no-op**, never a warning and never a non-zero exit
+
+**Given** an **Ephemeral-mode** boot
+**When** the Core starts
+**Then** no cache file is read or written — the Epic 2 invariant that Ephemeral mode never touches disk outranks the update check. A `QS_NO_UPDATE_CHECK` environment variable disables the check entirely in every mode
+
+**Given** `quick-studio update`
+**When** it runs
+**Then** it detects how this copy was installed and acts accordingly: an npm-installed copy is given the exact `npm i -g quick-studio@latest` command, and a standalone binary is given its platform's download URL and checksum. It **never** performs an in-place self-replacement of the running executable — that path is deliberately deferred, not silently attempted
+
+### Story 11.6: First-run setup for Persistent mode
+
+As a user on a machine with no OS keychain,
+I want quick-studio to walk me through setting a passphrase on first run,
+So that Persistent mode is usable without me discovering an environment variable in the README.
+
+**Acceptance Criteria:**
+
+**Given** Persistent mode and a reachable OS keychain
+**When** the app starts for the first time
+**Then** nothing is asked — the keychain path is silent and unchanged from today
+
+**Given** Persistent mode, an **unavailable** keychain, no `QS_PASSPHRASE`/`QS_PASSPHRASE_FD`, and an interactive terminal
+**When** the app starts
+**Then** it explains why it needs a passphrase and prompts for one **with echo disabled**, requiring confirmation when creating a new store and offering a bounded number of retries when unlocking an existing one. The passphrase is never echoed, never logged, never written to disk, and never placed into the process environment — today there is no interactive path at all, so this exact situation silently yields a store the user cannot unlock
+
+**Given** the same situation but a **non-interactive** stdin (CI, a pipe, a service manager)
+**When** the app starts
+**Then** it does not hang waiting on a prompt — it fails fast with the existing typed "no passphrase provided" outcome plus a pointer to `QS_PASSPHRASE_FD`, and a `Ctrl-C` during any prompt restores terminal echo before exiting
+
+### Story 11.7: Bare-command routing — boot or onboard
+
+As a user typing just `quick-studio`,
+I want it to do the obviously right thing,
+So that a first run does not drop me into an empty workspace with no idea what to do.
+
+**Acceptance Criteria:**
+
+**Given** a bare `quick-studio` invocation and existing persistent config
+**When** the Core starts
+**Then** it boots the persistent workspace exactly as today — no new prompt, no new delay
+
+**Given** a bare `quick-studio` invocation and **no** persistent config
+**When** the Core starts
+**Then** it still boots Persistent mode, prints a terse stderr hint naming both ways forward (add a connection in the UI, or pass a database URL for an Ephemeral session), and the UI opens on connection onboarding rather than an empty tree. The URL is asked for **in the UI**, which already owns the connection form (Story 2.4) — it is not re-implemented as a terminal prompt
+
+**Given** the config-presence check
+**When** it runs
+**Then** it is a **presence check only** — it must not attempt to decrypt the store, because decryption may require the very passphrase prompt that 11.6 gates behind knowing whether a store exists. An existing store holding zero connections is the UI's empty state to handle, not the CLI's

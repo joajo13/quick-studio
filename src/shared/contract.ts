@@ -319,6 +319,23 @@ export type SchemaForeignKeyInfo = {
 };
 
 /**
+ * What KIND of relation a {@link SchemaTableInfo} describes — a neutral STRUCTURAL
+ * fact, not an ordering/UI hint (DW-33):
+ *  - `table` — a physically stored, directly scannable relation (Postgres `relkind`
+ *    `r`/`m`, MySQL `BASE TABLE`). Only such a relation is guaranteed to expose the
+ *    engine's physical row locator.
+ *  - `view` — a virtual relation computed on read (Postgres `v`, MySQL `VIEW`/
+ *    `SYSTEM VIEW`). Introspected and browsable like a table, but has no storage.
+ *  - `other` — anything else the engine reports (a Postgres partitioned parent `p` or
+ *    foreign table `f`, a MySQL non-standard `table_type`): browsable, but NOT known
+ *    to be physically stored.
+ * Deliberately absent from this union is "unknown": the field itself is OPTIONAL, so a
+ * schema assembled without relation metadata simply omits it and every consumer must
+ * treat the absent case as unknown (the conservative arm).
+ */
+export type SchemaRelationKind = "table" | "view" | "other";
+
+/**
  * One table (or view) of the introspected schema. `schema` is the owning
  * namespace/database as the engine reports it; `name` and `columns` mirror the
  * live database verbatim, ordered as introspected (schema/table/ordinal).
@@ -330,6 +347,14 @@ export type SchemaForeignKeyInfo = {
  * table's outbound foreign keys (Story 4.1) — the ERD's edge source (empty when the
  * table has none). All three are introspected eagerly at connect time and folded in
  * the assembler.
+ *
+ * `kind` (DW-33) is the OPTIONAL structural {@link SchemaRelationKind}. It is absent
+ * whenever the schema was assembled without relation metadata (a pre-DW-33 fixture, a
+ * hand-built test schema, an engine row whose catalog join found nothing), and absent
+ * MUST be read as "unknown", never as "table" — the browse planner's physical-row-locator
+ * branch keys on it, and a wrong "table" on a view would compose an `ORDER BY ctid` the
+ * engine rejects. It states a neutral fact about the relation only; no ordering semantics
+ * leak into the wire contract.
  */
 export type SchemaTableInfo = {
   readonly schema: string;
@@ -338,6 +363,7 @@ export type SchemaTableInfo = {
   readonly primaryKey: ReadonlyArray<string>;
   readonly indexes: ReadonlyArray<SchemaIndexInfo>;
   readonly foreignKeys: ReadonlyArray<SchemaForeignKeyInfo>;
+  readonly kind?: SchemaRelationKind;
 };
 
 /**

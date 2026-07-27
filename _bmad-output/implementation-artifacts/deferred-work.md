@@ -244,7 +244,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `naturalKind` (`frozen-map.ts`); `DataGrid.tsx`
 reason: postgres.js returns `numeric`/`decimal`/`int8` and mysql2 returns `DECIMAL`/`BIGINT` as JS strings (and `bigint` is deliberately forced to string for precision), so `naturalKind` in `frozen-map.ts` classifies them `string`; `DataGrid.tsx` then labels them `TEXT`, left-aligns, and drops `tabular-nums`. Values are correct — only the header type/alignment is wrong. The spec deliberately colors by neutral kind (and already defers `t-json` for the same reason); fixing both needs the SQL `dataType` carried alongside the result columns, a contract/plumbing decision beyond this story.
 decision: [2026-07-21, user] Plumb each column's SQL dataType into the result contract and classify numeric/decimal/bigint -> number (right-align + number color), decoupled from the FrozenCell kind. (This resolves the previously-stuck "datatype-result-contract".)
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-31: Report a composite `SchemaTableInfo.primaryKey` in the key's own ordinal order (`ORDER BY ordinal_position` in both PK introspection queries) rather than in table-column order
 
@@ -260,7 +261,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `tableRows` (`server.ts`)
 reason: `server.ts` `tableRows` issues `connectionManager.query(countSql)` then `query(selectSql)` with no shared snapshot/transaction; a concurrent insert/delete between them (or before the offset) makes `total` inconsistent with the returned page and shifts OFFSET-based pages. This is inherent to OFFSET pagination rather than a defect in the composition, and this is a read-only browse of a live DB (staleness is expected), so it is a known-limitation note rather than a Story 3.2 bug; keyset (seek) pagination on the PK is the durable fix if it becomes user-visible.
 decision: [2026-07-21, user] Accept for now — DOCUMENT that total/page are a best-effort snapshot (local single-user browse tool); revisit with keyset pagination only if it bites. (No code fix beyond documentation.)
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-browse-pagination-and-keyless-ordering
 
 ### DW-33: Make the keyless-table (no-PK) browse ordering robust — the static `UNORDERABLE_TYPE_PREFIXES` heuristic in `table-rows.ts` can both silently omit `ORDER BY` (rows overlap/skip across pages) and emit an `ORDER BY` the engine rejects (hard `internal_error`, blank grid), depending on the table's column types
 
@@ -268,7 +270,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `isOrderable` / `UNORDERABLE_TYPE_PREFIXES` (`src/core/table-rows.ts`)
 reason: `isOrderable` classifies orderability by a hardcoded type-prefix denylist. For a PK-less table it either (a) filters out every column and omits `ORDER BY` entirely — so two separate page requests can return rows in different physical orders (overlap/skip, silent corrupt paging even with no concurrent writes) — or (b) passes a column that *looks* orderable but has no default ordering operator (Postgres `USER-DEFINED`/composite/`record`/`tsvector`/`pg_lsn`, `ARRAY`, or MySQL variants the prefix list misses such as `mediumblob`), so the composed `ORDER BY` throws at the DB and the whole page collapses to `internal_error` instead of degrading. Only affects keyless tables with exotic column types (PK tables order by the PK and are unaffected); the robust fix is a design decision — engine-aware orderability (which would leak ordering semantics into the driver seam), catch-and-degrade, or keyset pagination — not a mechanical widening of the prefix list. Distinct from the non-atomic COUNT/SELECT drift entry (that is concurrent-write staleness; this is a non-total page order / hard failure under zero writes).
 decision: [2026-07-21, user] Use a physical row locator when the engine has one (Postgres `ctid`) for keyless-table ordering; otherwise order by the full set of orderable columns, and NEVER emit an ORDER BY the engine will reject (pre-validate by column type).
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-browse-pagination-and-keyless-ordering
 
 ### DW-34: Decide how a `timestamp without time zone` value should be represented in the neutral FrozenCell model — `rowsToFrozenData` stamps a UTC `Z` ISO string on every JS `Date`, so a tz-less wall-clock timestamp is displayed as though it were UTC
 
@@ -276,7 +279,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `rowsToFrozenData` / `toIsoUtc` (`frozen-map.ts`)
 reason: `frozen-map.ts` routes any `Date` through `toIsoUtc`, which serializes with a `Z`/UTC suffix. A Postgres `timestamp without time zone` (and MySQL `DATETIME`) carries no timezone, but postgres.js/mysql2 hand it back as a JS `Date`; tagging it UTC asserts a timezone the column does not have, shifting displayed times for any non-UTC-intending data. Genuine `timestamptz` round-trips correctly; the gap is representational and only visible for naive-timestamp columns. Correcting it needs a contract decision (carry a naive-vs-aware distinction, or the SQL `dataType`) rather than a one-line mapper tweak — adjacent to the deferred SQL-`dataType`-aware typing item.
 decision: [2026-07-21, user] Represent a `timestamp without time zone` as its literal wall-clock value (no `Z`, no UTC shift) — distinct from tz-aware timestamps.
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-35: Preserve MySQL `BIGINT` precision in the browse read path — the mysql2 connection uses default numeric handling, so a `BIGINT` above 2^53 comes back as a precision-lossy JS number and is displayed rounded
 
@@ -284,7 +288,8 @@ origin: migrated from legacy ledger (code review of spec-3-2-browse-rows-paginat
 location: `driver-mysql.ts`; `naturalKind` (`frozen-map.ts`)
 reason: `driver-mysql.ts` opens the connection without `supportBigNumbers`/`bigNumberStrings`, so mysql2 decodes `BIGINT` columns to JS `number`; `frozen-map.ts` `naturalKind` then classifies the finite number as `"number"` and emits it verbatim, so a value like `9007199254740993` renders as `…992`. The mapper's bigint→string safety net only fires when the driver returns an actual `bigint`, which this config never produces for `BIGINT`. Rare (values beyond 2^53) and a driver-config/typing decision (enable big-number strings, or carry the SQL `dataType`) rather than a browse-composition bug; postgres.js already returns `int8` as a string and is unaffected.
 decision: [2026-07-21, user] Carry large integers (bigint/int8/numeric above 2^53) as exact STRINGS end-to-end — read AND write AND PK addressing — so nothing is silently truncated. (Shared resolution with DW-40.)
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-36: Bound the FETCH (not just the display slice) for auto-classified raw reads — push a `LIMIT MAX_RESULT_ROWS + 1` or use a server cursor so a `SELECT * FROM huge_table` cannot materialize the whole result set into Core memory before the 1000-row cap applies
 
@@ -316,7 +321,8 @@ origin: migrated from legacy ledger (code review of spec-3-1-guarded-core-execut
 location: `executor.ts` (raw-SQL splitter)
 reason: Reviewer severity: low. `executor.ts` splitter activates backslash-escaping only for mysql strings and postgres `E'…'` strings. Under postgres `standard_conforming_strings=off`, plain `'…'` strings become backslash-active → splitter over-counts (valid statement falsely rejected — fail-safe). Under MySQL `NO_BACKSLASH_ESCAPES`, `'\''` is `\` + close-quote → splitter could under-count, but this is backstopped by the now-unconditional `multipleStatements:false`. All divergences are either over-reject (safe) or backstopped, and require a non-default server session config; the durable options are to read the session settings or document the assumption. No live exploit at default configs.
 decision: [2026-07-21, user] Detect the session's actual SQL modes and adapt the raw-SQL splitter's string/identifier parsing accordingly (the most-correct option; over document-and-force).
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-sql-mode-aware-statement-splitter
 
 ### DW-40: Bind bigint/int8/numeric columns without JS `Number` precision loss on both the write value and the PK address — a value beyond `Number.MAX_SAFE_INTEGER` is silently truncated on edit/insert, and a lossy PK read makes `WHERE pk = <lossy>` address the wrong row (or none) on update/delete
 
@@ -324,7 +330,8 @@ origin: migrated from legacy ledger (code review of spec-3-3-edit-insert-delete-
 location: `coerceValue` / `pkForRow` / `cellToValue` (`row-mutations.ts`)
 reason: Reviewer severity: high (two independent review passes flagged it as the highest-consequence item in the diff). `row-mutations.ts` `coerceValue("number")` uses `Number(raw)` and `pkForRow`/`cellToValue` read the PK from `FrozenCell` as a JS `number` (`cell.value`). The precision loss originates upstream in Story 3.2's `FrozenCell` number representation (bigint already arrives as a lossy JS number from the browse read); Story 3.3 is the first to WRITE with it, exposing a silent wrong-value / wrong-row data-corruption path with no error surfaced. Story 3.3 explicitly scopes DB-type-aware editors via `SchemaColumnInfo` out (deferred) and documents the kind-inference limitation, so the durable fix (thread column types + carry wide integers as strings/bigint across the wire) belongs with that deferred type-threading work, not the 3.3 UI.
 decision: [2026-07-21, user] SAME as DW-35 — exact-string end-to-end for large integers on both the write value and the PK address (WHERE pk = <exact string>), so update/delete can never address the wrong row via a lossy Number.
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-result-datatype-and-exact-integers
 
 ### DW-41: Reset `createdTables` on connect/disconnect so optimistically-created tables don't accumulate across reconnects and shadow the re-introspected schema
 
@@ -780,7 +787,8 @@ origin: review-budget-followup
 source_spec: `spec-dw-2-csp-app-shell-hardening.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260722-181413-2b68; this entry preserves the lingering follow-up recommendation for a deliberate later review.
-status: open
+status: done 2026-07-24
+resolution: resolved by sweep bundle dw-deferred-followup-review-dw-2-csp
 
 ### DW-72: The multi-root schema tree can strand permanently on the `loading` phase — no roots, no warning, no Reintentar — when a failed mount read, a "Reintentar", and a Settings mutation with a failing `connections.list` interleave
 origin: adversarial follow-up review of 10-5, 2026-07-23 (commit 4a49b52); escalation E1
@@ -807,4 +815,204 @@ location: `src/ui/workspace/DataGrid.tsx` (in-grid insert draft) vs the result-b
 severity: low
 found_by: jd-105 follow-up review (pre-existing 7.2/3.3 disagreement, surfaced during the 10-5 pass)
 reason: The result-bar Add-Row button is gated on `canMutate` while its in-grid `+ insert row` twin is not, so a PK-less table still exposes the inline insert. Hiding the in-grid draft would remove insert for PK-less tables, which DataGrid documents as deliberate — so reconciling the two is a PRODUCT decision (which affordance is authoritative), not a review's to make. The insert itself is SAFE post-fix-1: it commits through `connectionScope`, landing in the tab's own database. Not a correctness defect; recorded for a product call.
+status: open
+
+### DW-75: The npm publish allowlist (`files: ["src"]`) ships `*.test.ts` and the multi-MB generated bundles, and the generated modules live only in `.gitignore` (no `.npmignore`) — so an `npm publish` (which honors `.gitignore` as `.npmignore`) could exclude `version.generated.ts` and the UI bundles and ship a broken package
+origin: adversarial review of 11-1, 2026-07-23
+source_spec: `spec-11-1-cli-surface-help-version.md`
+location: `package.json` (`files`), `.gitignore` (the five `src/core/*.generated.ts` entries)
+severity: low
+found_by: Blind Hunter review pass on 11-1
+summary: The main package's file allowlist is coarse (`src` pulls in every co-located test and the ~3.5MB generated bundles) and the generated modules are only in `.gitignore` with no `.npmignore`, creating a packer-dependent hazard — `bun pm pack` includes the generated files, but `npm publish` treats `.gitignore` as `.npmignore` and would exclude them, publishing a package that crashes at launch.
+evidence: `bun pm pack` produced 185 files / 6.76MB including all `*.test.ts` and the generated bundles. Pre-existing before this story (the four other generated bundles already share this exact `.gitignore`-only situation); this story only added `version.generated.ts` following the established pattern. Publish/packaging is owned by Story 11.4, which generates a purpose-built manifest — this is the natural place to add an `npm pack --dry-run` assertion in CI and a tightened allowlist. Not this story's problem to fix.
+status: open
+
+### DW-76: The release workflow pins no Bun toolchain version (`oven-sh/setup-bun@v2` with no `bun-version`), so every release binary is built with whatever Bun is "latest" that day — release builds are non-reproducible and a single bad Bun release can break `bun build --compile` on all legs at once with no toolchain rollback independent of the tag
+origin: follow-up review of 11-2, 2026-07-23
+source_spec: `spec-11-2-release-matrix-native.md`
+location: `.github/workflows/release.yml` (`Set up Bun` step in the `build` job)
+severity: medium
+found_by: Blind Hunter review pass on 11-2
+summary: `oven-sh/setup-bun@v2` is used with no `bun-version` input, so the release matrix compiles every published binary with the day's latest Bun; the toolchain that produces the shipped artifacts is unpinned, making releases non-reproducible and exposing all legs simultaneously to a single regressive Bun release with no way to roll the toolchain back independently of the git tag.
+evidence: Pre-existing — the `setup-bun@v2` step predates this story and was unchanged by it (this story rebuilt the matrix around it, not the toolchain setup). Distinct from the already-deferred SHA-pinning of third-party actions: that hardens action *identity*, this pins the *build toolchain version*. Natural fix is to add `with: bun-version: <pinned>` (matching the `>=1.2.0` floor recorded in the keyring spike doc / README) across the workflow, ideally as part of the same supply-chain-hardening pass that SHA-pins the actions. Not this story's problem to fix.
+status: open
+
+### DW-77: The npm launcher shim resolves the per-platform binary via `require.resolve(`<pkg>/package.json`)` + a fixed `<pkgroot>/quick-studio[.exe]` path, so Story 11.4's generated platform-package manifests must carry no restrictive `exports` field (or must export `./package.json`) and must set the binary's executable bit — otherwise resolution throws `ERR_PACKAGE_PATH_NOT_EXPORTED`/`EACCES` on installs where the package is actually present, and the shim misreports "not installed"
+origin: review pass of 11-3, 2026-07-23
+source_spec: `spec-11-3-node-launcher-shim.md`
+location: `bin/quick-studio.cjs` (resolution + `child.on("error")`); consumed by Story 11.4's manifest generator + packaging script
+severity: low
+found_by: Blind Hunter review pass on 11-3
+summary: The shim's binary resolution is a load-bearing cross-story contract on 11.4's packaging: platform manifests must omit a restrictive `exports` (or explicitly export `./package.json`), place the binary at `<pkgroot>/quick-studio[.exe]`, and set its exec bit; violating any of these makes an installed package fail resolution and surface the misleading "platform package was not installed" message.
+evidence: `require.resolve("<pkg>/package.json")` throws `ERR_PACKAGE_PATH_NOT_EXPORTED` for a package whose `exports` map omits `./package.json` (Node strict exports enforcement), and a binary not at the joined path or lacking the exec bit yields `ENOENT`/`EACCES` at spawn. 11.4 generates minimal manifests (no `dependencies`, no scripts), so a restrictive `exports` is unlikely — but nothing enforces it and the failure mode is a package that "works on the author's machine only." Natural fix in 11.4: assert the generated manifest has no `exports` (or exports `./package.json`), place the binary at the pinned path, `chmod +x`, and add an install-and-launch smoke check. Not this story's problem to fix (the shim code is correct given a sane manifest); the Design Notes over-claim of "immune to exports" was corrected in this pass.
+status: open
+
+### DW-78: `publish.yml` uses `oven-sh/setup-bun@v2` (a mutable tag) in a job that holds `id-token: write` — the OIDC publish credential is exposable to an unpinned third-party action, undercutting the workflow's whole "no long-lived token" security story
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`Set up Bun` step; job-scoped `permissions: id-token: write`)
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: The publish job grants `id-token: write` (to mint short-lived npm publish creds via Trusted Publishing) at job scope, so every step — including `oven-sh/setup-bun@v2`, pinned to a mutable tag rather than a commit SHA — runs with access to that token. A repointed tag on a third-party action could exfiltrate the credential. This extends the already-tracked "SHA-pin third-party actions" concern (referenced by DW-76) specifically to the new, more-sensitive publish workflow.
+evidence: GitHub Actions `permissions` are job-scoped (cannot be narrowed to a single step), and `actions/checkout@v4` / `actions/setup-node@v4` / `oven-sh/setup-bun@v2` are all tag-pinned per this repo's existing convention. Fixing only `publish.yml` to SHA-pin would diverge from that repo-wide convention, so this belongs to the same supply-chain-hardening pass that SHA-pins actions across all workflows (DW-76's referenced item). Not this story's problem to fix unilaterally; the OIDC-only design is otherwise sound.
+status: open
+
+### DW-79: `publish.yml` downloads the release binaries and wraps them with no integrity check against Story 11.2's `SHA256SUMS` — a tampered or corrupted asset (beyond the zero-byte case the packaging script now rejects) would be published verbatim
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`Download release binaries` step); `scripts/build-npm-packages.ts` (asset validation)
+severity: medium
+found_by: Blind Hunter review pass on 11-4
+summary: The publish workflow trusts whatever `gh release download` returns; the packaging script now rejects a missing/empty/non-file asset, but nothing verifies a checksum. A substituted or partially-corrupted binary that is non-empty would package and publish. The natural gate is comparing each asset against the `SHA256SUMS` file Story 11.2's release matrix emits.
+evidence: The epic context and 11.2's spec establish that every release attaches a `SHA256SUMS` file; this story's publish workflow does not consume it. Depends on 11.2 actually emitting `SHA256SUMS` (the current pre-11.2 `release.yml` does not), so wiring the check belongs with/after 11.2. Add a `sha256sum -c` step against the downloaded `SHA256SUMS` before running the packaging script. Not fixable in this story until 11.2 lands the checksum file.
+status: open
+
+### DW-80: nothing verifies the downloaded binary's build-time embedded `--version` equals the git tag / published package version — a tag/binary mismatch ships a `quick-studio@X` package wrapping a binary that reports `Y`
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`VERSION="${TAG#v}"`); the binary embeds `VERSION` via `scripts/build-version.ts` at release-build time
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: The published npm version derives purely from the git tag, while the binaries were compiled by a separate `release.yml` run off `package.json`'s version. If the operator tags `v1.2.3` without bumping `package.json` to `1.2.3` first, the package claims `1.2.3` around a binary whose `--version` prints `1.2.2`, with no failure anywhere. Consequence is a cosmetic/support mismatch (`--version` disagrees with the installed package), not a launch break.
+evidence: `build-version.ts` bakes `package.json`'s version into `version.generated.ts` at compile time; the tag drives the npm version independently. A cheap guard: after download, run one binary with `--version` in CI and assert it equals `VERSION`, failing the publish on mismatch. Out of this story's contract scope (which is packaging/publish mechanics, not release-versioning discipline); recorded for a later hardening pass.
+status: open
+
+### DW-81: the generated public packages declare no `license` field and copy no `LICENSE` file, so `npm publish` warns "No license field" and consumers/scanners see the packages as unlicensed (all-rights-reserved by default)
+origin: adversarial review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `scripts/build-npm-packages.ts` (`platformManifest`, `mainManifest`)
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: Neither generated manifest sets `license` (nor `repository`/`author`/`homepage`), and no `LICENSE` file is included. For a package published to the public npm registry this is a real distribution/legal gap — the default is all-rights-reserved. It was NOT auto-patched because the repo itself declares no license and has no `LICENSE` file, so choosing one (MIT? Apache-2.0? proprietary?) is an owner decision the loop must not fabricate.
+evidence: `grep '"license"' package.json` → none; `ls LICENSE*` → none. The published packages inherit that unlicensed state consistently, but a public npm package should carry an explicit license. Fix once the owner decides: add a `LICENSE` file to the repo + a `license` field to `package.json`, then have the generator copy the LICENSE into the main package's `files` and set `license` on every generated manifest. Owner/product decision, not a loop-safe patch.
+status: open
+
+### DW-82: A GitHub prerelease later promoted to a full release never reaches the `latest` npm dist-tag — `publish.yml` triggers only on `release: published` (promotion fires `released`, not `published`), and even a manual re-run's idempotency skip ignores dist-tags, so a version stays stuck on `next` while `npm i quick-studio` keeps serving the older `latest`
+origin: follow-up review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`on.release.types: [published]`; the `publish_one` idempotency skip)
+severity: low
+found_by: Blind Hunter review pass on 11-4
+summary: The prerelease→`--tag next` routing (added in the prior 11-4 review pass) has no promotion path. Shipping `v1.2.3` as a GitHub prerelease publishes it to `next`; un-ticking "prerelease" later fires the `released` activity type, which this workflow does not listen for, so the workflow never re-runs and `latest` never advances to `1.2.3`. Manually re-dispatching does not help either: `publish_one` skips any package already present at that version (`npm view`) without touching the dist-tag, so it never runs `npm dist-tag add`.
+evidence: GitHub `release` activity types distinguish `published` (fires for releases and prereleases when first published) from `released` (fires when a release is published or a prerelease is promoted to a full release) — the workflow subscribes only to the former. The natural fix has two parts with real tradeoffs the loop cannot verify without a live run: (a) add `released` to the trigger types (which double-fires the workflow on a normal full release — harmless only because publish is idempotent), and (b) make the idempotency branch reconcile the dist-tag via `npm dist-tag add "$pkg@$VERSION" "$NPM_TAG"` — but whether an OIDC/Trusted-Publishing-minted token is even scoped for dist-tag operations (vs publish only) is unverified in-loop. Deferred rather than patched: the whole prerelease path is speculative for a project that has not shipped v0.1.0, and forcing an unverifiable behavior change into a credential-holding workflow is riskier than a focused later pass. Not blocking for the first stable release.
+status: open
+
+### DW-83: `publish.yml`'s fixed 6×20s (~2 min) release-asset download-poll window may be too short for `release.yml`'s serial build matrix — `release: published` can fire while later legs are still compiling, so a release whose binaries are merely slow (not missing) would exhaust the poll, fail, and require a manual workflow re-run
+origin: follow-up review of 11-4, 2026-07-23
+source_spec: `spec-11-4-npm-platform-packages.md`
+location: `.github/workflows/publish.yml` (`Download release binaries` step, `for attempt in 1 2 3 4 5 6` / `sleep 20`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter review pass on 11-4
+summary: The download step polls for all three release assets across 6 attempts × 20s ≈ 2 min before giving up loudly. If `release.yml` runs its build legs serially (`max-parallel: 1`) and the release is published on the first leg's upload, the `release: published` event that starts `publish.yml` fires while the remaining legs (checkout + bun install + UI build + `bun build --compile` + upload) are still running — easily longer than 2 min combined. The publish then fails on a release that is only slow to finish attaching assets, not genuinely incomplete.
+evidence: The poll window (6×20s) was a deliberate value chosen in the prior 11-4 review pass to tolerate the `published`-before-upload race; the concern here is that its magnitude is calibrated to nothing concrete because the target — 11.2's rebuilt three-platform `release.yml` — does not exist yet. The correct fix depends on that final shape: either raise the attempt count/backoff to cover realistic serial matrix wall-time (~10 min), or have `release.yml` publish the release only after all legs finish (build to a draft, flip to published last) so `published` fires when assets are already complete. Blocked on 11.2; wiring/tuning belongs with or after it. Not this story's problem to finalize in isolation.
+status: open
+
+### DW-84: `credential-store.ts` is missing the "descriptor present but `.enc` missing" guard that `provider-key-store.ts` has — in that state ANY passphrase is accepted, opens an empty store, and the first save silently re-keys under the wrong passphrase
+origin: review pass of 11-6, 2026-07-23
+source_spec: `spec-11-6-persistent-first-run-setup.md`
+location: `src/core/credential-store.ts:578` (passphrase-mode arm, the `return loadStoreFromFile(...)`), vs the guard at `src/core/provider-key-store.ts:412-416`
+severity: medium
+found_by: Blind Hunter review pass on 11-6
+summary: In passphrase mode (`credential-store.ts:550`) the derived key is handed straight to `loadStoreFromFile`, which returns `{outcome:"opened"}` with an EMPTY store when the file does not exist (`credential-store.ts:684-686`). So with a descriptor present and `credential-store.enc` absent, every passphrase "unlocks" successfully and the first `saveConnection` writes ciphertext under whatever key was typed — permanently locking the user out of nothing, but cementing a passphrase they may have typo'd, with no error at any point. `provider-key-store.ts:412-416` already carries the exact guard for this (`descriptor present but store file is missing` → `corrupt`) with a comment spelling out this very failure mode; the credential store was never given the matching arm.
+evidence: Verified by reading both files side by side. The state is reachable: `openPersistent` writes the descriptor at `:642` BEFORE seeding the `.enc` at `:654` (deliberate ordering), so a crash in that window — or a partial failure of the `rmSync` rollback at `:657-661`, or a user deleting the `.enc` — leaves exactly this layout. NOT caused by Story 11.6: the same bypass exists today via `QS_PASSPHRASE`/`QS_PASSPHRASE_FD`. Surfaced by 11.6 because its unlock loop uses a verify-open as proof that the typed passphrase is correct, and in this one state that proof is vacuous. Fix is ~4 lines mirroring the provider-key store's guard plus a regression test; deferred because Story 11.6 is contractually forbidden from modifying `credential-store.ts` and the fix belongs with the Epic 2 crypto layer that owns the invariant.
+status: open
+
+### DW-85: Nothing enforces that the credential store and the provider-key store share one passphrase — the two descriptors carry independent salts, so 11.6's unlock verifies only one of them and its create path can orphan the other
+origin: review pass of 11-6, 2026-07-23
+source_spec: `spec-11-6-persistent-first-run-setup.md`
+location: `src/core/first-run-setup.ts` (`runUnlockLoop`'s single `targetCredential` verify; `runCreatePath`), `src/core/store-presence.ts` (`anyDescriptorPresent` ignores `keychain-mode`)
+severity: low
+found_by: Blind Hunter + Edge Case Hunter review pass on 11-6
+summary: "Two descriptors, one passphrase" is an assumption of the 11.6 design, not an invariant the code enforces. Two concrete gaps: (a) with BOTH descriptors present, `runUnlockLoop` verifies only the credential store and reports success, so a provider-key store created in a different boot under a different `QS_PASSPHRASE` (independent salt, `provider-key-store.ts:459`) still fails afterwards with no warning; (b) with the credential store in `first-run` and the provider-key store in `keychain-mode` while the keychain is down, `anyDescriptorPresent` returns false, the create path mints a brand-new passphrase, and the keychain-encrypted `provider-keys.enc` is orphaned — every AI-provider RPC then fails `key-unavailable` with nothing surfaced to the user. The spec's "Accepted limitation" covers only the inverse arrangement.
+evidence: Confirmed by reading `first-run-setup.ts` (`targetCredential = presence.credential === "passphrase-mode"`, single verify branch) and `store-presence.ts` (`anyDescriptorPresent` keys off `passphrase-mode` only). No data is lost in either case — the orphaned `.enc` stays intact and readable again once the keychain returns — and both arrangements require an unusual history (a mode change between boots, or a keychain that disappeared after provider keys were saved), which is why this is deferred rather than patched. A real fix means deciding what a mixed-mode app dir MEANS (re-key both stores under one passphrase? refuse to boot? surface a UI banner?), which is a product decision spanning Epic 2 and Epic 5, not a loop-safe patch inside 11.6.
+status: open
+
+### DW-86: A provider-key descriptor whose `provider-keys.enc` is missing makes 11.6's unlock loop unwinnable — `provider-key-store.ts` returns `corrupt` unconditionally in that state, which the loop retries, so the user is asked three times and told the passphrase may be wrong when no passphrase could ever work
+origin: follow-up review of 11-6, 2026-07-23
+source_spec: `spec-11-6-persistent-first-run-setup.md`
+location: `src/core/first-run-setup.ts` (`runUnlockLoop`'s provider-key branch and `classifyUnlockAttempt`'s `corrupt` → `retry` mapping), against the guard at `src/core/provider-key-store.ts:412-416`
+severity: low
+found_by: Blind Hunter review pass on 11-6
+summary: With `provider-keys.meta.json` present, `provider-keys.enc` absent, and the credential store in `first-run`, `classifyStorePresence` reports `providerKeys: "passphrase-mode"`, `anyDescriptorPresent` is true, and the unlock loop targets the provider-key store. That store's missing-file guard returns `corrupt` before any key derivation, and `classifyUnlockAttempt` maps `corrupt` → `retry` (correctly, in general: a GCM auth-tag failure is cryptographically indistinguishable from tamper). The result is three prompts that cannot possibly succeed, followed by `skip`. Nothing is written and nothing is lost, but the user is asked to re-type a passphrase against a store that has already decided the answer is irrelevant.
+evidence: Confirmed by reading `provider-key-store.ts:412-416` (`descriptor present but store file is missing` → `corrupt`, unconditional and before decryption) against `first-run-setup.ts`'s retry mapping. Note this is the exact mirror of DW-84: the provider-key store has the guard the credential store lacks, so the same on-disk layout produces a vacuous *success* on one store and an unwinnable *retry* on the other. Not fixable inside 11.6 without either (a) extending `store-presence.ts` to report descriptor-without-`.enc` as its own fourth state and short-circuiting the loop, or (b) giving the stores a way to distinguish "this passphrase is wrong" from "this store cannot be opened by any passphrase" — both of which belong with the DW-84 fix in the Epic 2 crypto layer, and should be decided together with it. Deferred rather than patched: retrying `corrupt` is the correct default everywhere else, and narrowing it from inside the pre-flight would duplicate store knowledge the pre-flight is deliberately kept free of.
+status: open
+
+### DW-87: The repo has no lint gate at all, so the whole `react-hooks` rule class (exhaustive-deps, conditional hooks) is uncaught by CI and by `bun test`
+origin: follow-up review of 11-7, 2026-07-23
+source_spec: `spec-11-7-bare-command-routing.md`
+location: `package.json` (`scripts` has no `lint`; `devDependencies` has no eslint/biome/oxlint), repo root (no lint config file of any kind)
+severity: low
+found_by: Blind Hunter follow-up review pass on 11-7
+summary: `package.json` exposes only `build`, `build:binary`, `dev`, `prepare`, `prepublishOnly`, `test`, and there is no eslint/biome/oxlint dependency or config anywhere in the repo. `tsc --noEmit` catches type errors but knows nothing about React's rules of hooks, so a `useEffect` that closes over a value it does not declare — or one that becomes genuinely stale — ships green. Surfaced (not caused) by 11.7: `App.tsx`'s `workspace.load` effect closes over `firstRun` with a `[]` dep array. That instance is provably correct (the value derives from a `window` global that is written once by the served shell and never mutated), which is why it was not patched, but nothing mechanical distinguishes it from the same shape around a value that DOES change.
+evidence: Verified directly — `package.json` scripts and devDependencies read as above, and `ls` over the repo root finds no `eslint.config.*`, `.eslintrc*`, `biome.json`, or `.oxlintrc.*`. The gap is pre-existing and repo-wide: `src/ui` is a substantial React codebase (App.tsx alone runs past 600 lines with a dozen effects) accumulating hook code with no automated rule enforcement. Deferred rather than patched because adding a linter is a repo-level tooling decision — which linter, which rule set, whether it gates CI, and how much existing violation debt it surfaces on first run — none of which is a loop-safe change inside a story about bare-command routing.
+status: open
+
+### DW-88: No workflow runs `bun test`, so every drift guard this repo relies on — including 11.2's shared-platform-table tests — is enforced by developer discipline alone, and `release.yml` compiles and ships binaries without executing a single test
+origin: adversarial review of 11-2, 2026-07-24
+source_spec: `spec-11-2-release-matrix-native.md`
+location: `.github/workflows/` (only `keyring-spike.yml`, `publish.yml`, `release.yml` exist; none runs `bun test`)
+severity: medium
+found_by: Blind Hunter review pass on 11-2
+summary: The repo has no CI job that runs the test suite. `keyring-spike.yml` triggers on six specific paths and runs only `src/core/keychain.test.ts`; `publish.yml` and `release.yml` run none. Story 11.2's whole single-source mechanism depends on `scripts/platforms.test.ts` and the `bin/quick-studio-shim.test.ts` drift block failing when the shim's hardcoded `SUPPORTED` map diverges from `scripts/platforms.ts` — but nothing executes them outside a developer's local machine. The spec's own AC ("`bin/quick-studio-shim.test.ts` fails until the shim's `SUPPORTED` map is updated") is therefore only true for someone who happens to run the suite before tagging.
+evidence: Verified by listing `.github/workflows/` and reading all three files: no `bun test` invocation outside `keyring-spike.yml`'s single keychain smoke. Pre-existing and repo-wide — 1767 tests across 85 files have never run in CI — but 11.2 sharpens the consequence, because it deliberately traded a shared import (impossible: the shim is dependency-free CJS) for a test-enforced contract. Natural fix is a `ci.yml` running `bun install --frozen-lockfile`, `bun x tsc --noEmit` and `bun test` on push/PR, and making `release.yml`'s build legs depend on it so a tag cannot ship a binary whose drift guards are red. Adding it is a repo-level CI decision (trigger matrix, required-check configuration, how to handle the 9 `node`-dependent shim tests on runners) rather than a change 11.2 can make unilaterally. Related to DW-87 (no lint gate) — both belong to the same "this repo has no CI quality gate" pass.
+status: open
+
+### DW-89: The release keyring gate compiles and runs `keyring-native-check.ts`, not the shipped binary, so it proves the leg's toolchain can embed the addon rather than that `quick-studio-<os>-<arch>` itself can load it — equivalent today only by accident of a static import chain
+origin: adversarial review of 11-2, 2026-07-24
+source_spec: `spec-11-2-release-matrix-native.md`
+location: `.github/workflows/release.yml` (`Keyring gate` step in the `build` job); `scripts/keyring-native-check.ts`; `bin/quick-studio.ts`
+severity: medium
+found_by: Blind Hunter review pass on 11-2
+summary: Each build leg compiles a *second, different* artifact (`bun build --compile scripts/keyring-native-check.ts`) and runs that as the gate. It never executes the binary being published. The two are equivalent only because `bin/quick-studio.ts → first-run-setup.ts → store-presence.ts → credential-store.ts → store-key.ts → keychain.ts` is currently a fully static import chain, so both entrypoints force `@napi-rs/keyring` to embed. The moment anyone lazy-imports `keychain.ts` (a plausible startup-latency optimization), the gate stays green while every shipped binary silently loses its keychain path and degrades all users to the passphrase fallback — the exact failure mode Story 11.2 exists to prevent.
+evidence: Confirmed by reading the gate step against `scripts/keyring-native-check.ts` (which dynamically imports `../src/core/keychain.ts`, not `bin/quick-studio.ts`) and tracing the shipped entry's import chain. Not fixable within 11.2: making the gate probe the real artifact requires the product binary to expose a keychain-forcing code path (a hidden flag or env-gated self-check), which is a `src/` change the story's intent contract explicitly forbids ("Never change the product's runtime behavior... no `src/` change is expected"). Fix candidates for a later story: add a `QS_SELFCHECK=keychain` env-gated branch in `bin/quick-studio.ts` that runs the same round-trip and exits, and have the gate invoke `./quick-studio-<os>-<arch>` with it; or add a build-time assertion that `keychain.ts` is reachable statically from the entrypoint. Until then, the docs must not claim the gate probes the published binary — `docs/keyring-spike-decision.md` was corrected in this pass to say so.
+status: open
+
+### DW-90: Release binaries bake `package.json`'s version while npm publishes the git tag's version, and nothing asserts they agree — a tag ahead of `package.json` ships binaries that report the wrong version and tell every user, forever, that an update is available
+origin: follow-up review of 11-2, 2026-07-24
+source_spec: `spec-11-2-release-matrix-native.md`
+location: `.github/workflows/release.yml` (`Build UI bundle` step, which runs `scripts/build-version.ts`) vs `.github/workflows/publish.yml` (`VERSION="${TAG#v}"`); `src/core/version.generated.ts`; `src/core/update-check.ts`
+severity: medium
+found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on 11-2
+summary: `bun run build` invokes `scripts/build-version.ts`, which reads `version` from `package.json` (currently `0.0.1`) and bakes it into `src/core/version.generated.ts`, hence into every compiled binary. `publish.yml` derives the npm version from the git tag instead (`VERSION="${TAG#v}"`). Neither workflow checks that the tag and `package.json` agree, and neither writes the tag into `package.json` before building. Push `v1.0.0` with `package.json` still at `0.0.1` and npm serves `quick-studio@1.0.0` whose payload binary reports `0.0.1`. Story 11.5's TTL update check compares the baked `VERSION` against `registry.npmjs.org/quick-studio/latest` — which `publish.yml` just set to `1.0.0` — so every user on the newest release is told on every Persistent boot that an update is available, permanently, and `quick-studio update` prints instructions that change nothing.
+evidence: Confirmed by reading `scripts/build-version.ts` (reads `package.json`), `release.yml`'s build step, `publish.yml`'s `VERSION="${TAG#v}"` derivation, and `src/core/update-check.ts`'s comparison against the baked constant. Pre-existing, not caused by Story 11.2: the previous two-leg `release.yml` ran the identical `bun run build` and the tag-derived npm version came from Story 11.4 — 11.2 rebuilt the job graph around them without introducing or removing the mismatch. It surfaced now because a reviewer traced the version constant end to end for the first time. The natural fix is a guard in `release.yml`'s `platforms` job (`[ "${GITHUB_REF_NAME#v}" = "$(bun -e 'console.log(require(\"./package.json\").version)')" ] || exit 1`), so a mismatched tag fails before any runner compiles anything; the alternative — having the build write the tag into the version file — changes who owns the version number and is a release-process decision, not a workflow patch. Deliberately not patched inside 11.2: the story's intent contract scopes it to the matrix, the checksum artifact, and documentation, and picking between the two fixes decides where the version of record lives.
+status: open
+
+### DW-91: `scripts/` is outside the tsconfig `include`, so `scripts/platforms.ts` — the authoritative platform table — is typechecked only by accident, and `scripts/build-npm-packages.ts` is never typechecked at all
+origin: follow-up review of 11-2, 2026-07-24
+source_spec: `spec-11-2-release-matrix-native.md`
+location: `tsconfig.json` (`"include": ["src", "bin"]`); `scripts/platforms.ts`, `scripts/build-npm-packages.ts`, `scripts/build-version.ts`, `scripts/keyring-native-check.ts`, `scripts/platforms.test.ts`
+severity: low
+found_by: Blind Hunter follow-up review pass on 11-2
+summary: `tsc --noEmit --listFiles` loads exactly one file under `scripts/`: `platforms.ts`, and only because `bin/quick-studio-shim.test.ts` (which IS in `include`) imports it. Nothing else in `scripts/` is typechecked — including `build-npm-packages.ts`, the script that generates every published npm manifest, and `keyring-native-check.ts`, which the release gate compiles and runs. Story 11.2 put its single source of truth in that directory, so the `readonly` field guarantees the file's own comment relies on hold only for as long as the shim test keeps importing it; a plausible refactor that drops that import silently removes `platforms.ts` from `tsc` coverage with no signal.
+evidence: Verified with `bun x tsc --noEmit --listFiles` and by reading `tsconfig.json:31`. Pre-existing and directory-wide — `scripts/` has never been in `include` — but 11.2 raised the stakes by making a file there authoritative for three consumers. Fix is a one-line `include` addition, deliberately not made here: adding `scripts` to the project's typecheck surface may surface accumulated errors across five previously-unchecked files, and whether those get fixed or suppressed is a repo-level decision that belongs with the same CI-gate pass as DW-88 (nothing runs `tsc` in CI either) and DW-87 (no linter at all).
+status: open
+
+### DW-92: The README hardcodes the platform table in five places with no drift guard, so it is the one consumer of Story 11.2's single source of truth that can silently go stale — and it ships verbatim inside the published npm package
+origin: follow-up review of 11-2, 2026-07-24
+source_spec: `spec-11-2-release-matrix-native.md`
+location: `README.md` (npm platform keys ~`:38-39`, the asset list ~`:49-52`, the Linux `BIN=` example, the Windows filename in the verification block, and three separate "macOS is not yet supported" claims); `scripts/build-npm-packages.ts` (copies the README into the main package)
+severity: low
+found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on 11-2
+summary: Story 11.2 made the release matrix, the packaging script, and `publish.yml` derive from `scripts/platforms.ts`, and gave the one consumer that cannot import it — the dependency-free CJS shim — a text-scraping drift test. The README got neither treatment: it names the platforms and asset filenames by hand in five spots and asserts three times that macOS is unsupported. When the macOS phase adds a darwin row, `scripts/platforms.test.ts`'s tripwires and the shim drift tests fire by design, but the README trips nothing — it will keep telling users macOS is unsupported while a darwin asset sits on the release page and npm installs a darwin binary. `scripts/build-npm-packages.ts` copies this README into the published main package, so the stale text reaches every npm consumer.
+evidence: Verified by grepping `README.md` for the asset and platform-key literals and by reading `build-npm-packages.ts`'s README copy into the main package. Caused by this story only in the sense that 11.2 established the single-source design and expanded the README's platform list; the spec's acceptance criteria deliberately enumerate which consumers auto-propagate (matrix, packaging, `publish.yml`) and which are test-guarded (the shim), and the README is in neither set. Deferred rather than patched because the guard is a design choice with real tradeoffs: asserting the README contains every row's asset is easy, but the prose claims ("macOS is not yet supported", the per-OS verification snippets) are not mechanically derivable from the table, so a naive test would pass on a README that is still substantively wrong. Worth deciding together with the macOS phase, which is the only event that can make it wrong.
+status: open
+
+### DW-93: `resolveAppDir` takes `platform` as data but joins with the HOST's `node:path`, so any cross-platform call yields a mixed-separator path that `isAbsolute` then misjudges
+origin: review of 11-7, 2026-07-24
+source_spec: `spec-11-7-bare-command-routing.md`
+location: `src/core/app-dir.ts:43-70` (`resolveAppDir`, `join` imported from `node:path`); surfaced via `src/core/first-run-signal.ts:81` (`isAbsolute`)
+severity: low
+found_by: Edge Case Hunter review pass on 11-7
+summary: `resolveAppDir(env, platform, home?)` is documented as resolving "the OS-convention app-data directory for `platform`", and its `platform` argument selects the convention (`AppData\Roaming`, `Library/Application Support`, XDG) — but the `join` it builds the path with is the host's, not the platform's. Called with `platform: "win32"` from a POSIX host it returns e.g. `C:\Users\x\AppData\Roaming/quick-studio`, which the host's `isAbsolute` then reports as relative. Story 11.7's `isFirstRunBoot` short-circuits a non-absolute dir to "first run", so a cross-platform caller would always report first-run regardless of what is on disk. The function's `platform` parameter promises a portability it does not deliver.
+evidence: Verified by reading `app-dir.ts` (single `join` import from `node:path`, no `path.win32`/`path.posix` selection) against its own docstring. Pre-existing since Story 2.2 and NOT caused by 11.7 — production is unreachable, because every caller (`first-run-setup.ts:348`, `bin/quick-studio.ts` via `isFirstRunBoot`) passes `process.platform`, so host and argument always agree, and the tests that pass a foreign platform inject stub seams rather than exercising the real resolver. Deliberately not patched in 11.7: hardening only the consumer (`isFirstRunBoot` selecting `path.win32.isAbsolute`/`path.posix.isAbsolute` off its `platform` argument) would imply a cross-platform guarantee the resolver underneath still does not provide, which is worse than the current honest coupling. The coherent fix is to make `app-dir.ts` itself platform-parametric in its separator, or to narrow the docstring to say `platform` selects the convention for the HOST only.
+status: open
+
+### DW-94: The keyless-ordering PK branch fires unconditionally, so a Postgres legacy-inheritance parent WITH a primary key is ordered by that PK — a non-total order across child heaps that reintroduces the exact pagination drift DW-33 set out to remove
+origin: follow-up review of dw-32-33, 2026-07-24
+source_spec: `spec-dw-32-33-browse-pagination-and-keyless-ordering.md`
+location: `src/core/table-rows.ts:305-310` (`orderCols` precedence: `target.primaryKey.length > 0` is checked before the `ctid`/orderable-column branches)
+severity: low
+found_by: Edge Case Hunter follow-up review pass on dw-32-33
+summary: DW-33 hardened the physical-row-locator branch so a legacy inheritance parent (`relkind='r'` + `relhassubclass`) maps to `kind:"other"` and never gets a `ctid` (its `ctid` is non-unique across parent+child heaps). But the precedence ternary checks the primary key FIRST and unconditionally: an inheritance parent that HAS a PK takes `ORDER BY <pk>`. Child tables do not inherit the parent's PK constraint, so `SELECT ... FROM parent` can return duplicate PK values across the parent and every descendant heap — `ORDER BY pk` is therefore not a total order, and paging it can overlap/skip rows exactly like the DW-33 defect, just via the PK path the change left untouched.
+evidence: Verified by reading the precedence at `table-rows.ts:305-310`; the PK branch predates this story (DW-33 rewrote the composition but kept PK first), so this is a pre-existing gap surfaced by the follow-up review, not caused by the change — hence deferred, not patched. Not a trivial patch: `kind:"other"` collapses THREE relation shapes (legacy inheritance parent, declarative partitioned parent, foreign table), and a declarative partitioned parent's PK IS globally total (the partition key is included and enforced), so gating the PK branch on `kind !== "other"` would wrongly drop a valid total order for partitioned tables. A correct fix needs a distinguishing fact (legacy-inheritance-parent vs declarative-partition-parent) that is not currently carried into `SchemaTableInfo` — a contract widening that belongs to a focused pass. Legacy table inheritance is deprecated and rare, so real-world exposure is small.
 status: open

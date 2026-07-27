@@ -11,11 +11,13 @@
  */
 
 import postgres from "postgres";
-import type { DatabaseSchema } from "../shared/contract.ts";
+import type { DatabaseSchema, SchemaRelationKind } from "../shared/contract.ts";
 import {
   DriverConnectionError,
   INTROSPECTION_TIMEOUT_MS,
+  SAFE_FALLBACK_SESSION_MODES,
   assembleSchema,
+  postgresSessionModes,
   toDriverConnectionError,
   withTimeout,
   type Driver,
@@ -24,15 +26,30 @@ import {
   type IntrospectedForeignKey,
   type IntrospectedIndex,
   type IntrospectedPrimaryKey,
+  type SessionModes,
 } from "./driver.ts";
 
-/** One row of the Postgres `information_schema.columns` introspection query. */
+/**
+ * One row of the Postgres `information_schema.columns` introspection query.
+ *
+ * `relkind`/`relhassubclass` are the owning relation's `pg_class` facts, carried in by the
+ * DW-33 correlated scalar subqueries. Both are `null` when NO catalog row matched.
+ *
+ * That NULL arm is a DEFENSIVE fallback, not an expected visibility mechanism:
+ * `pg_class`/`pg_namespace` are world-readable (every role has SELECT on them, and they
+ * carry no row-level security), so in practice every `information_schema.columns` row HAS
+ * a matching catalog row. The arm exists only so an unmatched relation still yields its
+ * columns with kind UNKNOWN rather than disappearing from the schema — never because a
+ * role is expected to be denied the catalog lookup.
+ */
 type PgColumnRow = {
   readonly table_schema: string;
   readonly table_name: string;
   readonly column_name: string;
   readonly data_type: string;
   readonly is_nullable: string;
+  readonly relkind: string | null;
+  readonly relhassubclass: boolean | null;
 };
 
 /** One row of the primary-key introspection query (schema/table/column of a PK). */
@@ -61,6 +78,54 @@ type PgFkRow = {
   readonly referenced_table: string;
   readonly referenced_column: string;
 };
+
+/**
+ * Map a raw `pg_class.relkind` char (+ its `relhassubclass` flag) to the neutral
+ * {@link SchemaRelationKind} (DW-33).
+ *
+ * Only a relation whose `ctid` is UNIQUE ACROSS ITS OWN SCAN is reported as `"table"` —
+ * that, not "has storage", is the fact the browse planner's physical-row-locator branch
+ * actually needs, because it orders a whole page by `ctid`.
+ *
+ * - `r` with `relhassubclass = false` — an ordinary table: one heap, `ctid` total. `"table"`.
+ * - `r` with `relhassubclass = true` — a LEGACY INHERITANCE PARENT. `SELECT … FROM parent`
+ *   implicitly scans every CHILD heap too, and each child numbers its own tuples, so the
+ *   same `(block, offset)` pair recurs across children: `ctid` is NOT unique over the
+ *   result and `ORDER BY ctid` is NOT a total order — pages could duplicate or skip rows,
+ *   the exact defect DW-33 exists to remove. `"other"`, so it falls through to columns.
+ * - `m` — a materialized view. Kept as `"table"` for forward-compatibility ONLY: it does
+ *   have a real heap and a usable `ctid`, but this branch is currently UNREACHABLE through
+ *   `information_schema.columns`, whose own definition restricts it to
+ *   `relkind IN ('r','v','f','p')` — a matview never appears in this query's rows and is
+ *   therefore NOT browsable today. The mapping exists so a future catalog-based column
+ *   introspection stays correct without re-deriving the taxonomy.
+ * - `v` — a plain view: no storage, no `ctid`. `"view"`. Views ARE introspected and
+ *   browsable here (`information_schema.columns` carries no `table_type` filter), so
+ *   mis-labelling one would turn every view browse into a hard engine error.
+ * - everything else — a partitioned parent (`p`) and a foreign table (`f`) in particular,
+ *   which look table-like but expose no `ctid` of their own — is `"other"`.
+ * - a NULL `relkind` (no `pg_class` row matched) yields `undefined` ⇒ kind unknown ⇒ the
+ *   conservative arm.
+ *
+ * `hasSubclass` is optional so the `relkind`-only taxonomy stays callable; absent/NULL is
+ * read as "no children", the same conservative default the catalog reports for a table
+ * that never had any.
+ *
+ * Pure and exported so the relkind taxonomy is unit-testable without a live server —
+ * same precedent as {@link pgSupportsConparentid} and {@link pgSchemaScope}.
+ */
+export function pgRelationKind(
+  relkind: string | null | undefined,
+  hasSubclass?: boolean | null,
+): SchemaRelationKind | undefined {
+  if (relkind === null || relkind === undefined) return undefined;
+  // Checked BEFORE the `r` → "table" arm: an inheritance parent's scan spans child heaps,
+  // so its `ctid` is non-unique and must never unlock the locator branch.
+  if (relkind === "r" && hasSubclass === true) return "other";
+  if (relkind === "r" || relkind === "m") return "table";
+  if (relkind === "v") return "view";
+  return "other";
+}
 
 /**
  * Whether the server exposes `pg_constraint.conparentid` (DW-42). That column — which
@@ -254,6 +319,12 @@ export function createPostgresDriver(url: string): Driver {
     onnotice: () => {},
   });
 
+  // DW-39: the connection's detected SQL-parsing modes, filled by the best-effort probe in
+  // `connect()`. Initialized to the over-reject-safe fallback so that if `connect` is never
+  // reached — or the probe throws — the splitter reads backslash-literal modes (fail-closed)
+  // rather than assuming server defaults.
+  let modes: SessionModes = SAFE_FALLBACK_SESSION_MODES;
+
   return {
     async connect(): Promise<void> {
       try {
@@ -262,6 +333,17 @@ export function createPostgresDriver(url: string): Driver {
         await sql`select 1`;
       } catch (err) {
         throw toDriverConnectionError(err);
+      }
+      // Best-effort SQL-mode detection (DW-39). Kept separate from the `select 1` liveness
+      // round-trip and swallowed to the over-reject-safe fallback: a server that chokes on the
+      // probe still connects rather than regressing a previously-working connect.
+      try {
+        const [row] = (await sql`SHOW standard_conforming_strings`) as unknown as ReadonlyArray<{
+          readonly standard_conforming_strings?: unknown;
+        }>;
+        modes = postgresSessionModes(row?.standard_conforming_strings);
+      } catch {
+        modes = SAFE_FALLBACK_SESSION_MODES;
       }
     },
 
@@ -279,11 +361,40 @@ export function createPostgresDriver(url: string): Driver {
       // Exclude the two system schemas (or narrow to the pinned one); order by
       // schema/table/ordinal so the neutral shape mirrors the live database's own
       // column order.
+      //
+      // DW-33: the owning relation's `pg_class` facts (`relkind` + `relhassubclass`) ride
+      // along on the row this query ALREADY fetches, so relation kind costs no extra
+      // round-trip and no per-table query (an N+1 would be a HALT condition).
+      //
+      // They are carried by CORRELATED SCALAR SUBQUERIES in the SELECT list, NOT by a
+      // join — deliberately, because this is the introspection query EVERY connection
+      // depends on: a bug here breaks `connect` outright, not just browse. A scalar
+      // subquery is structurally incapable of changing the column row set — it can neither
+      // MULTIPLY nor DROP a row whatever the catalogs contain — whereas a join's row count
+      // is only as safe as its uniqueness argument. (Concretely: a join on relation NAME
+      // is matched under the catalog's collation, and duplicate-by-case names are possible,
+      // so a name-based join could match two `pg_class` rows and silently duplicate every
+      // column of that relation.) Semantics stay LEFT-JOIN-equivalent: no matching catalog
+      // row ⇒ the scalar is NULL ⇒ kind omitted, and the columns are still returned.
+      //
+      // `colScope` stays spliced UNQUALIFIED and VERBATIM: with `information_schema.columns
+      // c` the ONLY source in the outer FROM, a bare `table_schema` resolves unambiguously
+      // to `c`, and neither subquery exposes a `table_schema` to compete with it.
       const rows = (await sql`
-        SELECT table_schema, table_name, column_name, data_type, is_nullable
-        FROM information_schema.columns
+        SELECT c.table_schema, c.table_name, c.column_name, c.data_type, c.is_nullable,
+               (SELECT rel.relkind
+                  FROM pg_catalog.pg_class rel
+                  JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+                 WHERE ns.nspname = c.table_schema AND rel.relname = c.table_name
+                 LIMIT 1) AS relkind,
+               (SELECT rel.relhassubclass
+                  FROM pg_catalog.pg_class rel
+                  JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace
+                 WHERE ns.nspname = c.table_schema AND rel.relname = c.table_name
+                 LIMIT 1) AS relhassubclass
+        FROM information_schema.columns c
         WHERE ${colScope}
-        ORDER BY table_schema, table_name, ordinal_position
+        ORDER BY c.table_schema, c.table_name, c.ordinal_position
       `) as unknown as readonly PgColumnRow[];
 
       // Primary-key columns, from the constraint metadata. Joined the same way
@@ -425,13 +536,20 @@ export function createPostgresDriver(url: string): Driver {
         referencedColumn: r.referenced_column,
       }));
 
-      const columns: IntrospectedColumn[] = rows.map((r) => ({
-        schema: r.table_schema,
-        table: r.table_name,
-        column: r.column_name,
-        dataType: r.data_type,
-        nullable: r.is_nullable === "YES",
-      }));
+      // DW-33: `relationKind` is spread CONDITIONALLY so an unmatched catalog row (NULL
+      // `relkind`) leaves the property absent rather than explicitly `undefined` — the
+      // assembler then omits `SchemaTableInfo.kind` and the planner reads it as unknown.
+      const columns: IntrospectedColumn[] = rows.map((r) => {
+        const relationKind = pgRelationKind(r.relkind, r.relhassubclass);
+        return {
+          schema: r.table_schema,
+          table: r.table_name,
+          column: r.column_name,
+          dataType: r.data_type,
+          nullable: r.is_nullable === "YES",
+          ...(relationKind === undefined ? {} : { relationKind }),
+        };
+      });
       return assembleSchema("postgres", columns, indexes, foreignKeys, primaryKeys);
       };
       try {
@@ -470,6 +588,8 @@ export function createPostgresDriver(url: string): Driver {
         reserved.release();
       }
     },
+
+    sessionModes: () => modes,
 
     quoteIdent(ident: string): string {
       // Postgres double-quotes identifiers; an embedded `"` is escaped by doubling.

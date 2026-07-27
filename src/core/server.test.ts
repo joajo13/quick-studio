@@ -601,6 +601,76 @@ describe("renderIndexHtml exposure injection", () => {
       expect(html).not.toContain("unsafe-inline");
     }
   });
+
+  // Story 11.7: the fourth inline global. Its whole failure mode is silent-closed
+  // (a missing/mismatched nonce means the browser refuses the tag, and the UI never
+  // learns it is a first run), so the nonce-pairing assertion is the load-bearing one.
+  describe("firstRun injection (Story 11.7)", () => {
+    const NONCE = "0123456789abcdef0123456789abcdef";
+    const EXPOSURE = { exposed: false, host: "127.0.0.1", port: 80 } as const;
+    const SANDBOX = "http://127.0.0.1:6789";
+
+    test("firstRun: true renders window.__QS_FIRST_RUN__ = true, carrying the same nonce as the other three globals", () => {
+      const html = renderIndexHtml("abc123", EXPOSURE, SANDBOX, NONCE, true);
+      expect(html).toContain("window.__QS_FIRST_RUN__ = true;");
+      // Every inline <script nonce="..."> tag in the shell carries the SAME nonce —
+      // proves the fourth global did not introduce a second, drifting nonce source.
+      const nonceTags = html.match(/<script nonce="[^"]*">/g) ?? [];
+      expect(nonceTags.length).toBe(4);
+      for (const tag of nonceTags) {
+        expect(tag).toBe(`<script nonce="${NONCE}">`);
+      }
+    });
+
+    test("firstRun: false renders window.__QS_FIRST_RUN__ = false", () => {
+      const html = renderIndexHtml("abc123", EXPOSURE, SANDBOX, NONCE, false);
+      expect(html).toContain("window.__QS_FIRST_RUN__ = false;");
+    });
+
+    test("the defaulted call (no fifth argument) also renders false — every pre-11.7 call site keeps compiling and stays byte-for-byte on the OTHER three globals", () => {
+      const withDefault = renderIndexHtml("abc123", EXPOSURE, SANDBOX, NONCE);
+      const withExplicitFalse = renderIndexHtml("abc123", EXPOSURE, SANDBOX, NONCE, false);
+      expect(withDefault).toContain("window.__QS_FIRST_RUN__ = false;");
+      expect(withDefault).toBe(withExplicitFalse);
+    });
+
+    test("the shell now carries five <script> tags: four nonce-bearing inline globals plus the external module", () => {
+      const html = renderIndexHtml("abc123", EXPOSURE, SANDBOX, NONCE, true);
+      const scriptOpenTags = html.match(/<script[ >]/g) ?? [];
+      expect(scriptOpenTags.length).toBe(5);
+      const nonceTags = html.match(/<script nonce="[^"]*">/g) ?? [];
+      expect(nonceTags.length).toBe(4);
+    });
+
+  });
+});
+
+// The `renderIndexHtml` unit tests above prove the template renders whatever it is
+// handed, but nothing there covers the threading that actually feeds it —
+// `bin/` -> `StartCoreOptions.firstRun` -> `options.firstRun ?? false` -> the
+// template. A regression that dropped the option on the floor (always rendering
+// `false`) would leave the CLI hint printing while the UI never routed, with a fully
+// green suite. These boot a real Core and read the served shell over the socket.
+describe("startCore — firstRun option threading (Story 11.7)", () => {
+  test("startCore({ firstRun: true }) serves a shell whose global is true", async () => {
+    const c = await startCore(0, { firstRun: true });
+    try {
+      const html = await (await fetch(`${c.url}/`)).text();
+      expect(html).toContain("window.__QS_FIRST_RUN__ = true;");
+    } finally {
+      await c.stop();
+    }
+  });
+
+  test("startCore with the option omitted serves false — every pre-11.7 boot is unchanged", async () => {
+    const c = await startCore(0);
+    try {
+      const html = await (await fetch(`${c.url}/`)).text();
+      expect(html).toContain("window.__QS_FIRST_RUN__ = false;");
+    } finally {
+      await c.stop();
+    }
+  });
 });
 
 // DW-2: the token-bearing app shell is served under a strict per-boot CSP with a

@@ -1,0 +1,157 @@
+# Publish the npm packages for a release, via OIDC Trusted Publishing.
+#
+# The filename `publish.yml` is LOAD-BEARING: it is registered with npm's
+# Trusted Publisher setting for each of the four packages (`quick-studio` plus
+# the three `quick-studio-<platform>-<arch>`). Renaming this file silently breaks
+# every publish until all four trusted publishers are reconfigured to match.
+#
+# This workflow does NOT build binaries — `release.yml` is the sole builder and
+# owns the tag. This runs after the GitHub Release exists, downloads its assets,
+# packages them (scripts/build-npm-packages.ts), and publishes platform packages
+# first, main package last. Auth is OIDC only — no NPM_TOKEN anywhere.
+
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  id-token: write
+  contents: read
+
+# Serialize publishes so two release events can never race the strict
+# platform-first / main-last ordering. Never cancel a run mid-publish.
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # A hung `npm publish` / OIDC token exchange must not sit on the serialized
+    # `publish-npm` concurrency group until GitHub's 6h default and block every
+    # subsequent release behind it. Cap the whole publish at a modest ceiling.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      # Trusted Publishing requires Node >= 22.14.0 and npm >= 11.5.1 on a
+      # GitHub-hosted runner. Pin them explicitly rather than inheriting.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Pin npm to a Trusted-Publishing-capable version
+        run: |
+          # Pin explicitly (not @latest) so the npm that holds publish creds is
+          # reproducible and >= 11.5.1 (the Trusted Publishing floor). Bump this
+          # deliberately, never implicitly.
+          npm install -g npm@11.5.1
+          npm_version="$(npm --version)"
+          echo "npm version: $npm_version"
+          required="11.5.1"
+          lowest="$(printf '%s\n%s\n' "$required" "$npm_version" | sort -V | head -n1)"
+          if [ "$lowest" != "$required" ]; then
+            echo "npm $npm_version is below the required $required for Trusted Publishing" >&2
+            exit 1
+          fi
+
+      - name: Download release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          # Derived from scripts/platforms.ts so a future macOS row propagates
+          # here too, rather than hardcoding a fourth copy of the asset list.
+          mapfile -t REQUIRED < <(bun scripts/platforms.ts --assets)
+          # `set -e` does not propagate out of a process substitution and
+          # `mapfile` exits 0 on empty input: an empty REQUIRED would make the
+          # poll's `ok=1` succeed on the first attempt with zero binaries
+          # downloaded, bypassing the entire DW-83 retry window.
+          if [ "${#REQUIRED[@]}" -eq 0 ]; then
+            echo "publish: could not read the platform table" >&2
+            exit 1
+          fi
+          # The `release: published` event can fire before release.yml has finished
+          # attaching every binary. `gh release download` exits 0 on a partial set,
+          # so poll until all expected assets are present (or give up loudly).
+          for attempt in 1 2 3 4 5 6; do
+            rm -rf bin-dl
+            gh release download "$TAG" --dir bin-dl || true
+            ok=1
+            for a in "${REQUIRED[@]}"; do
+              if [ ! -s "bin-dl/$a" ]; then
+                ok=0
+                break
+              fi
+            done
+            if [ "$ok" = "1" ]; then
+              echo "all release binaries present"
+              exit 0
+            fi
+            echo "release assets not all present yet (attempt $attempt); waiting 20s"
+            sleep 20
+          done
+          echo "release binaries never fully materialized for $TAG" >&2
+          ls -la bin-dl || true
+          exit 1
+
+      - name: Build npm packages
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          bun scripts/build-npm-packages.ts --binaries bin-dl --version "$VERSION" --out dist-npm
+
+      # Publish order is load-bearing: every platform package first, main package
+      # LAST — the main package's optionalDependencies must be resolvable the
+      # moment it becomes installable. No --access flag (unscoped = public by
+      # default). No NPM_TOKEN — Trusted Publishing (OIDC) mints a short-lived
+      # signed token per run from the id-token permission above.
+      - name: Publish platform packages, then the main package
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          # A GitHub prerelease must not land on the `latest` dist-tag, or
+          # `npm i quick-studio` would serve a beta to everyone.
+          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+            NPM_TAG="next"
+          else
+            NPM_TAG="latest"
+          fi
+          echo "Publishing $VERSION to dist-tag: $NPM_TAG"
+          # Idempotent: if a prior run already published a package at this exact
+          # version (a transient mid-sequence failure, a re-run), skip it rather
+          # than abort — npm rejects a duplicate version and we never unpublish.
+          publish_one() {
+            dir="$1"
+            pkg="$(basename "$dir")"  # dir basename == package name for all four
+            if npm view "$pkg@$VERSION" version >/dev/null 2>&1; then
+              echo "· $pkg@$VERSION already published — skipping"
+            else
+              npm publish "$dir" --tag "$NPM_TAG"
+            fi
+          }
+          # Strict order: every platform package first, main package LAST.
+          # Derived from scripts/platforms.ts (not hardcoded) so a future row is
+          # actually PUBLISHED, instead of being built, checksummed, downloaded,
+          # packaged — and then silently skipped, leaving the main package's
+          # optionalDependencies naming a package that does not exist on npm.
+          mapfile -t PKGS < <(bun scripts/platforms.ts --packages)
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "publish: could not read the platform table" >&2
+            exit 1
+          fi
+          for p in "${PKGS[@]}"; do
+            publish_one "dist-npm/$p"
+          done
+          publish_one dist-npm/quick-studio

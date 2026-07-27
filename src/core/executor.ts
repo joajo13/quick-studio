@@ -27,7 +27,7 @@ import {
 } from "../shared/contract.ts";
 import { NoConnectionTargetError } from "./connection.ts";
 import { targetError, type ConnectionSeams, type ResolvedConnection } from "./connection-targets.ts";
-import type { DriverQueryResult } from "./driver.ts";
+import { DEFAULT_SESSION_MODES, type DriverQueryResult, type SessionModes } from "./driver.ts";
 import { rowsToFrozenData } from "./frozen-map.ts";
 
 /** Hard Core-side cap on rows materialized from a read (full pagination is Story 3.2). */
@@ -165,6 +165,11 @@ function matchDollarTag(sql: string, i: number): string | null {
  * (an ORDINARY character the caller handles). `prev`/`prev2` are the two source
  * chars immediately before `i`, used only to detect a postgres `E'…'`/`e'…'` escape
  * string (backslash-escaping active) vs a standard `'…'` string (backslash literal).
+ *
+ * `modes` are the connection's detected SQL-parsing modes (DW-39): the single- and
+ * double-quote arms consult them so the span boundaries match the REAL server session rather
+ * than assuming defaults. The default {@link DEFAULT_SESSION_MODES} keeps a caller that passes
+ * none byte-identical to pre-DW-39.
  */
 function consumeSpan(
   sql: string,
@@ -172,6 +177,7 @@ function consumeSpan(
   engine: DbEngine,
   prev: string | undefined,
   prev2: string | undefined,
+  modes: SessionModes,
 ): number {
   const ch = sql[i]!;
   const next = sql[i + 1];
@@ -215,16 +221,22 @@ function consumeSpan(
   if (isMysql && ch === "`") {
     return consumeDelimited(sql, i, "`", false);
   }
-  // Double-quoted span: postgres IDENTIFIER (only `""` doubling); mysql STRING (also
-  // backslash-escaped in default mode).
+  // Double-quoted span: postgres IDENTIFIER (only `""` doubling). mysql `"` is a STRING with
+  // backslash escapes in default mode; under ANSI_QUOTES it is an IDENTIFIER, and under
+  // NO_BACKSLASH_ESCAPES the backslash is literal — either case ⇒ no backslash escaping (DW-39).
   if (ch === '"') {
-    return consumeDelimited(sql, i, '"', isMysql);
+    const dqBackslash = isMysql && !modes.ansiQuotes && !modes.noBackslashEscapes;
+    return consumeDelimited(sql, i, '"', dqBackslash);
   }
-  // Single-quoted string: mysql backslash-escapes always; postgres only inside an
-  // `E'…'`/`e'…'` escape string (detected by the immediately-preceding token char).
+  // Single-quoted string: backslash-active for a pg E'…' escape string, for pg plain strings
+  // when standard_conforming_strings=off, and for mysql unless NO_BACKSLASH_ESCAPES is set (DW-39).
   if (ch === "'") {
     const isEString = isPg && (prev === "e" || prev === "E") && !isIdentChar(prev2);
-    return consumeDelimited(sql, i, "'", isMysql || isEString);
+    const sqBackslash =
+      isEString ||
+      (isPg && !modes.standardConformingStrings) ||
+      (isMysql && !modes.noBackslashEscapes);
+    return consumeDelimited(sql, i, "'", sqBackslash);
   }
   return i; // ordinary character
 }
@@ -234,8 +246,17 @@ function consumeSpan(
  * comment/string/identifier/dollar-quote/backtick span. Segments that tokenize to
  * zero top-level words (a trailing comment after a terminating `;`, whitespace) are
  * DROPPED before the count, so `SELECT 1; -- done` is ONE statement.
+ *
+ * `modes` are the connection's detected SQL-parsing modes (DW-39), now HONORED for the
+ * string/identifier boundaries instead of assumed — so the split matches the real server
+ * session. Defaulting to {@link DEFAULT_SESSION_MODES} keeps a two-arg call byte-identical to
+ * pre-DW-39.
  */
-export function splitStatements(sql: string, engine: DbEngine): string[] {
+export function splitStatements(
+  sql: string,
+  engine: DbEngine,
+  modes: SessionModes = DEFAULT_SESSION_MODES,
+): string[] {
   const segments: string[] = [];
   const n = sql.length;
   let start = 0;
@@ -243,7 +264,7 @@ export function splitStatements(sql: string, engine: DbEngine): string[] {
   while (i < n) {
     const prev = i > 0 ? sql[i - 1] : undefined;
     const prev2 = i > 1 ? sql[i - 2] : undefined;
-    const end = consumeSpan(sql, i, engine, prev, prev2);
+    const end = consumeSpan(sql, i, engine, prev, prev2, modes);
     if (end > i) {
       i = end; // skipped a span — its inner `;` is not a separator
       continue;
@@ -303,16 +324,22 @@ export function firstKeyword(seg: string, _engine: DbEngine): string | null {
  * Collect the TOP-LEVEL identifier words (upper-cased) of a statement — words that
  * are NOT inside a comment/string/quoted-identifier/dollar-quote span. Used to detect
  * a top-level `INTO` (`SELECT … INTO …` CTAS / `INTO OUTFILE`) that a leading-keyword
- * check cannot see, WITHOUT being fooled by an `INTO` that lives inside a string.
+ * check cannot see, WITHOUT being fooled by an `INTO` that lives inside a string. `modes`
+ * (DW-39) are honored so string/identifier boundaries match the real session; defaulting to
+ * {@link DEFAULT_SESSION_MODES} keeps a two-arg call byte-identical to pre-DW-39.
  */
-export function topLevelWords(sql: string, engine: DbEngine): string[] {
+export function topLevelWords(
+  sql: string,
+  engine: DbEngine,
+  modes: SessionModes = DEFAULT_SESSION_MODES,
+): string[] {
   const words: string[] = [];
   const n = sql.length;
   let i = 0;
   while (i < n) {
     const prev = i > 0 ? sql[i - 1] : undefined;
     const prev2 = i > 1 ? sql[i - 2] : undefined;
-    const end = consumeSpan(sql, i, engine, prev, prev2);
+    const end = consumeSpan(sql, i, engine, prev, prev2, modes);
     if (end > i) {
       i = end; // skip the span (its words are not top-level)
       continue;
@@ -446,9 +473,24 @@ export function createExecutor(deps: ExecutorDeps): Executor {
   /* ---- Path (b): raw SQL ------------------------------------------------ */
 
   async function executeRaw(seams: ConnectionSeams, sql: string, confirmed: boolean): Promise<RpcReply<ExecuteResult>> {
-    const { runQuery, runReadOnly, getEngine } = seams;
+    const { runQuery, runReadOnly, getEngine, getSessionModes } = seams;
     const engine = await getEngine();
-    const statements = splitStatements(sql, engine);
+    // DW-39: detected SQL-parsing modes, threaded into the splitter so the split matches the
+    // real server session (a `;` smuggled after a `\'` under scs=off / default mysql is hidden
+    // inside the string exactly as the server would see it) rather than an assumed default.
+    //
+    // These modes are captured ONCE at connect and never re-probed (mirroring `getEngine`'s memo).
+    // Unlike the engine, the session GUCs ARE mutable: a confirmed `SET standard_conforming_strings`
+    // / `SET sql_mode = …NO_BACKSLASH_ESCAPES…` mid-session moves the server from backslash-active
+    // to backslash-literal, leaving these cached modes stale on the ACTIVE side — under which the
+    // splitter could UNDER-count a subsequent statement. We deliberately do NOT re-probe here (or
+    // sniff the confirmed statement for a `SET`): DW-45 keeps a confirmed statement OPAQUE, and the
+    // load-bearing guarantee for that window is the ALWAYS-ON driver backstop — postgres
+    // `{ simple: false }` (extended protocol, one command) and mysql `multipleStatements: false`,
+    // both unconditional — which rejects the smuggled second command at the server regardless of
+    // the splitter. So a mid-session mode flip degrades to an over-reject at worst, never a smuggle.
+    const modes = await getSessionModes();
+    const statements = splitStatements(sql, engine, modes);
     if (statements.length === 0) {
       return bad("empty statement");
     }
@@ -456,7 +498,7 @@ export function createExecutor(deps: ExecutorDeps): Executor {
       return bad("multiple statements are not allowed");
     }
     const stmt = statements[0]!.trim();
-    const words = topLevelWords(stmt, engine);
+    const words = topLevelWords(stmt, engine, modes);
     const verb = words[0];
 
     // A leading SELECT/SHOW is a READ — UNLESS it carries a top-level `INTO`
