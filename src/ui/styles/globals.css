@@ -81,6 +81,24 @@
   --err: #ef6a63;
   --err-soft: rgba(239, 106, 99, 0.14);
   --err-line: rgba(239, 106, 99, 0.4);
+  /* DW-58 — the FILL half of the destructive red. `--err` is a TEXT color on dark
+     surfaces (5.10–6.11:1 on --muted/--card/--background) and cannot double as a
+     white-text fill: white on it is only 3.04:1, below WCAG AA. Darkening `--err`
+     itself would drag every error message under AA, so the fill splits out.
+     Derivation: same hue, lower lightness AND lower saturation —
+     hsl(3, 81%, 66%) -> hsl(3, 62%, 46%). Measured against white: 5.65:1 at rest,
+     4.84:1 under `hover:brightness-110`, 5.27:1 under the settings button's
+     `hover:opacity-90` composited over --card. Unlike the tokens above this is NOT
+     dark-only: one value serves both themes, because white-on-fill is theme-invariant
+     (the label sits on the token, not on the surface) and the fill still clears
+     1.4.11 against the light surfaces — 5.27:1 on light --card, 4.91:1 on light
+     --muted. The buttons keep a solid `--err` rim, which is their WCAG 1.4.11
+     boundary IN DARK (5.10:1 on --muted, 5.72:1 on --card) where the fill alone would
+     be 2.74:1 on --muted. In light the rim is only 2.84:1 on --card — `--err` has no
+     light override at all, a pre-existing gap in the whole Story 7.3 `--err*` group
+     (and light theme has no activation path in src/ today); there the fill carries
+     the boundary instead. Deferred to a light-theme `--err*` pass. */
+  --err-fill: #be342d;
   --warn: #e0a458;
   --warn-soft: rgba(224, 164, 88, 0.13);
 
@@ -224,6 +242,9 @@
   /* Story 7.3: `text-err` / `bg-err-soft` / `border-err-line` for the destructive
      confirm + error banner, and `text-warn` / `bg-warn-soft` for the truncated banner. */
   --color-err: var(--err);
+  /* DW-58: `bg-err-fill` for the white-on-red destructive fills (SettingsPanel uses
+     the bare utility; ConfirmRun uses the arbitrary `bg-[var(--err-fill)]` form). */
+  --color-err-fill: var(--err-fill);
   --color-err-soft: var(--err-soft);
   --color-err-line: var(--err-line);
   --color-warn: var(--warn);

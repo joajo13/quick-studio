@@ -24,7 +24,7 @@
  *    comment — with the same caveat, that the measurement runs where the suite runs.
  */
 
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import { contrastRatio, parseCssColor, relativeLuminance } from "./contrast.ts";
 
 describe("contrast.ts — parseCssColor / relativeLuminance / contrastRatio", () => {
@@ -128,6 +128,9 @@ function extractRuleBody(css: string, selectorPattern: RegExp): string {
 // text between the attribute selector and its own, different, `{`).
 const DARK_ROOT_SELECTOR = /(^|\n):root\s*\{/;
 const LIGHT_ROOT_SELECTOR = /(^|\n):root\[data-theme="light"\]\s*\{/;
+// The Tailwind alias block. Its body is flat declarations too, so `extractRuleBody`'s
+// "first `}` closes the rule" scan holds here as well.
+const THEME_INLINE_SELECTOR = /(^|\n)@theme\s+inline\s*\{/;
 
 /** Parse `--name: value;` custom-property declarations out of a rule body. */
 function parseCustomProperties(block: string): Map<string, string> {
@@ -311,5 +314,150 @@ describe("ERD small-label contrast (DW-67) — dark AND light, every ERD surface
         `measured contrast ratio ${f.ratio.toFixed(2)}:1, expected >= 4.5:1 (WCAG AA normal text).`,
     );
     expect(formatted).toEqual([]);
+  });
+});
+
+describe("destructive-fill contrast (DW-58) — white on --err-fill, --err as text, --err as the rim", () => {
+  // `--err` is dual-purpose: fine as TEXT on dark surfaces, but only 3.04:1 as a solid
+  // fill under a white label. DW-58 splits the fill out into `--err-fill` and leaves
+  // `--err` untouched, so this block has to lock BOTH directions at once — darkening
+  // `--err` must break the text lock, lightening `--err-fill` must break the fill lock.
+  //
+  // globals.css is read + parsed ONCE for the whole describe (not once per test).
+  let dark!: Map<string, string>;
+  let light!: Map<string, string>;
+  let themeInline!: Map<string, string>;
+
+  beforeAll(async () => {
+    const css = await readGlobalsCss();
+    dark = parseCustomProperties(extractRuleBody(css, DARK_ROOT_SELECTOR));
+    light = parseCustomProperties(extractRuleBody(css, LIGHT_ROOT_SELECTOR));
+    themeInline = parseCustomProperties(extractRuleBody(css, THEME_INLINE_SELECTOR));
+  });
+
+  const WHITE = "#ffffff";
+  const toHexChannel = (v: number): string =>
+    Math.min(255, Math.max(0, Math.round(v))).toString(16).padStart(2, "0");
+
+  /**
+   * Model CSS `filter: brightness(f)` on ONE opaque color. The shorthand filter functions
+   * multiply each channel in *sRGB* space (NOT in linear light), then the result is
+   * rounded to an integer channel and clamped to 0–255. Kept local to this file:
+   * `contrast.ts` stays pure color math.
+   *
+   * Note the real `hover:brightness-110` is an ELEMENT filter: it brightens the fill, the
+   * rim and the label together. Callers below apply it per color and assert the pairs that
+   * matter, rather than this helper modelling the whole button.
+   */
+  function brightness(hex: string, factor: number): string {
+    const { r, g, b } = parseCssColor(hex);
+    return `#${toHexChannel(r * factor)}${toHexChannel(g * factor)}${toHexChannel(b * factor)}`;
+  }
+
+  /**
+   * Composite an opaque color over an opaque backdrop at `alpha` — the effect of CSS
+   * `opacity` on a whole element, which fades the button's fill AND its white label
+   * together onto whatever sits behind them.
+   */
+  function composite(hex: string, alpha: number, backdrop: string): string {
+    const f = parseCssColor(hex);
+    const b = parseCssColor(backdrop);
+    const mix = (fc: number, bc: number): number => fc * alpha + bc * (1 - alpha);
+    return `#${toHexChannel(mix(f.r, b.r))}${toHexChannel(mix(f.g, b.g))}${toHexChannel(mix(f.b, b.b))}`;
+  }
+
+  test("brightness() multiplies each sRGB channel, rounds, and clamps at 255", () => {
+    // Hand-verifiable fixed points: 0x80 = 128, 128 * 1.1 = 140.8 -> 141 = 0x8d.
+    expect(brightness("#808080", 1.1)).toBe("#8d8d8d");
+    // 0xf0 = 240, 240 * 1.5 = 360 -> clamped to 255 = 0xff.
+    expect(brightness("#f0f0f0", 1.5)).toBe("#ffffff");
+    // A factor of 1 is the identity (modulo hex casing).
+    expect(brightness("#be342d", 1)).toBe("#be342d");
+  });
+
+  test("--err stays an AA text color (>= 4.5:1) on every dark surface", () => {
+    // Deliberately NOT appended to the DW-67 ERD lock's `TOKENS`: that lock iterates the
+    // dark AND light blocks, and `resolveToken` THROWS on a missing key — `--err` is
+    // dark-only (no `:root[data-theme="light"]` override), so it would blow up on light.
+    // Measured: --card 5.72, --muted 5.10, --background 6.11.
+    for (const surface of ["card", "muted", "background"] as const) {
+      const ratio = contrastRatio(resolveToken(dark, "err"), resolveToken(dark, surface));
+      expect(ratio).toBeGreaterThanOrEqual(4.5); // --err as text vs --{surface}
+    }
+  });
+
+  test("white on --err-fill clears AA at rest (>= 4.5:1)", () => {
+    // The label of both destructive buttons: `text-white` on `--err-fill`. Measured 5.65.
+    const ratio = contrastRatio(WHITE, resolveToken(dark, "err-fill"));
+    expect(ratio).toBeGreaterThanOrEqual(4.5); // #ffffff vs --err-fill
+  });
+
+  test("white on the hover-brightened --err-fill still clears AA (ConfirmRun hover:brightness-110)", () => {
+    // `hover:brightness-110` lightens the fill toward white, so the hover state is the
+    // BINDING one, not the rest state. Measured 4.84 (#be342d -> #d13932).
+    const ratio = contrastRatio(WHITE, brightness(resolveToken(dark, "err-fill"), 1.1));
+    expect(ratio).toBeGreaterThanOrEqual(4.5); // #ffffff vs brightness(1.10) of --err-fill
+  });
+
+  test("the settings hover:opacity-90 composite still clears AA (SettingsPanel remove-confirm)", () => {
+    // A genuinely different composite from brightness(): `opacity` fades the button as a
+    // whole, so the white LABEL fades onto the `bg-card` row too and both sides move.
+    // Measured 5.27 (#ad312c label-side #e8e8e9).
+    const card = resolveToken(dark, "card");
+    const ratio = contrastRatio(
+      composite(WHITE, 0.9, card),
+      composite(resolveToken(dark, "err-fill"), 0.9, card),
+    );
+    expect(ratio).toBeGreaterThanOrEqual(4.5); // faded white vs faded --err-fill, over --card
+  });
+
+  test("the --err rim clears WCAG 1.4.11 (>= 3:1), at rest and hovered, on the surface each button sits on", () => {
+    // The rim is the buttons' only boundary signal, so it answers to 1.4.11's 3:1 against
+    // the surface BEHIND the button — `--muted` for the ConfirmRun footer
+    // (`ConfirmRun.tsx`'s `bg-[var(--muted)]` button row), `--card` for the settings
+    // remove-confirm row. Measured: --err 5.10 / 5.72. The FILL alone would be 2.74 on
+    // --muted and 3.08 on --card, which is exactly why the rim stays `--err`. Not
+    // measured against `--background`: neither button sits there, and it is the single
+    // most favourable surface (an earlier pass certified 3.29 on a surface it never
+    // touches while the real one failed).
+    //
+    // The at-rest half overlaps the >= 4.5 text lock above and cannot fail on its own; it
+    // is kept because it pins a DIFFERENT criterion (1.4.11 boundary, not 1.4.3 text) and
+    // would survive a future decision to give the rim its own token. The hovered half is
+    // the part that measures something new: `hover:brightness-110` is an element filter,
+    // so it lightens the RIM as well as the fill (#ef6a63 -> #ff756d, red channel clamped),
+    // moving it toward the surface. Measured 5.92 / 6.64 — benign, but now locked.
+    //
+    // DARK BLOCK ONLY. `--err` has no light override (Story 7.3 kept the `--err*` group
+    // dark-only) and light theme has no activation path in `src/` today, so light-theme
+    // ratios are deliberately out of this lock's scope — see the deferred-work note on the
+    // `--err*` palette under a light theme.
+    for (const surface of ["muted", "card"] as const) {
+      const surfaceValue = resolveToken(dark, surface);
+      const rim = resolveToken(dark, "err");
+      expect(contrastRatio(rim, surfaceValue)).toBeGreaterThanOrEqual(3); // rim vs --{surface}
+      expect(contrastRatio(brightness(rim, 1.1), surfaceValue)).toBeGreaterThanOrEqual(3); // hovered rim
+    }
+  });
+
+  test("@theme inline maps --color-err-fill to var(--err-fill)", () => {
+    // `SettingsPanel` consumes the BARE `bg-err-fill` utility, which only exists because
+    // of this alias. Drop the alias and the button paints nothing — with every color
+    // assertion above still green, since the token itself is untouched.
+    expect(themeInline.get("color-err-fill")).toBe("var(--err-fill)");
+  });
+
+  test("the light block gains no err-fill key (one value serves both themes today)", () => {
+    // Mirrors the existing `light.has("err") === false`. `--err-fill` is declared once in
+    // `:root` with no light override on purpose: white-on-fill is theme-invariant (5.65:1
+    // whatever sits behind the button), and the fill itself still clears 1.4.11 against the
+    // light surfaces (5.27 on light --card, 4.91 on light --muted).
+    //
+    // This is a "did someone fork it by accident?" tripwire, NOT a prohibition. A future
+    // light-theme pass may legitimately want a light `--err-fill` — `--err` is only 2.84:1
+    // on light --card today, so that palette needs work — and when it does, updating this
+    // expectation is the correct move, not a workaround.
+    expect(dark.has("err-fill")).toBe(true);
+    expect(light.has("err-fill")).toBe(false);
   });
 });

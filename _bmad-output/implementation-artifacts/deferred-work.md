@@ -504,7 +504,8 @@ location: `src/ui/workspace/ConfirmRun.tsx` (`footerButtons`, the `bg-[var(--err
 severity: medium
 reason: The white-on-`--err` fill is a faithful port of `confirm-destructive.html` (`.dx-btn-danger { background: var(--err); color: #fff }`), which the spec designates the visual source of truth — so following the contract produced it. The fix (darken `--err`, or the label) is an epic-wide `--err` design-token decision touching every destructive surface, not an isolated component tweak, and it slightly deviates from the prototype the spec mandates. Deferred to a focused a11y/contrast pass over the Epic 7 `--err`/`--warn` palette rather than a unilateral change in a presentation-only story.
 decision: [2026-07-21, user] Darken the `--err` fill (or the on-err text) so the Confirm button label reaches >=4.5:1 WCAG AA — a small token tweak, no design-language change.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirm-err-contrast
 
 ### DW-59: `ConfirmRun` declares `role="alertdialog"` + `aria-modal="true"` but does not enforce modality — no focus trap, no scrim-click dismiss, and background content stays tabbable
 

@@ -47,7 +47,22 @@ describe("ConfirmRun — static structure", () => {
     // red IS present on the functional bits: danger icon, statement left border, Confirm button
     expect(html).toContain("text-[var(--err)]"); // danger icon
     expect(html).toContain("border-l-[var(--err)]"); // statement left border
-    expect(html).toContain("bg-[var(--err)]"); // filled Confirm button
+    expect(html).toContain("bg-[var(--err-fill)]"); // filled Confirm button — the AA fill (DW-58)
+    // DW-58: the Confirm button is a `--err` RIM over an `--err-fill` body, and the rim is
+    // load-bearing — it is the button's WCAG 1.4.11 boundary against the `--muted` footer
+    // (5.10:1 dark), where the fill alone would be 2.74:1. Without this assertion the rim
+    // could be dropped with every contrast test still green, since those measure the token
+    // values and not which element consumes them.
+    expect(html).toContain("border-[var(--err)]"); // Confirm button rim — the 1.4.11 boundary
+    // DW-58 regression guard: `--err` under white text is 3.04:1, below AA. No element may
+    // pair an `--err` FILL with a white label again. Both spellings of the fill are covered
+    // (`bg-[var(--err)]` and the bare `bg-err` utility the `--color-err` alias also emits)
+    // and both class orders, since utility order is authored and a class sorter could flip
+    // it. The negative lookahead keeps `bg-err-soft` / `bg-err-fill` from matching, and the
+    // rim (`border-[var(--err)]`) is untouched — this targets background utilities only.
+    const errFillSpelling = String.raw`(?:bg-\[var\(--err\)\]|bg-err(?![-\w]))`;
+    expect(html).not.toMatch(new RegExp(`${errFillSpelling}[^"']*text-white`));
+    expect(html).not.toMatch(new RegExp(`text-white[^"']*${errFillSpelling}`));
     // no hardcoded Tailwind palette utilities survive the retone
     expect(html).not.toMatch(/amber-/);
     expect(html).not.toMatch(/red-[0-9]/);
