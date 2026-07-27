@@ -93,16 +93,25 @@ describe("live sandbox origin", () => {
 });
 
 // DW-48: `startSandboxServer` CLAMPS its requested host to loopback rather than binding
-// it. The IPv4 case asserts the BIND, not just the derived string — a `0.0.0.0` request
-// that produced a `127.0.0.1` origin while still listening on the wildcard would pass a
-// string-only assertion and leave the tokenless guest on the LAN, which is exactly the
-// failure the clamp exists to prevent. The IPv6 cases assert the derived origin ONLY, and
-// deliberately do not fetch: an IPv6 loopback round-trip is not portable across the boxes
-// this suite runs on (the pre-existing `::1` case never fetched either), so a regression
-// that derived `[::1]` while binding `::` would slip past this file. What covers that gap
-// instead is construction plus `binding.test.ts`: there is exactly ONE host value inside
-// `startSandboxServer`, so bind and origin cannot disagree without the clamp itself being
-// wrong, and the clamp is unit-tested exhaustively there.
+// it. What these tests actually cover, stated exactly, because the clamp is a containment
+// control and an overclaiming comment here is worse than no comment:
+//
+//  - the DERIVED ORIGIN for every clamped shape (`0.0.0.0` -> `127.0.0.1`, `::` -> `::1`,
+//    `::1` verbatim), which is what Ring 2 injects and points the iframe at;
+//  - that the reported IPv4 origin is LIVE — a fetch of it returns the guest document
+//    under `GUEST_CSP`, so the clamp did not simply rewrite a string onto a dead address.
+//
+// What they do NOT and CANNOT cover from here: that the socket is loopback-ONLY. A server
+// bound to `0.0.0.0` also answers on `127.0.0.1`, so the fetch below passes either way and
+// cannot by itself refute a wildcard socket; and the IPv6 cases deliberately do not fetch
+// at all, since an IPv6 loopback round-trip is not portable across the boxes this suite
+// runs on (the pre-existing `::1` case never fetched either). What rules the wildcard
+// socket out instead is construction plus `binding.test.ts`: there is exactly ONE host
+// value inside `startSandboxServer`, feeding both `Bun.serve` and `deriveOpenUrl`, so bind
+// and origin cannot disagree unless the clamp itself is wrong — and the clamp is
+// unit-tested exhaustively there. A negative assertion (bind a routable local address,
+// expect connection refused) is what would close the gap; it is left out because the
+// available non-loopback local addresses differ per box and per CI runner.
 //
 // Requesting a wildcard here is safe in a way that booting a real wildcard CORE is not
 // (see `server.test.ts`): this origin serves only the guest document, carries no session
@@ -112,9 +121,10 @@ describe("loopback clamp + navigable origin under wildcard / IPv6 binds", () => 
     const s = startSandboxServer({ host: "0.0.0.0", port: 0, bundle: { js: STUB_JS } });
     try {
       expect(s.origin).toBe(`http://127.0.0.1:${s.port}`);
-      // The origin is not merely a nicer string: the socket is really there. A fetch of
-      // the reported origin proves bind and origin derive from the same clamped host, so
-      // the injected `__QS_SANDBOX_ORIGIN__` can never name a host nothing is listening on.
+      // The origin is not merely a nicer string: the socket is really there, serving the
+      // guest under `GUEST_CSP`. This proves the injected `__QS_SANDBOX_ORIGIN__` names a
+      // live address — NOT that the socket is loopback-only (a wildcard bind answers here
+      // too); see the block comment above for what covers that.
       const res = await fetch(`${s.origin}/`);
       expect(res.status).toBe(200);
       expect(res.headers.get("content-security-policy") ?? "").toContain("connect-src 'none'");

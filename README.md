@@ -180,11 +180,13 @@ equivalent):
   stderr and an in-page banner. Only the session token stands between the
   network and your data — use with intent. The Ring 3 chart sandbox is *not*
   exposed with it: it always binds loopback, so **chat answers that carry a
-  chart do not render off-host**. Because a chart answer replaces its prose
-  bubble with the sandbox frame, a remote viewer loses that whole answer, not
-  just the picture — they see an empty pane. (The **Report** tab is unaffected:
-  it draws in-app.) The sandbox origin carries no session token, so making it
-  reachable would mean exposing something with nothing left to authenticate.
+  chart do not render off-host** — a remote viewer sees an empty pane where the
+  chart would be, and loses the prose narration too (a chart answer replaces its
+  text bubble with the sandbox frame). The generated SQL and the result table
+  still render, so the data itself is not lost. (The **Report** tab is
+  unaffected: it draws in-app.) The sandbox origin carries no session token, so
+  making it reachable would mean exposing something with nothing left to
+  authenticate.
 - **`QS_PORT`** — overrides the bind port. `0` (the default) picks an ephemeral
   free port.
 - **`QS_MODE`** — default run mode when no flag/URL is given: `persistent`

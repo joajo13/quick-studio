@@ -71,9 +71,11 @@ export type Core = {
   readonly openUrl: string;
   /**
    * The Ring 3 sandbox origin (Story 5.5): a SEPARATE `Bun.serve` on a distinct
-   * ephemeral port, always bound to LOOPBACK — NOT to the same host as Core when
-   * the Core is exposed (DW-48; `startSandboxServer` clamps it, see there for why a
-   * tokenless origin must never be LAN-reachable). Ring 2 points the untrusted
+   * ephemeral port, bound to LOOPBACK — NOT to the same host as Core when the Core is
+   * exposed (DW-48; `startSandboxServer` clamps it, see there for why a tokenless origin
+   * must never be LAN-reachable). The clamp lives in that factory, so the guarantee holds
+   * for every real boot but is NOT enforced here: a caller that injects its own
+   * `StartCoreOptions.startSandboxServer` supplies this origin unchecked. Ring 2 points the untrusted
    * `sandbox="allow-scripts"` iframe `src` at this origin (also injected into the
    * served HTML as `window.__QS_SANDBOX_ORIGIN__`). Torn down by `stop()`.
    */
@@ -268,7 +270,8 @@ function safeCspNonce(nonce: string): string {
  *   `src/ui`, `src/shared`, `src/core`, or the built bundle (this UI runs CodeMirror 6,
  *   not Monaco, and micromark, not MDX).
  * - `frame-src <sandboxOrigin>`. The Ring 3 sandbox lives on a DIFFERENT loopback
- *   PORT, hence a different origin, so `default-src 'self'` would block the iframe and
+ *   PORT — and, under an exposed Core, a different HOST too, since it clamps to loopback
+ *   while Core does not (DW-48) — hence a different origin, so `default-src 'self'` would block the iframe and
  *   break the whole Ring 2 -> Ring 3 loop. The decision comes from the shared
  *   `shared/sandbox-origin.ts`, which is the point: `isUsableSandboxOrigin` is the same
  *   function `renderIndexHtml` runs before injecting `window.__QS_SANDBOX_ORIGIN__` and
@@ -1046,8 +1049,9 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   // The accepted cost is stated on all three exposure surfaces (stderr warning, README,
   // in-page `ExposureBanner`): in exposed mode the injected `__QS_SANDBOX_ORIGIN__`
   // resolves against the VIEWER's loopback, so a chat answer carrying a chart does not
-  // render off-host — and since such an answer has no prose bubble, the remote viewer
-  // loses the whole answer. The Core's own bind is untouched by any of this.
+  // render off-host — the chart AND the prose narration it displaces are both missing,
+  // while the SQL and the result table still render (`ChatQueryRun` is not gated on the
+  // chart). The Core's own bind is untouched by any of this.
   const startSandbox = options.startSandboxServer ?? startSandboxServer;
   const sandboxServer = startSandbox({ host: bindHost, port: 0, bundle: sandboxBundle });
   const sandboxOrigin = sandboxServer.origin;
@@ -1094,7 +1098,7 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   }
   if (!isUsableSandboxOrigin(sandboxOrigin)) {
     console.warn(
-      `[csp] unusable sandbox origin ${JSON.stringify(sandboxOrigin)} — frame-src falls back to 'none' and report visualizations will not render`,
+      `[csp] unusable sandbox origin ${JSON.stringify(sandboxOrigin)} — frame-src falls back to 'none' and chat answers carrying a chart will not render`,
     );
   }
 

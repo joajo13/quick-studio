@@ -31,17 +31,22 @@ export function resolveBindHost(raw: string | undefined): string {
   return trimmed === "" ? DEFAULT_HOST : trimmed;
 }
 
-/** Any IPv4 in the `127.0.0.0/8` loopback range, validated as a real dotted quad. */
+/**
+ * Any IPv4 in the `127.0.0.0/8` loopback range, matched as a dotted quad. SHAPE only —
+ * `\d{1,3}` does not bound an octet to 0-255, so `127.1.2.999` matches (see
+ * {@link isLoopbackHost}).
+ */
 const LOOPBACK_V4_RE = /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
 
 /**
  * True when `host` is a loopback address that is unreachable from other
  * machines: `localhost`, IPv6 loopback `::1`, or any IPv4 in `127.0.0.0/8`.
- * Comparison is case-insensitive. The `127.0.0.0/8` test is a validated
- * dotted-quad match — NOT a `127.` prefix — so a hostname like
- * `127.attacker.example` is correctly classified as NON-loopback (exposed),
- * and its Port-Exposure Warning still fires. Everything else — including the
- * wildcards `0.0.0.0` / `::` — is NOT loopback.
+ * Comparison is case-insensitive. The `127.0.0.0/8` test is a dotted-quad
+ * match — NOT a `127.` prefix — so a hostname like `127.attacker.example` is
+ * correctly classified as NON-loopback (exposed), and its Port-Exposure Warning
+ * still fires. Everything else — including the wildcards `0.0.0.0` / `::` — is
+ * NOT loopback. Known limitation: the quad match checks shape, not the 0-255
+ * octet range, so a typo like `127.1.2.999` is classified loopback here.
  */
 export function isLoopbackHost(host: string): boolean {
   const h = host.trim().toLowerCase();
@@ -115,11 +120,15 @@ export function isExposed(host: string): boolean {
  *
  * Inherited limitation, named rather than implied: `isLoopbackHost`'s dotted-quad match
  * checks the SHAPE (`127.` + three 1-3 digit groups), not the 0-255 range, so a typo like
- * `127.1.2.999` is classified loopback here and passed through verbatim. That is not a
- * containment hole — the value is still not routable, and nothing binds it, because Core's
- * own `Bun.serve` rejects the address and fails the boot before this is reached. It is a
- * diagnosis wart (the boot dies on a misleading port error, and no Port-Exposure Warning
- * fires for a host that is not really loopback), and it belongs to `isLoopbackHost`.
+ * `127.1.2.999` is classified loopback here and passed through verbatim. It is not a
+ * CONTAINMENT hole — no such value is routable, so nothing off-machine can reach it either
+ * way, and that property holds for this function alone. What it does cost is bindability
+ * and diagnosis: `Bun.serve` will refuse the address, so a direct caller of
+ * `startSandboxServer` (the tests are direct callers) gets a throw rather than a server,
+ * and no Port-Exposure Warning fires for a host that is not really loopback.
+ * Deliberately NOT argued away as "Core's own boot rejects it first" — that would make the
+ * guarantee a property of one call order, which is exactly what this function exists to
+ * stop doing. The wart belongs to `isLoopbackHost` and is tracked there.
  *
  * Pure and total; mirrors `resolveBindHost`/`deriveOpenUrl`'s trim + lower-case
  * normalization so a direct caller cannot smuggle a padded or mixed-case host past it.

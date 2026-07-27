@@ -215,10 +215,16 @@ function LauncherRail({
  * Named precisely, because the DW-48 ledger entry's shorthand ("report
  * visualizations") points at the wrong surface: `SandboxFrame`'s only consumer
  * is `ChatTabView`, i.e. CHAT answers carrying a chart fence. The Report tab
- * draws with Recharts in-app (`report/ReportChart.tsx`) and is unaffected. The
- * loss is also wider than "no picture": `decideMessageView` sets
- * `showBubble: chartDoc === null`, so a chart answer has no prose bubble to
- * fall back to and the remote viewer loses the entire answer.
+ * draws with Recharts in-app (`report/ReportChart.tsx`) and is unaffected.
+ *
+ * Scoped precisely too, because overstating it sends people hunting a bug that
+ * is not there: the loss is wider than "no picture" but narrower than "the whole
+ * answer". `decideMessageView` sets `showBubble: chartDoc === null && !reportOnlyBlank`,
+ * so a chart-bearing answer does lose its prose narration along with the chart —
+ * but `ChatQueryRun` (the generated SQL, the KPI tiles and the full result grid)
+ * renders unconditionally beside it, and a chart only exists for a run that
+ * produced rows. The remote viewer keeps the data; they lose the chart and the
+ * words around it.
  */
 function ExposureBanner({ exposure }: { exposure: ExposureInfo }): React.JSX.Element {
   return (
@@ -238,10 +244,11 @@ function ExposureBanner({ exposure }: { exposure: ExposureInfo }): React.JSX.Ele
       </p>
       <p className="mt-1 text-red-50">
         The chart sandbox stays loopback-only while exposed, so chat answers carrying a chart
-        do not render off this machine — and because a chart answer replaces its prose bubble
-        with the chart frame, off-host you lose that whole answer, not just the picture. The
-        Report tab is unaffected. This is deliberate: the sandbox origin carries no session
-        token, so exposing it would expose something with nothing left to authenticate.
+        do not render off this machine — you lose the chart and the prose around it (a chart
+        answer replaces its text bubble with the chart frame), but the generated SQL and the
+        result table still render. The Report tab is unaffected. This is deliberate: the
+        sandbox origin carries no session token, so exposing it would expose something with
+        nothing left to authenticate.
       </p>
     </div>
   );

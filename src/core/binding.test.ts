@@ -149,7 +149,7 @@ describe("sandboxBindHost — the Ring 3 loopback clamp", () => {
     expect(sandboxBindHost("dev.local")).toBe("127.0.0.1");
   });
 
-  // Inherits `isLoopbackHost`'s validated dotted-quad match rather than a `127.` prefix,
+  // Inherits `isLoopbackHost`'s dotted-quad match rather than a `127.` prefix,
   // so a lookalike hostname is clamped like any other non-loopback host — it is NOT
   // trusted into a verbatim pass-through by looking vaguely like the loopback range.
   test("127.attacker.example is NOT loopback and is clamped to 127.0.0.1", () => {

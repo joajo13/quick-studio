@@ -195,8 +195,9 @@ try {
         "  Note: the chart sandbox stays loopback-only even in exposed mode, so\n" +
         "  chat answers carrying a chart render ONLY on this machine. A chart\n" +
         "  answer replaces its prose bubble with the sandbox frame, so a remote\n" +
-        "  viewer loses that whole answer, not just the picture. The Report tab\n" +
-        "  is unaffected (it draws in-app). Deliberate, not a fault.\n" +
+        "  viewer loses the chart AND that prose — the generated SQL and the\n" +
+        "  result table still render. The Report tab is unaffected (it draws\n" +
+        "  in-app). Deliberate, not a fault.\n" +
         "\n" +
         "  To revert to localhost-only:\n" +
         "    1. Stop quick-studio.\n" +
