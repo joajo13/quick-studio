@@ -979,9 +979,17 @@ export type SandboxRenderDoc = {
 
 /**
  * A frame pushed Ring 2 -> guest (host -> Ring 3). One-way for DATA: the ONLY
- * inbound frame is `render`, which carries already-public canonical
+ * inbound frame is `render`, which carries the user's own query output as canonical
  * {@link FrozenData} plus escaped Markdown and an optional validated {@link ChartSpec}
- * (Story 5.6). There is deliberately NO inbound frame that can hand the guest a secret,
+ * (Story 5.6). "The user's own output" is the honest characterization and it is doing
+ * real work here (DW-47): these are the same rows already on screen in the results pane,
+ * which is why handing them to an opaque-origin guest over `targetOrigin: "*"` — the only
+ * target an opaque origin admits — is an accepted trade rather than a leak, even though
+ * the guest's `connect-src 'none'` cannot stop scripted same-frame navigation from
+ * carrying them off-machine. The canonical record of that trade, its mitigations and its
+ * revisit trigger lives on `GUEST_CSP` in `core/sandbox-server.ts` — this is a pointer,
+ * not a second copy. Revisit if untrusted or shared reports are ever introduced.
+ * There is deliberately NO inbound frame that can hand the guest a secret,
  * a live handle, or a capability, and none that asks the guest to request data or trigger
  * a query — that separation is structural, not policy. `markdown` is untrusted text
  * (length-capped); `chart` is `null` or a spec whose channels name existing `data` columns.

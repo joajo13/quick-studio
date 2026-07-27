@@ -92,19 +92,50 @@ describe("live sandbox origin", () => {
   });
 });
 
-describe("navigable origin under wildcard / IPv6 binds", () => {
-  test("a wildcard 0.0.0.0 bind exposes a navigable 127.0.0.1 origin (not http://0.0.0.0)", async () => {
-    // The server BINDS the raw wildcard, but its `origin` (the iframe `src`) must be a
-    // host a browser can actually reach — 0.0.0.0 is non-navigable.
+// DW-48: `startSandboxServer` CLAMPS its requested host to loopback rather than binding
+// it. The IPv4 case asserts the BIND, not just the derived string — a `0.0.0.0` request
+// that produced a `127.0.0.1` origin while still listening on the wildcard would pass a
+// string-only assertion and leave the tokenless guest on the LAN, which is exactly the
+// failure the clamp exists to prevent. The IPv6 cases assert the derived origin ONLY, and
+// deliberately do not fetch: an IPv6 loopback round-trip is not portable across the boxes
+// this suite runs on (the pre-existing `::1` case never fetched either), so a regression
+// that derived `[::1]` while binding `::` would slip past this file. What covers that gap
+// instead is construction plus `binding.test.ts`: there is exactly ONE host value inside
+// `startSandboxServer`, so bind and origin cannot disagree without the clamp itself being
+// wrong, and the clamp is unit-tested exhaustively there.
+//
+// Requesting a wildcard here is safe in a way that booting a real wildcard CORE is not
+// (see `server.test.ts`): this origin serves only the guest document, carries no session
+// token and has no `/rpc` — and after the clamp it is not listening off-loopback at all.
+describe("loopback clamp + navigable origin under wildcard / IPv6 binds", () => {
+  test("a wildcard 0.0.0.0 request binds 127.0.0.1 and reports that origin", async () => {
     const s = startSandboxServer({ host: "0.0.0.0", port: 0, bundle: { js: STUB_JS } });
     try {
       expect(s.origin).toBe(`http://127.0.0.1:${s.port}`);
+      // The origin is not merely a nicer string: the socket is really there. A fetch of
+      // the reported origin proves bind and origin derive from the same clamped host, so
+      // the injected `__QS_SANDBOX_ORIGIN__` can never name a host nothing is listening on.
+      const res = await fetch(`${s.origin}/`);
+      expect(res.status).toBe(200);
+      expect(res.headers.get("content-security-policy") ?? "").toContain("connect-src 'none'");
+      expect(await res.text()).toContain('src="/guest.js"');
     } finally {
       await s.stop();
     }
   });
 
-  test("an IPv6 loopback ::1 bind is bracketed so the port separator is unambiguous", async () => {
+  test("a wildcard :: request binds ::1 — the address family is preserved", async () => {
+    const s = startSandboxServer({ host: "::", port: 0, bundle: { js: STUB_JS } });
+    try {
+      // Clamping v6 to `127.0.0.1` would also be loopback, but it would retire
+      // `deriveOpenUrl`'s bracketing path from the binds that reach it today.
+      expect(s.origin).toBe(`http://[::1]:${s.port}`);
+    } finally {
+      await s.stop();
+    }
+  });
+
+  test("an IPv6 loopback ::1 bind is unchanged and bracketed so the port separator is unambiguous", async () => {
     const s = startSandboxServer({ host: "::1", port: 0, bundle: { js: STUB_JS } });
     try {
       expect(s.origin).toBe(`http://[::1]:${s.port}`);

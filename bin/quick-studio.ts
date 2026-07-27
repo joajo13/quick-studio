@@ -192,6 +192,12 @@ try {
         "  through it, access the connected database. Only the session token\n" +
         "  stands between them and your data.\n" +
         "\n" +
+        "  Note: the chart sandbox stays loopback-only even in exposed mode, so\n" +
+        "  chat answers carrying a chart render ONLY on this machine. A chart\n" +
+        "  answer replaces its prose bubble with the sandbox frame, so a remote\n" +
+        "  viewer loses that whole answer, not just the picture. The Report tab\n" +
+        "  is unaffected (it draws in-app). Deliberate, not a fault.\n" +
+        "\n" +
         "  To revert to localhost-only:\n" +
         "    1. Stop quick-studio.\n" +
         "    2. Unset QS_HOST (or set QS_HOST=127.0.0.1).\n" +

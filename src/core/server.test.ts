@@ -205,7 +205,9 @@ describe("overBodyLimit predicate (DW-7)", () => {
 describe("Ring 3 sandbox origin (Story 5.5)", () => {
   test("core.sandboxOrigin is a distinct loopback origin injected into the HTML", async () => {
     expect(core.sandboxOrigin).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
-    // A genuinely separate origin: same host, DIFFERENT port from the Core.
+    // A genuinely separate origin: a DIFFERENT port from the Core. (Same host only
+    // because this boot is loopback anyway — under an exposed Core the sandbox stays
+    // on loopback while the Core does not, see the DW-48 clamp in `sandbox-server.ts`.)
     expect(core.sandboxOrigin).not.toBe(core.url);
     const html = await (await fetch(`${core.url}/`)).text();
     expect(html).toContain("window.__QS_SANDBOX_ORIGIN__");

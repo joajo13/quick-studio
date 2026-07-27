@@ -71,7 +71,9 @@ export type Core = {
   readonly openUrl: string;
   /**
    * The Ring 3 sandbox origin (Story 5.5): a SEPARATE `Bun.serve` on a distinct
-   * loopback port bound to the same host as Core. Ring 2 points the untrusted
+   * ephemeral port, always bound to LOOPBACK — NOT to the same host as Core when
+   * the Core is exposed (DW-48; `startSandboxServer` clamps it, see there for why a
+   * tokenless origin must never be LAN-reachable). Ring 2 points the untrusted
    * `sandbox="allow-scripts"` iframe `src` at this origin (also injected into the
    * served HTML as `window.__QS_SANDBOX_ORIGIN__`). Torn down by `stop()`.
    */
@@ -1026,10 +1028,26 @@ export async function startCore(port = 0, options: StartCoreOptions = {}): Promi
   const boundPort = server.port ?? 0;
 
   // Ring 3 sandbox origin (Story 5.5): a SECOND `Bun.serve` on a distinct ephemeral
-  // port bound to the SAME host — a genuinely separate origin serving only the
-  // untrusted guest doc + its bundle under a locked-down CSP. Started synchronously
-  // (Bun.serve binds before returning) so its origin is known before the HTML shell
-  // is rendered. Torn down alongside the Core in `stop()`.
+  // port — a genuinely separate origin serving only the untrusted guest doc + its
+  // bundle under a locked-down CSP. Started synchronously (Bun.serve binds before
+  // returning) so its origin is known before the HTML shell is rendered. Torn down
+  // alongside the Core in `stop()`.
+  //
+  // `bindHost` is passed as a REQUEST, not a decree (DW-48): `startSandboxServer`
+  // clamps it to loopback, so the sandbox binds `127.0.0.1`/`::1` even when the Core
+  // itself is exposed via `QS_HOST=0.0.0.0`. That asymmetry is intentional — the Core at
+  // least HAS an authentication gate (the per-boot session token on `/rpc`),
+  // whereas the guest origin has no credential of any kind, so exposing it exposes
+  // something with nothing left to fail closed on. Note the argument deliberately rests
+  // on "the guest has no gate", not on "the token is airtight": the same exposed Core
+  // serves `/live/<id>`, which injects that token into a page meant to be opened by
+  // link, so the token is not a boundary this decision should lean on.
+  //
+  // The accepted cost is stated on all three exposure surfaces (stderr warning, README,
+  // in-page `ExposureBanner`): in exposed mode the injected `__QS_SANDBOX_ORIGIN__`
+  // resolves against the VIEWER's loopback, so a chat answer carrying a chart does not
+  // render off-host — and since such an answer has no prose bubble, the remote viewer
+  // loses the whole answer. The Core's own bind is untouched by any of this.
   const startSandbox = options.startSandboxServer ?? startSandboxServer;
   const sandboxServer = startSandbox({ host: bindHost, port: 0, bundle: sandboxBundle });
   const sandboxOrigin = sandboxServer.origin;

@@ -203,6 +203,22 @@ function LauncherRail({
  * Rendered at the very top of the shell (above the rail/tab/panel chrome) only
  * when the Core bound a non-loopback address. States the risk and the exact
  * steps to revert to localhost-only.
+ *
+ * It also carries the DW-48 consequence, and this is the surface that matters
+ * most for it: the stderr Port-Exposure Warning is read by the OPERATOR on the
+ * host machine, while the person who actually hits the empty pane is a REMOTE
+ * viewer, for whom this banner is the only surface they ever see. The Ring 3
+ * sandbox binds loopback even in exposed mode (it is tokenless and must never
+ * be LAN-reachable), so off-host the injected `__QS_SANDBOX_ORIGIN__` resolves
+ * against the VIEWER's own machine and the frame never loads.
+ *
+ * Named precisely, because the DW-48 ledger entry's shorthand ("report
+ * visualizations") points at the wrong surface: `SandboxFrame`'s only consumer
+ * is `ChatTabView`, i.e. CHAT answers carrying a chart fence. The Report tab
+ * draws with Recharts in-app (`report/ReportChart.tsx`) and is unaffected. The
+ * loss is also wider than "no picture": `decideMessageView` sets
+ * `showBubble: chartDoc === null`, so a chart answer has no prose bubble to
+ * fall back to and the remote viewer loses the entire answer.
  */
 function ExposureBanner({ exposure }: { exposure: ExposureInfo }): React.JSX.Element {
   return (
@@ -219,6 +235,13 @@ function ExposureBanner({ exposure }: { exposure: ExposureInfo }): React.JSX.Ele
         session token is the only thing protecting your data. To revert to localhost-only: stop
         quick-studio, unset <code className="rounded bg-red-700 px-1">QS_HOST</code> (or set{" "}
         <code className="rounded bg-red-700 px-1">QS_HOST=127.0.0.1</code>), then start it again.
+      </p>
+      <p className="mt-1 text-red-50">
+        The chart sandbox stays loopback-only while exposed, so chat answers carrying a chart
+        do not render off this machine — and because a chart answer replaces its prose bubble
+        with the chart frame, off-host you lose that whole answer, not just the picture. The
+        Report tab is unaffected. This is deliberate: the sandbox origin carries no session
+        token, so exposing it would expose something with nothing left to authenticate.
       </p>
     </div>
   );

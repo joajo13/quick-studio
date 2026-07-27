@@ -67,6 +67,71 @@ export function isExposed(host: string): boolean {
   return !isLoopbackHost(host);
 }
 
+/**
+ * Clamp a requested bind host down to loopback for the Ring 3 sandbox origin (DW-48).
+ *
+ * The Core's bind is a user decision — `QS_HOST=0.0.0.0` deliberately exposes the Core
+ * to the LAN, and the Port-Exposure Warning says so. The sandbox origin is NOT the same
+ * decision. It carries NO session token, NO `/rpc`, NO `/chat/stream` and no credential
+ * of any kind, which is precisely why it must never be reachable off-machine: a tokenless
+ * origin has nothing to authenticate WITH, so "exposed" there means "anyone on the network
+ * can load the guest document and script the frame", with no gate left to stand between
+ * them and it. Propagating the Core's bind into the sandbox `Bun.serve` also produced a
+ * second, quieter failure: `deriveOpenUrl` normalizes the injected `__QS_SANDBOX_ORIGIN__`
+ * to loopback, so under a wildcard bind the served page pointed a REMOTE browser at an
+ * origin resolved against that browser's own machine — a silently blank preview pane. One
+ * clamped value, used for both the bind and the derived origin, removes both failures at
+ * once: the socket and the navigable string can no longer disagree.
+ *
+ * The rule, in order:
+ *  - a host {@link isLoopbackHost} already accepts (`localhost`, `127.0.0.0/8`, `::1`)
+ *    passes through verbatim, so today's loopback behavior — every origin, every existing
+ *    test — is byte-identical and this function is invisible in the default configuration;
+ *  - anything else is clamped to a loopback address chosen by the SHAPE OF THE LITERAL: a
+ *    host that looks IPv6 (the wildcard `::`, a bracketed `[::]`, or anything containing
+ *    a `:`) becomes `::1`, and everything else — IPv4 wildcard, routable IPv4, a hostname
+ *    — becomes `127.0.0.1`.
+ *
+ * "Shape of the literal", not "address family", and the distinction is deliberate: this
+ * is a string test, not a resolver. A NAME is always clamped to `127.0.0.1` even if it
+ * resolves AAAA-only, and a malformed value carrying a stray colon (`dev.local:8080`,
+ * which `resolveBindHost` does not reject) reads as IPv6-shaped. Neither is a hazard —
+ * every output is loopback either way, which is the property that matters — but calling
+ * it family detection would promise a lookup that does not happen.
+ *
+ * Preserving the shape is load-bearing rather than tidy for the literals: clamping an IPv6 bind to
+ * `127.0.0.1` would bind and serve perfectly well, but it would also mean `deriveOpenUrl`'s
+ * bracketing branch (`http://[::1]:<port>`) stopped being reached by exactly the binds that
+ * reach it today, quietly turning the recorded CSP3 `host-part` IPv6 residual in
+ * `shellCspHeaders` into a description of dead code. Keeping the family keeps that path —
+ * and the reasoning written around it — honest.
+ *
+ * Note the deliberate asymmetry with `isWildcardHost`: this does NOT special-case the
+ * wildcards, because a clamp that only caught `0.0.0.0`/`::` would still hand the guest to
+ * the LAN for a concrete routable bind like `QS_HOST=192.168.1.50`. The predicate is
+ * "already unreachable from other machines", not "looks like a wildcard" — which is also
+ * why the loopback test is `isLoopbackHost` rather than a `127.` prefix, so a lookalike
+ * hostname such as `127.attacker.example` is clamped, not trusted.
+ *
+ * Inherited limitation, named rather than implied: `isLoopbackHost`'s dotted-quad match
+ * checks the SHAPE (`127.` + three 1-3 digit groups), not the 0-255 range, so a typo like
+ * `127.1.2.999` is classified loopback here and passed through verbatim. That is not a
+ * containment hole — the value is still not routable, and nothing binds it, because Core's
+ * own `Bun.serve` rejects the address and fails the boot before this is reached. It is a
+ * diagnosis wart (the boot dies on a misleading port error, and no Port-Exposure Warning
+ * fires for a host that is not really loopback), and it belongs to `isLoopbackHost`.
+ *
+ * Pure and total; mirrors `resolveBindHost`/`deriveOpenUrl`'s trim + lower-case
+ * normalization so a direct caller cannot smuggle a padded or mixed-case host past it.
+ */
+export function sandboxBindHost(bindHost: string): string {
+  const h = bindHost.trim().toLowerCase();
+  if (isLoopbackHost(h)) return h;
+  // IPv6-shaped: the wildcard `::`, a bracketed literal, or any address carrying a `:`.
+  if (h.includes(":")) return "::1";
+  return "127.0.0.1";
+}
+
 /** The scheme-default HTTP port, omitted from a navigable URL's authority. */
 const HTTP_DEFAULT_PORT = 80;
 
