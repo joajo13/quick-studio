@@ -16,7 +16,126 @@
 
 import { describe, expect, mock, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ConfirmRun } from "./ConfirmRun.tsx";
+import {
+  ConfirmRun,
+  affectedRowsBadge,
+  isScrimDismiss,
+  nextTrapIndex,
+  typeToConfirmMatches,
+  typeToConfirmTarget,
+} from "./ConfirmRun.tsx";
+
+/**
+ * DW-59..DW-63 hardening: `affectedRowsBadge` (DW-61), `typeToConfirmTarget` /
+ * `typeToConfirmMatches` (DW-62) and `nextTrapIndex` (the DW-59 focus-trap math)
+ * are exported as DOM-free pure helpers specifically so their edge cases can be
+ * unit-tested directly, without a renderer — matching the no-jsdom convention.
+ */
+describe("affectedRowsBadge", () => {
+  test("undefined affectedRows -> no badge", () => {
+    expect(affectedRowsBadge(undefined)).toBeNull();
+  });
+
+  test("a positive count -> destructive, pluralized", () => {
+    expect(affectedRowsBadge(142)).toEqual({ count: "142", noun: "rows", destructive: true });
+  });
+
+  test("exactly 1 -> destructive, singular", () => {
+    expect(affectedRowsBadge(1)).toEqual({ count: "1", noun: "row", destructive: true });
+  });
+
+  test("zero -> neutral, never a red destruction badge", () => {
+    expect(affectedRowsBadge(0)).toEqual({ count: "0", noun: "No rows", destructive: false });
+  });
+
+  test("NaN, Infinity, negative or fractional counts -> no badge at all", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5, 2.5]) {
+      expect(affectedRowsBadge(bad)).toBeNull();
+    }
+  });
+
+  test("counts past 2^53 are rejected rather than rendered in exponential notation", () => {
+    expect(affectedRowsBadge(1e21)).toBeNull();
+    expect(affectedRowsBadge(Number.MAX_SAFE_INTEGER + 2)).toBeNull();
+    // the boundary itself is still a legitimate (if absurd) count
+    expect(affectedRowsBadge(Number.MAX_SAFE_INTEGER)?.count).toBe(String(Number.MAX_SAFE_INTEGER));
+  });
+});
+
+describe("typeToConfirmTarget", () => {
+  test("undefined objectName -> gate does not mount", () => {
+    expect(typeToConfirmTarget(undefined)).toBeNull();
+  });
+
+  test("blank or whitespace-only objectName -> gate does not mount", () => {
+    expect(typeToConfirmTarget("")).toBeNull();
+    expect(typeToConfirmTarget("   ")).toBeNull();
+  });
+
+  test("a padded name is trimmed for the hint / comparison target", () => {
+    expect(typeToConfirmTarget("  public.orders  ")).toBe("public.orders");
+  });
+});
+
+describe("typeToConfirmMatches", () => {
+  test("matches when both the typed value and the target are trimmed", () => {
+    expect(typeToConfirmMatches("public.orders", "public.orders")).toBe(true);
+    expect(typeToConfirmMatches("  public.orders  ", "public.orders")).toBe(true);
+    expect(typeToConfirmMatches("public.orders", "  public.orders  ")).toBe(true);
+  });
+
+  test("does not match a partial or different name", () => {
+    expect(typeToConfirmMatches("public.order", "public.orders")).toBe(false);
+    expect(typeToConfirmMatches("", "public.orders")).toBe(false);
+  });
+});
+
+describe("nextTrapIndex", () => {
+  test("Tab at the last focusable wraps to the first", () => {
+    expect(nextTrapIndex(3, 2, false)).toBe(0);
+  });
+
+  test("Shift+Tab at the first focusable wraps to the last", () => {
+    expect(nextTrapIndex(3, 0, true)).toBe(2);
+  });
+
+  test("steps forward / backward normally within bounds", () => {
+    expect(nextTrapIndex(3, 0, false)).toBe(1);
+    expect(nextTrapIndex(3, 2, true)).toBe(1);
+  });
+
+  test("no focusables (everything disabled while busy) -> no valid index", () => {
+    expect(nextTrapIndex(0, 0, false)).toBe(-1);
+  });
+
+  test("focus not found among the tracked focusables starts from an end", () => {
+    expect(nextTrapIndex(3, -1, false)).toBe(0);
+    expect(nextTrapIndex(3, -1, true)).toBe(2);
+  });
+});
+
+describe("isScrimDismiss", () => {
+  // Stand-ins for the two DOM nodes the real handler compares — the predicate only
+  // ever checks identity, so plain objects exercise it faithfully without a DOM.
+  const scrim = { id: "scrim" } as unknown as EventTarget;
+  const insideTheCard = { id: "confirm-button" } as unknown as EventTarget;
+
+  test("a press on the scrim itself dismisses", () => {
+    expect(isScrimDismiss({ target: scrim, currentTarget: scrim }, false)).toBe(true);
+  });
+
+  test("a press that bubbled from inside the card does NOT dismiss", () => {
+    expect(isScrimDismiss({ target: insideTheCard, currentTarget: scrim }, false)).toBe(false);
+  });
+
+  test("a scrim press mid-round-trip does NOT dismiss (busy)", () => {
+    expect(isScrimDismiss({ target: scrim, currentTarget: scrim }, true)).toBe(false);
+  });
+
+  test("a targetless event does NOT dismiss (null === null must not cancel)", () => {
+    expect(isScrimDismiss({ target: null, currentTarget: null }, false)).toBe(false);
+  });
+});
 
 describe("ConfirmRun — static structure", () => {
   test("renders the risk text and the exact sql", () => {
@@ -82,6 +201,16 @@ describe("ConfirmRun — static structure", () => {
     );
     expect(html).not.toContain('disabled=""');
   });
+
+  test("SSR / bun test has no DOM: the scrim still renders in-tree, unchanged", () => {
+    expect(typeof document).toBe("undefined");
+    const html = renderToStaticMarkup(
+      <ConfirmRun sql="DROP TABLE users" risk="drops the table" busy={false} onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    // DW-60: the scrim keeps its `fixed inset-0 z-[60]` anchor even without a portal.
+    expect(html).toContain("fixed inset-0 z-[60]");
+    expect(html).toContain('role="alertdialog"');
+  });
 });
 
 describe("ConfirmRun — optional elements render ONLY when supplied", () => {
@@ -92,6 +221,27 @@ describe("ConfirmRun — optional elements render ONLY when supplied", () => {
     const html = renderToStaticMarkup(<ConfirmRun {...base} affectedRows={142} />);
     expect(html).toContain("confirm-run-affected");
     expect(html).toContain("142");
+  });
+
+  test("DW-61: affectedRows=0 renders a neutral badge that reads 'No rows', never red", () => {
+    const html = renderToStaticMarkup(<ConfirmRun {...base} affectedRows={0} />);
+    expect(html).toContain("confirm-run-affected");
+    expect(html).toContain("No rows");
+    // Match on the testid ANYWHERE in the open tag, not as its first attribute, and
+    // assert the match exists — otherwise reordering the JSX props would empty the
+    // string and every `not.toContain` below would pass vacuously.
+    const badgeOpenTag = html.match(/<span [^>]*data-testid="confirm-run-affected"[^>]*>/)?.[0];
+    expect(badgeOpenTag).toBeDefined();
+    expect(badgeOpenTag).toContain("bg-[var(--muted)]");
+    expect(badgeOpenTag).toContain("text-[var(--muted-foreground)]");
+    expect(badgeOpenTag).not.toContain("--err");
+  });
+
+  test("DW-61: nonsense affectedRows values (NaN/Infinity/negative/fractional) render no badge", () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, 2.5]) {
+      const html = renderToStaticMarkup(<ConfirmRun {...base} affectedRows={bad} />);
+      expect(html).not.toContain("confirm-run-affected");
+    }
   });
 
   test("dependents FK line is absent by default, present when supplied (blue, not red)", () => {
@@ -115,6 +265,24 @@ describe("ConfirmRun — optional elements render ONLY when supplied", () => {
     // Confirm stays disabled until the typed value matches (empty at first render)
     const disabledCount = (html.match(/disabled=""/g) ?? []).length;
     expect(disabledCount).toBe(1);
+  });
+
+  test("DW-62: blank or whitespace-only objectName does not mount the type-to-confirm gate", () => {
+    for (const blank of ["", "   "]) {
+      const html = renderToStaticMarkup(<ConfirmRun {...base} objectName={blank} />);
+      expect(html).not.toContain("confirm-run-ttc");
+    }
+  });
+
+  test("DW-63: objectName + busy disables the input alongside both footer buttons (3 total)", () => {
+    const html = renderToStaticMarkup(<ConfirmRun {...base} busy={true} objectName="public.orders" />);
+    const disabledCount = (html.match(/disabled=""/g) ?? []).length;
+    expect(disabledCount).toBe(3);
+    // …and the third one is the type-to-confirm input ITSELF, not just some third
+    // control: a count alone stays green if `disabled` migrates off the input.
+    const inputTag = html.match(/<input [^>]*data-testid="confirm-run-ttc"[^>]*>/)?.[0];
+    expect(inputTag).toBeDefined();
+    expect(inputTag).toContain('disabled=""');
   });
 });
 
@@ -169,5 +337,57 @@ describe("ConfirmRun — callbacks", () => {
     button?.onClick?.();
     expect(onCancel).toHaveBeenCalledTimes(1);
     expect(onConfirm).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * DW-59: `ConfirmRun({...})` (the direct-invocation, hook-free path used above)
+ * returns `<ModalOverlay busy={busy} onDismiss={onCancel}>{card}</ModalOverlay>` —
+ * a React element DESCRIPTION, not a call, so `ModalOverlay`'s own hooks (its
+ * `useRef`/`useEffect` calls) never run here and can't throw. That also means its
+ * real `onMouseDown` handler (built inside `ModalOverlay`'s body) isn't reachable
+ * from this tree. What IS reachable and load-bearing is the wiring that handler
+ * closes over: `busy` and `onDismiss` must be exactly the caller's `busy` and
+ * `onCancel` (never `onConfirm`), and the card (with both buttons) must still be
+ * `props.children` so `findButton` keeps working through the wrapper.
+ */
+describe("ConfirmRun — ModalOverlay wiring (DW-59/DW-60)", () => {
+  test("wraps the card in a ModalOverlay receiving busy + onDismiss===onCancel", () => {
+    const onConfirm = mock(() => {});
+    const onCancel = mock(() => {});
+    const tree = ConfirmRun({
+      sql: "DROP TABLE users",
+      risk: "drops the table",
+      busy: false,
+      onConfirm,
+      onCancel,
+    }) as unknown as React.ReactElement<{ busy: boolean; onDismiss: () => void; children: React.ReactNode }>;
+
+    expect(typeof tree.type).toBe("function");
+    expect((tree.type as { name?: string }).name).toBe("ModalOverlay");
+    expect(tree.props.busy).toBe(false);
+
+    // the scrim's onMouseDown (untestable directly — it lives behind hooks) is
+    // exactly `e.target === e.currentTarget && !busy ? onDismiss() : void 0`; this
+    // locks the `onDismiss` identity it dispatches to.
+    tree.props.onDismiss();
+    expect(onCancel).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // the card — and therefore both footer buttons — is still reachable through
+    // the wrapper's `children`, so the tree-walk tests above keep working.
+    expect(findButton(tree.props.children, "Confirm")).not.toBeNull();
+    expect(findButton(tree.props.children, "Cancel")).not.toBeNull();
+  });
+
+  test("busy propagates to ModalOverlay (gates the scrim-press dismiss while mid-round-trip)", () => {
+    const tree = ConfirmRun({
+      sql: "DROP TABLE users",
+      risk: "drops the table",
+      busy: true,
+      onConfirm: () => {},
+      onCancel: () => {},
+    }) as unknown as React.ReactElement<{ busy: boolean }>;
+    expect(tree.props.busy).toBe(true);
   });
 });
