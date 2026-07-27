@@ -140,6 +140,18 @@ describe("groupBySchema", () => {
   test("an empty payload groups to nothing", () => {
     expect(groupBySchema([])).toEqual([]);
   });
+
+  test("a table's `kind` (DW-68) survives grouping untouched — whole references, never rebuilt", () => {
+    const view: SchemaTableInfo = { ...table("reporting", "revenue_by_country"), kind: "view" };
+    const groups = groupBySchema([table("public", "orders"), view]);
+    // Length first: with optional chaining, `groups[0]?.tables[0]?.kind` would satisfy
+    // `toBeUndefined()` on an EMPTY result — a grouping that dropped every table.
+    expect(groups).toHaveLength(2);
+    expect(groups[0]?.tables).toHaveLength(1);
+    expect(groups[1]?.tables).toHaveLength(1);
+    expect(groups[0]?.tables[0]?.kind).toBeUndefined();
+    expect(groups[1]?.tables[0]?.kind).toBe("view");
+  });
 });
 
 describe("mergeTables (regression parity with the single-root tree)", () => {
@@ -164,6 +176,12 @@ describe("mergeTables (regression parity with the single-root tree)", () => {
   test("a same NAME in a different SCHEMA is not a duplicate", () => {
     const merged = mergeTables([table("public", "orders")], [table("staging", "orders")]);
     expect(merged.map((t) => `${t.schema}.${t.name}`)).toEqual(["public.orders", "staging.orders"]);
+  });
+
+  test("a table's `kind` (DW-68) survives merging untouched — whole references, never rebuilt", () => {
+    const view: SchemaTableInfo = { ...table("public", "revenue_view"), kind: "view" };
+    const merged = mergeTables([table("public", "orders")], [view]);
+    expect(merged.find((t) => t.name === "revenue_view")?.kind).toBe("view");
   });
 });
 

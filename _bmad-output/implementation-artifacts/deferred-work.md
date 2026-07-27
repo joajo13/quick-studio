@@ -606,7 +606,8 @@ source_spec: `spec-10-5-multi-root-schema-tree.md`
 location: `src/shared/contract.ts` (`SchemaTableInfo`), `src/core/driver-postgres.ts` / `src/core/driver-mysql.ts` (`listSchema` introspection), `src/ui/schema/SchemaTree.tsx` (`TableIcon`)
 severity: low
 reason: `epic-10-multi-connection-tree.mockup.html` draws views with their own eye glyph (`.view-ico`, `--t-json`) and its annotations call it out ("`reporting`'s items render with the view icon"), but `SchemaTableInfo` carries only `schema`/`name`/`columns`/`primaryKey`/`indexes`/`foreignKeys` — no `kind`/`isView` — and neither driver's introspection surfaces one, so the distinction is not buildable from the data the UI receives. Story 10.5 is a pure UI consumer of Story 10.4's contract and its own intent-contract puts the discriminator explicitly out of scope, so all relations render with the table icon (no regression — the pre-10.5 tree did the same). The fix is a small vertical slice — add `kind: "table" | "view"` to `SchemaTableInfo`, surface it from the pg (`pg_class.relkind`) and MySQL (`information_schema.tables.table_type`) queries, then branch the tree's icon — but it touches the shared contract and both drivers, which is a Ring-1 change a UI story must not make unilaterally.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-schema-tree-view-icon
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-5-redesign-chat-neutral.md`
   summary: The assistant action row renders open-in-editor / thumbs / share / regenerate / more as focusable buttons with action `aria-label`s but no behavior — they announce functionality they don't perform (an a11y/UX smell), an epic-wide decision to either wire them in a later behavioral story or mark them disabled.
   evidence: Spec 7.5 is presentation-only and its Design Notes intentionally ship these as visual affordances (only `copy` is wired); both adversarial reviewers flagged the dead controls. Real but non-blocking, and consistent with the epic's deferred a11y items (cf. DW-58/67).
@@ -1234,4 +1235,48 @@ severity: low
 found_by: Edge Case Hunter
 summary: The banner interpolates `host` and `port` with a bare colon, so a `QS_HOST=::` bind (all IPv6 interfaces, the IPv6 counterpart of the `0.0.0.0` case the banner was written for) prints `:::4123` instead of the bracketed `[::]:4123` form every tool and browser expects.
 evidence: `QS_HOST` is user-settable and is exactly what the banner's own remediation copy tells the user to unset, so an IPv6 value is an ordinary configuration, not a corner case. Pre-existing — this story changed no production markup — and surfaced only because the new test fixture pins the rendered address (`0.0.0.0:4123`), which made the interpolation's assumption visible. Not patched: fixing it is a production render change in `Workspace.tsx`, which this spec's `Never` clause forbids outright, and the correct fix should bracket the host once at a shared formatting seam rather than inline in one banner, since the same `ExposureInfo` is surfaced elsewhere. Consequence is real but bounded: the warning still fires and still says the app is reachable off-machine; only the literal address is ambiguous.
+status: open
+
+### DW-114: Views are now distinguishable in the schema tree but nowhere else — the tab bar, ERD and workspace still paint every relation with the base-table glyph
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/workspace/TabBar.tsx:21`, `src/ui/workspace/Workspace.tsx:58`, `src/ui/workspace/ErdTabView.tsx:51`
+severity: low
+found_by: Blind Hunter
+summary: DW-68 taught the schema tree a view/table visual language (teal eye vs grid glyph), but the three other independent copies of the table glyph still render `<rect x="3" y="4" width="18" height="16" rx="1.5"/>` for every relation, so clicking the teal eye on `revenue_view` opens a tab carrying a table-grid icon — the affordance contradicts itself one click later.
+evidence: Each of the four glyph sites is a hand-copied local SVG, not a shared icon module (verified: `TableIcon` in `SchemaTree.tsx` is module-private and the other three are separate inline components). DW-68's contract explicitly scoped them out (`Never`: "Do not touch the other three independent copies of the table glyph ... or factor them into a shared icon module"), so this is a deliberate scope decision, not an implementation defect — but it means the visual language ships half-applied. Also blocked on a shape decision the tree story could not make: `ViewIcon` bakes in `text-t-json` and takes no props (mirroring the prop-less `SchemaIcon`), so a `TabBar` at a different size/tint cannot reuse it. Follow-up candidate: extract a shared, `className`-parameterised relation-icon pair and apply `kind` at every relation-rendering surface — which first needs `kind` to reach the tab model (`TableRef` carries `connectionId` but not `kind`), so it pairs naturally with the DW-109 per-tab identity work.
+status: open
+
+### DW-115: Opening a view and trying to edit a row surfaces the raw internal string "expected exactly one primary-key column, got 0" instead of a "views are read-only" affordance
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/data/row-mutations.ts:131-132`, `src/ui/workspace/TabContent.tsx` (`canMutate`)
+severity: medium
+found_by: Blind Hunter
+summary: A view almost never carries a primary key, so the mutation gate fails on the PK check and the user is shown an implementation-detail message that names the wrong cause — and DW-68 makes this MORE reachable by giving views a distinct, inviting glyph that advertises them as a first-class thing to click.
+evidence: `SchemaTableInfo.kind` now exists and is populated by both drivers, but `git grep '\.kind === "view"'` over `src/` returns only the two new call sites in `SchemaTree.tsx` — the signal that would let the grid say "this relation is a view, it is read-only" is plumbed and unused. Pre-existing (views have always been browsable and have always failed this way; DW-68 changed no mutation path), and out of a presentation-only tree story's scope. Note this is the same class as the deferred Story 10.5 finding where a saved-connection tab degrades to read-only with no explanation — both want one legible "why is this read-only" affordance rather than two ad-hoc messages. Follow-up candidate: gate `canMutate` on `kind !== "view"` explicitly and render a named read-only reason.
+status: open
+
+### DW-116: The light-theme `--t-json` eye glyph measures 2.99:1 on `--muted` (hover) and 2.82:1 on `coral-soft` (selected) — under WCAG 1.4.11's 3:1 non-text minimum
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/styles/globals.css:164` (`--t-json: #1a9b8c`), consumed at `src/ui/schema/SchemaTree.tsx` (`ViewIcon`)
+severity: low
+found_by: Blind Hunter
+summary: DW-68 promotes `--t-json` from a 6px decorative dot to a 14px informational glyph, and in the light theme that glyph falls under the 3:1 icon minimum on two of its four backgrounds (2.99 on `--muted`, 2.82 on `coral-soft` over `--card`); dark clears comfortably everywhere (6.15-8.80).
+evidence: Ratios computed directly from the shipped token values against the composited backgrounds (`--coral-soft` is a translucent overlay, so it was composited over `--card`/`--background` before measuring). `contrast.test.ts:235-240` already ledgers `--t-json` as a known sub-3:1-on-`--muted` token and deliberately excludes it from the ERD's enforced list, so the deferral is legitimate and pre-existing to this change — what is new is using it as a foreground glyph rather than a dot. Not fixable here: a durable fix darkens the light-theme `--t-json` (or adds an on-surface variant) in `globals.css`, which this presentation-only slice is contract-forbidden to edit, and the token is shared with the data-grid and ERD so the change needs one coordinated pass. Mitigated in this story: the view/table distinction is carried by SHAPE (eye vs grid) and by an `sr-only` "vista" marker in the row's accessible name, so no information is lost at low contrast — colour is a redundant channel, not the only one.
+status: open
+
+### DW-117: A relation in the DEFAULT namespace renders a schema tree tooltip of `.tablename` — a leading bare dot — while the schema node above it reads `(default)`
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/schema/SchemaTree.tsx` (table-row `title`)
+severity: low
+found_by: Edge Case Hunter
+summary: The row tooltip interpolates `` `${table.schema}.${table.name}` `` unconditionally, so a table whose `schema` is the empty string (the default-namespace case the tree elsewhere renders as `(default)`) gets a tooltip beginning with a bare separator dot.
+evidence: Pre-existing and unchanged in shape by DW-68 — the tooltip already had this exact template before this story, which only appended a ` · vista` suffix for views. The blank-schema case is real and already special-cased elsewhere in the same file (the schema node renders `(default)` rather than a nameless node) and in `App.tsx`/`TabContent.tsx` (an optimistically-created table carries `schema: ""`, which the Core resolves to the real default), so the tooltip is the one surface that did not get the treatment. Not patched: it is outside DW-68's stated scope (the icon branch) and the fix wants to reuse whatever label helper the schema node already uses rather than adding a second ad-hoc ternary. Cosmetic; the table name itself is still legible.
 status: open

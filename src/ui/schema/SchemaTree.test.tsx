@@ -12,7 +12,7 @@
 
 import { beforeEach, describe, expect, mock, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
-import { errorReply, type RpcReply, type SchemaTableInfo } from "../../shared/contract.ts";
+import { errorReply, type RpcReply, type SchemaRelationKind, type SchemaTableInfo } from "../../shared/contract.ts";
 import type { RootDescriptor, RootState } from "./schema-tree-state.ts";
 import { BOOT_ROOT_KEY, schemaKey, tableKey } from "./schema-tree-state.ts";
 
@@ -36,6 +36,7 @@ function table(
   name: string,
   columns: ReadonlyArray<{ name: string; dataType: string }> = [],
   primaryKey: ReadonlyArray<string> = [],
+  kind?: SchemaRelationKind,
 ): SchemaTableInfo {
   return {
     schema,
@@ -44,6 +45,7 @@ function table(
     primaryKey,
     indexes: [],
     foreignKeys: [],
+    ...(kind === undefined ? {} : { kind }),
   };
 }
 
@@ -278,6 +280,112 @@ describe("ConnectionRoot — extraTables scoping (DW-41)", () => {
     });
     expect(out).toContain("orders");
     expect(out).not.toContain("drafts");
+  });
+});
+
+describe("ConnectionRoot — view icon (DW-68)", () => {
+  // The mockup's `viewSvg` eye path and the existing `TableIcon`'s rect — the two glyphs
+  // this feature branches between.
+  const VIEW_PATH = "M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z";
+  const VIEW_PUPIL = 'cx="12" cy="12" r="2.5"';
+  const TABLE_RECT = 'x="3" y="4" width="18" height="16" rx="1.5"';
+  // EXACT, not a substring: an appended utility (`… text-t-json text-coral`) would still
+  // satisfy a `toContain("text-t-json")`, and Tailwind's later-wins order would silently
+  // turn the glyph coral. This pins the whole class attribute.
+  const VIEW_ICON_CLASS = 'class="h-3.5 w-3.5 shrink-0 text-t-json"';
+
+  function withKind(kind?: SchemaRelationKind): RootState {
+    return {
+      kind: "ready",
+      schema: { engine: "postgres", tables: [table("public", "widgets", [], [], kind)] },
+    };
+  }
+
+  /** Slice one table row out of the markup so a glyph assertion binds to THAT row. */
+  function rowOf(markup: string, title: string): string {
+    const start = markup.indexOf(`title="${title}"`);
+    expect(start).toBeGreaterThan(-1);
+    return markup.slice(start, markup.indexOf("</div>", start));
+  }
+
+  test("a view relation renders the eye glyph in text-t-json, no table rect, and `title` ends `· vista`", () => {
+    const out = renderRoot(SAVED, withKind("view"), {
+      open: true,
+      expandedSchemas: [schemaKey("conn-a", "public")],
+    });
+    expect(out).toContain(VIEW_PATH);
+    // The pupil is half the mockup's glyph — without this an SVG-minifying pass could
+    // drop it and degrade the eye to a bare lens outline with the suite still green.
+    expect(out).toContain(VIEW_PUPIL);
+    expect(out).toContain(VIEW_ICON_CLASS);
+    expect(out).not.toContain(TABLE_RECT);
+    expect(out).toContain('title="public.widgets · vista"');
+    // `title` is only a LAST-RESORT accessible name: name-from-content wins on this
+    // `role="button"` row, so the tooltip alone never reaches a screen reader.
+    expect(out).toContain('<span class="sr-only">vista</span>');
+  });
+
+  test("an ACTIVE view keeps its teal eye (never text-coral) while the row itself highlights", () => {
+    const out = renderRoot(SAVED, withKind("view"), {
+      open: true,
+      expandedSchemas: [schemaKey("conn-a", "public")],
+      activeTable: { schema: "public", name: "widgets", connectionId: "conn-a" },
+    });
+    expect(out).toContain('aria-pressed="true"');
+    expect(out).toContain("bg-coral-soft text-coral");
+    expect(out).toContain(VIEW_PATH);
+    // Unconditional teal. Asserted on the EXACT class attribute — the row itself carries
+    // `text-coral`, so a bare `not.toContain("text-coral")` could never see the glyph.
+    expect(out).toContain(VIEW_ICON_CLASS);
+  });
+
+  test("a base table (`kind: \"table\"`) keeps today's glyph and the bare `schema.name` title", () => {
+    const out = renderRoot(SAVED, withKind("table"), {
+      open: true,
+      expandedSchemas: [schemaKey("conn-a", "public")],
+    });
+    expect(out).toContain(TABLE_RECT);
+    expect(out).not.toContain(VIEW_PATH);
+    expect(out).toContain('title="public.widgets"');
+  });
+
+  test("an ABSENT `kind` takes the conservative table-glyph arm, bare title", () => {
+    const out = renderRoot(SAVED, withKind(undefined), {
+      open: true,
+      expandedSchemas: [schemaKey("conn-a", "public")],
+    });
+    expect(out).toContain(TABLE_RECT);
+    expect(out).not.toContain(VIEW_PATH);
+    expect(out).toContain('title="public.widgets"');
+  });
+
+  test("`kind: \"other\"` also keeps the table glyph — the mockup has no third glyph", () => {
+    const out = renderRoot(SAVED, withKind("other"), {
+      open: true,
+      expandedSchemas: [schemaKey("conn-a", "public")],
+    });
+    expect(out).toContain(TABLE_RECT);
+    expect(out).not.toContain(VIEW_PATH);
+    expect(out).toContain('title="public.widgets"');
+  });
+
+  test("a mixed schema (one view, one table) renders both glyphs side by side, each exactly once", () => {
+    const state: RootState = {
+      kind: "ready",
+      schema: {
+        engine: "postgres",
+        tables: [table("public", "orders", [], [], "table"), table("public", "revenue_view", [], [], "view")],
+      },
+    };
+    const out = renderRoot(SAVED, state, { open: true, expandedSchemas: [schemaKey("conn-a", "public")] });
+    expect(out.split(TABLE_RECT).length - 1).toBe(1);
+    expect(out.split(VIEW_PATH).length - 1).toBe(1);
+    // Counting alone survives a fully INVERTED branch (each glyph still appears once), so
+    // bind each glyph to its own row.
+    expect(rowOf(out, "public.orders")).toContain(TABLE_RECT);
+    expect(rowOf(out, "public.orders")).not.toContain(VIEW_PATH);
+    expect(rowOf(out, "public.revenue_view · vista")).toContain(VIEW_PATH);
+    expect(rowOf(out, "public.revenue_view · vista")).not.toContain(TABLE_RECT);
   });
 });
 
