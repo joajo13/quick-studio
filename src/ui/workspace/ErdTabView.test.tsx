@@ -78,7 +78,13 @@ describe("ErdTabView", () => {
     expect(out).toContain("react-flow__edge");
   });
 
-  test("a supplied saved layout still renders each table's name (positions overlaid, no crash)", () => {
+  // SCOPE NOTE: `renderToStaticMarkup` never runs effects and never measures a canvas, so
+  // these are SMOKE tests — they prove the saved-layout props are accepted and the surface
+  // still renders, NOT that any position was applied. The layout correctness surface is the
+  // pure `applyLayout` / `positionsOf` / `reconcilePositions` / `sanitizeViewport` helpers in
+  // `erd-graph.ts`, which are unit-tested directly (there is no jsdom in this repo, by
+  // convention). Do not read a green run here as coverage of the capture/reconcile paths.
+  test("a supplied saved layout still renders each table's name (props accepted, no crash)", () => {
     // Keys MUST be the real NUL-separated `tableId` node ids — a space-separated literal
     // never matches, so the overlay would silently no-op and the test would prove nothing.
     const savedLayout = {

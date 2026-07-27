@@ -15,6 +15,9 @@ import type { SchemaForeignKeyInfo, SchemaTableInfo } from "../../shared/contrac
 import {
   applyLayout,
   connectedNodeIds,
+  positionsOf,
+  reconcilePositions,
+  sanitizeViewport,
   schemaToGraph,
   tableId,
   typeColorClass,
@@ -444,5 +447,91 @@ describe("schemaToGraph — additive isForeignKey column flag (Story 7.4)", () =
     expect(byName.get("user_id")?.isForeignKey).toBe(true);
     expect(byName.get("id")?.isForeignKey).toBe(false);
     expect(byName.get("note")?.isForeignKey).toBe(false);
+  });
+});
+
+describe("positionsOf — layout capture (Story 4.2)", () => {
+  test("maps every node id to its position", () => {
+    expect(
+      positionsOf([
+        { id: "a", position: { x: 1, y: 2 } },
+        { id: "b", position: { x: -3, y: 4.5 } },
+      ]),
+    ).toEqual({ a: { x: 1, y: 2 }, b: { x: -3, y: 4.5 } });
+  });
+
+  test("returns an empty map for no nodes", () => {
+    expect(positionsOf([])).toEqual({});
+  });
+
+  test("SKIPS a non-finite coordinate instead of persisting it", () => {
+    // One NaN/Infinity reaching `workspace.save` is a bad_request for the WHOLE snapshot,
+    // which would silently stop every save for the rest of the session.
+    expect(
+      positionsOf([
+        { id: "ok", position: { x: 1, y: 2 } },
+        { id: "nan", position: { x: Number.NaN, y: 0 } },
+        { id: "inf", position: { x: 0, y: Number.POSITIVE_INFINITY } },
+      ]),
+    ).toEqual({ ok: { x: 1, y: 2 } });
+  });
+});
+
+describe("reconcilePositions — graph-change re-seed (Story 4.2)", () => {
+  const ORDERS = tableId("public", "orders");
+  const USERS = tableId("public", "users");
+  const SAVED = { [ORDERS]: { x: 10, y: 20 } };
+
+  test("re-seeds from the on-screen nodes when the graph is non-empty", () => {
+    expect(reconcilePositions(SAVED, [{ id: ORDERS, position: { x: 99, y: 98 } }])).toEqual({
+      [ORDERS]: { x: 99, y: 98 },
+    });
+  });
+
+  test("drops a vanished node's entry when the graph is non-empty", () => {
+    expect(reconcilePositions(SAVED, [{ id: USERS, position: { x: 1, y: 1 } }])).toEqual({
+      [USERS]: { x: 1, y: 1 },
+    });
+  });
+
+  test("KEEPS the previous map verbatim when the graph is empty", () => {
+    // The restore regression: a restored ACTIVE ERD tab mounts before introspection answers,
+    // so the first derived graph has zero nodes. Re-seeding there would wipe the saved
+    // arrangement, and the tables-arrival re-derivation would silently fall back to dagre.
+    expect(reconcilePositions(SAVED, [])).toBe(SAVED);
+  });
+
+  test("an empty graph after a real drag still keeps the dragged positions", () => {
+    const dragged = reconcilePositions(SAVED, [{ id: ORDERS, position: { x: 5, y: 6 } }]);
+    expect(reconcilePositions(dragged, [])).toEqual({ [ORDERS]: { x: 5, y: 6 } });
+  });
+
+  test("the kept map still restores through applyLayout once the tables arrive", () => {
+    // End-to-end of the regression: empty mount → tables land → the saved position wins.
+    const kept = reconcilePositions(SAVED, []);
+    const laid = applyLayout(schemaToGraph([table("orders", [{ name: "id" }])]), kept);
+    expect(laid.nodes[0]?.id).toBe(ORDERS);
+    expect(laid.nodes[0]?.position).toEqual({ x: 10, y: 20 });
+  });
+});
+
+describe("sanitizeViewport — viewport capture (Story 4.2)", () => {
+  test("passes a finite, positively-zoomed viewport through", () => {
+    expect(sanitizeViewport({ x: -10, y: 20, zoom: 1.5 })).toEqual({ x: -10, y: 20, zoom: 1.5 });
+  });
+
+  test("returns undefined for an absent viewport", () => {
+    expect(sanitizeViewport(undefined)).toBeUndefined();
+  });
+
+  test("rejects a non-finite offset or zoom", () => {
+    expect(sanitizeViewport({ x: Number.NaN, y: 0, zoom: 1 })).toBeUndefined();
+    expect(sanitizeViewport({ x: 0, y: Number.POSITIVE_INFINITY, zoom: 1 })).toBeUndefined();
+    expect(sanitizeViewport({ x: 0, y: 0, zoom: Number.NaN })).toBeUndefined();
+  });
+
+  test("rejects a zero or negative zoom (degenerate, blank canvas on restore)", () => {
+    expect(sanitizeViewport({ x: 0, y: 0, zoom: 0 })).toBeUndefined();
+    expect(sanitizeViewport({ x: 0, y: 0, zoom: -1 })).toBeUndefined();
   });
 });

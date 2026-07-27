@@ -37,6 +37,9 @@ import type { ErdTabLayout, SchemaTableInfo } from "../../shared/contract.ts";
 import {
   applyLayout,
   connectedNodeIds,
+  positionsOf,
+  reconcilePositions,
+  sanitizeViewport,
   schemaToGraph,
   typeColorClass,
   type ErdNodeData,
@@ -176,8 +179,16 @@ function ErdEmptyState(): React.JSX.Element {
  * bottom-left `<Controls>`; pan/zoom/fit still come from the untouched `<ReactFlow>`
  * viewport — this only drives it via `useReactFlow` and reads the live zoom for the %.
  */
-function ErdToolbar(): React.JSX.Element {
+function ErdToolbar({ onViewportCommand }: { onViewportCommand?: () => void }): React.JSX.Element {
   const { zoomIn, zoomOut, fitView } = useReactFlow();
+  // These drive the viewport PROGRAMMATICALLY, so the `onMoveEnd` they trigger carries a
+  // null event and is indistinguishable from the mount-time `fitView` on its own. Announce
+  // the command first so the owner can treat the next null-event move as user-chosen and
+  // persist it — otherwise the ERD's only zoom/fit affordance would never survive a relaunch.
+  const command = (run: () => void) => (): void => {
+    onViewportCommand?.();
+    run();
+  };
   const zoom = useStore((s) => s.transform[2]);
   const pct = `${Math.round(zoom * 100)}%`;
   return (
@@ -189,7 +200,7 @@ function ErdToolbar(): React.JSX.Element {
         type="button"
         aria-label="Zoom out"
         title="Zoom out"
-        onClick={() => zoomOut()}
+        onClick={command(() => zoomOut())}
         className="grid h-[30px] w-[30px] place-items-center rounded-[7px] text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
@@ -203,7 +214,7 @@ function ErdToolbar(): React.JSX.Element {
         type="button"
         aria-label="Zoom in"
         title="Zoom in"
-        onClick={() => zoomIn()}
+        onClick={command(() => zoomIn())}
         className="grid h-[30px] w-[30px] place-items-center rounded-[7px] text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
@@ -215,7 +226,7 @@ function ErdToolbar(): React.JSX.Element {
         type="button"
         aria-label="Fit to screen"
         title="Fit to screen"
-        onClick={() => fitView()}
+        onClick={command(() => fitView())}
         className="grid h-[30px] w-[30px] place-items-center rounded-[7px] text-[var(--muted-foreground)] hover:bg-[var(--accent)] hover:text-[var(--foreground)]"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className="h-4 w-4">
@@ -331,13 +342,6 @@ export function ErdHoverPanel({ data }: { data: ErdNodeData }): React.JSX.Elemen
   );
 }
 
-/** Build the id→position map the layout report persists, from the live node array. */
-function positionsOf(nodes: ReadonlyArray<Node>): Record<string, { x: number; y: number }> {
-  const positions: Record<string, { x: number; y: number }> = {};
-  for (const n of nodes) positions[n.id] = { x: n.position.x, y: n.position.y };
-  return positions;
-}
-
 export function ErdTabView({
   tables,
   savedLayout,
@@ -398,9 +402,15 @@ export function ErdTabView({
   // a SECOND consecutive create from reshuffling: after the first create, the auto-placed
   // new node's dagre position is captured here, so the next `schemaToGraph` re-dagre is
   // overlaid away for it too and only the newest table gets a fresh spot.
+  // An EMPTY graph is the exception and never re-seeds (see `reconcilePositions`): a restored
+  // ACTIVE ERD tab mounts before introspection answers, and wiping the seed there would lose
+  // the whole saved arrangement on exactly the relaunch this story exists for.
   useEffect(() => {
     setNodes(graph.nodes as unknown as Node[]);
-    positionsRef.current = positionsOf(graph.nodes as unknown as Node[]);
+    positionsRef.current = reconcilePositions(
+      positionsRef.current,
+      graph.nodes as unknown as Node[],
+    );
   }, [graph, setNodes]);
 
   // DW-66 reconcile: if the hovered id is no longer among the current node ids (its
@@ -481,14 +491,30 @@ export function ErdTabView({
 
   // Capture node positions when a drag ends (not on every intermediate change).
   const handleNodeDragStop: OnNodeDrag = useCallback(() => report(), [report]);
+  // Set by the toolbar just before it drives the viewport programmatically, so the null-event
+  // `onMoveEnd` that follows is recognized as user-chosen. Consumed (reset) by that move.
+  const toolbarCommandRef = useRef(false);
+  const handleToolbarCommand = useCallback((): void => {
+    toolbarCommandRef.current = true;
+  }, []);
   // Capture the viewport when a pan/zoom ends. React Flow fires `onMoveEnd` for
   // PROGRAMMATIC viewport changes too — notably the mount-time `fitView` — passing a
-  // null event; only real user gestures carry an event. Ignore the programmatic ones so
-  // opening a tab never self-persists a viewport the developer never chose.
+  // null event; real user gestures carry an event. Ignore the ones that are BOTH
+  // event-less and not toolbar-driven, so opening a tab never self-persists a viewport the
+  // developer never chose — while the toolbar's zoom/fit (Story 7.4 replaced React Flow's
+  // `<Controls>` with it, so it is the ONLY zoom affordance) still persists like a wheel
+  // zoom. Without the flag those clicks were dropped entirely AND a later node drag
+  // re-persisted the pre-click viewport from the stale ref, reverting the zoom on relaunch.
   const handleMoveEnd: OnMoveEnd = useCallback(
     (event, viewport) => {
-      if (event == null) return;
-      viewportRef.current = viewport;
+      const fromToolbar = toolbarCommandRef.current;
+      toolbarCommandRef.current = false;
+      if (event == null && !fromToolbar) return;
+      // Drop a degenerate transform instead of letting it reach `workspace.save`, where one
+      // non-finite offset or a zero zoom is a `bad_request` for the WHOLE snapshot.
+      const captured = sanitizeViewport(viewport);
+      if (captured === undefined) return;
+      viewportRef.current = captured;
       report();
     },
     [report],
@@ -509,7 +535,12 @@ export function ErdTabView({
   // and disable `fitView` when a viewport was saved, so a restored pan/zoom is honored
   // instead of auto-fitting. With no saved viewport we fit to the (possibly restored)
   // node positions so everything — including dragged nodes — is on screen.
-  const initialViewport = initialLayoutRef.current?.viewport;
+  // Read from `viewportRef` (seeded from the saved layout, advanced by every captured move)
+  // rather than the frozen mount-time layout: `<ReactFlow>` sits below the zero-tables early
+  // return, so it REMOUNTS whenever the table set empties and comes back (a re-introspection
+  // after DDL, a retry after a transient connect error) — and re-reading the frozen value
+  // there would throw away the pan/zoom this session had already moved to.
+  const initialViewport = viewportRef.current;
 
   return (
     <div className="h-full w-full bg-[var(--background)]">
@@ -548,7 +579,7 @@ export function ErdTabView({
             ) : null;
           })()}
         <Panel position="bottom-right">
-          <ErdToolbar />
+          <ErdToolbar onViewportCommand={handleToolbarCommand} />
         </Panel>
         <Panel position="bottom-left">
           <ErdLegend />

@@ -8,7 +8,8 @@ source_spec: `spec-4-2-persist-erd-layout.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260710-224752-6cf5; this entry preserves the lingering follow-up recommendation for a deliberate later review.
 decision: [2026-07-21, user] Do a single focused follow-up review of story 4-2 during the post-epic sweep (cheap; closes the lingering budget-exhaustion recommendation).
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-followup-review-4-2-erd-layout
 
 ### DW-2: Harden the per-boot token against same-machine processes and add a Content-Security-Policy (with a nonce for the inline token script) once stories render database content
 
@@ -1015,4 +1016,24 @@ severity: low
 found_by: Edge Case Hunter follow-up review pass on dw-32-33
 summary: DW-33 hardened the physical-row-locator branch so a legacy inheritance parent (`relkind='r'` + `relhassubclass`) maps to `kind:"other"` and never gets a `ctid` (its `ctid` is non-unique across parent+child heaps). But the precedence ternary checks the primary key FIRST and unconditionally: an inheritance parent that HAS a PK takes `ORDER BY <pk>`. Child tables do not inherit the parent's PK constraint, so `SELECT ... FROM parent` can return duplicate PK values across the parent and every descendant heap — `ORDER BY pk` is therefore not a total order, and paging it can overlap/skip rows exactly like the DW-33 defect, just via the PK path the change left untouched.
 evidence: Verified by reading the precedence at `table-rows.ts:305-310`; the PK branch predates this story (DW-33 rewrote the composition but kept PK first), so this is a pre-existing gap surfaced by the follow-up review, not caused by the change — hence deferred, not patched. Not a trivial patch: `kind:"other"` collapses THREE relation shapes (legacy inheritance parent, declarative partitioned parent, foreign table), and a declarative partitioned parent's PK IS globally total (the partition key is included and enforced), so gating the PK branch on `kind !== "other"` would wrongly drop a valid total order for partitioned tables. A correct fix needs a distinguishing fact (legacy-inheritance-parent vs declarative-partition-parent) that is not currently carried into `SchemaTableInfo` — a contract widening that belongs to a focused pass. Legacy table inheritance is deprecated and rare, so real-world exposure is small.
+status: open
+
+### DW-95: Persisted ERD geometry has no database identity, so relaunching against a different `--db-url` applies the previous database's node positions to same-named tables
+origin: follow-up review of 4-2, 2026-07-27
+source_spec: `spec-4-2-persist-erd-layout.md`
+location: `src/ui/erd/erd-graph.ts:130-132` (`tableId` is `schema\0name` only); `src/shared/contract.ts` (`WorkspaceSnapshot.erdLayouts` keyed by stringified tab id only); `src/core/workspace-store.ts` (`openWorkspaceStore` resolves ONE global `workspace-state.json` in the app dir)
+severity: medium
+found_by: Edge Case Hunter follow-up review pass on 4-2
+summary: A saved layout is keyed by tab id + `tableId(schema, name)` and stored in a single global workspace file, with no discriminator for WHICH database the geometry was arranged against. Launch against database A, arrange the ERD, quit; launch against database B with a same-named schema (`public.users`, `public.orders` — the common case), and the ERD tab restores A's coordinates onto B's tables. Tables unique to B get a fresh dagre spot next to a foreign arrangement, and the first drag re-persists the hybrid. Nothing warns.
+evidence: Verified by reading `tableId` (schema + NUL + name, no connection component), `restoreErdLayouts`/`pruneErdLayouts` (prune by tab id only), and `openWorkspaceStore` (one app-dir file, no per-connection scoping). NOT caused by story 4.2 as specified: the spec's Boundaries pin the key to "tab id plus `tableId(schema, name)`" and 4.2 predates multi-connection (Epic 10). Deferred rather than patched because every fix is a contract decision, not a local repair: adding a `connectionId`/database discriminator to `ErdTabLayout` widens the persisted snapshot shape (save + load validators, the UI bridge, and the drop-on-mismatch policy), and the RIGHT policy is not obvious — a tab bound to a saved connection (Story 10.6) could key by `connectionId`, but a boot-target-only tab has no id to key by, so the same-`--db-url`-different-database case would still slip through. Worth deciding alongside whether ERD layout should follow the tab's connection at all when a tab is reassigned.
+status: open
+
+### DW-96: The ERD cannot be rearranged without a pointer — arrow-key node movement is disabled by `elementsSelectable={false}`, and would not persist even if it fired
+origin: follow-up review of 4-2, 2026-07-27
+source_spec: `spec-4-2-persist-erd-layout.md`
+location: `src/ui/workspace/ErdTabView.tsx` (`<ReactFlow nodesDraggable nodesConnectable={false} elementsSelectable={false}>`); React Flow's arrow-key path (`node.selected` gate; `moveSelectedNodes` fires no `onNodeDragStop`)
+severity: low
+found_by: Blind Hunter follow-up review pass on 4-2
+summary: Story 4.2's entire interaction — rearranging nodes so the arrangement persists — is reachable only by mouse drag. React Flow's built-in arrow-key node move is gated on `node.selected`, and the canvas sets `elementsSelectable={false}` (inherited from 4.1's view-only posture), so a node can never be selected and arrow keys only pan the canvas. Independently, that keyboard path dispatches `moveSelectedNodes` and never fires `onNodeDragStop`, which is the story's only position-capture surface — so enabling selection alone would let a keyboard user move a node that is then never saved.
+evidence: Verified by reading the `<ReactFlow>` props against React Flow's key handler (`isDraggable && node.selected && arrowKeyDiffs[event.key]`) and its `moveSelectedNodes` dispatch, which has no `onNodeDragStop` call site. NOT caused by 4.2: `elementsSelectable={false}` is Story 4.1's view-only decision, and the spec's Boundaries reaffirm "no selection". Deferred rather than patched because a real fix is a two-part product decision, not a flag flip: enabling selection changes the ERD's visual and interaction contract (selection styling, its interaction with the 9.5 hover panel and the 7.4 dim overlay), and capturing keyboard moves needs a second capture seam alongside `onNodeDragStop` (`onNodesChange` position events, debounced) that the story deliberately avoided. Belongs with a deliberate accessibility pass over the canvas surfaces.
 status: open

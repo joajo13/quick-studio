@@ -508,19 +508,75 @@ function pruneErdLayouts(
   return out;
 }
 
+/** A finite number (rejects NaN/±Infinity, strings, and everything else off-disk). */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+/**
+ * Sanitize ONE persisted ERD layout read off disk (Story 4.2). `erdLayouts` is a FIELD-DROP
+ * field — the Core's load guard deliberately does not gate it, because that boundary is
+ * all-or-nothing and one bad coordinate must never discard the whole workspace — so the
+ * per-entry rescue lives here, exactly like `restoreLastProvider`'s unknown → null.
+ *
+ * Returns `undefined` when the entry is unusable as a whole (not an object, or no `positions`
+ * object); otherwise keeps every FINITE `{x,y}` position and drops the malformed ones, and
+ * keeps the `viewport` only when it is finite with a POSITIVE zoom (0/negative restores a
+ * blank canvas, and the Core's save validator rejects it). This matters beyond rendering:
+ * the restored map is fed straight back into `toWorkspaceSnapshot`, so passing malformed
+ * geometry through would make every later `workspace.save` a `bad_request` for the session.
+ */
+function sanitizeErdLayout(value: unknown): ErdTabLayout | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const l = value as Record<string, unknown>;
+  if (typeof l.positions !== "object" || l.positions === null || Array.isArray(l.positions)) {
+    return undefined;
+  }
+  const positions: Record<string, { x: number; y: number }> = {};
+  for (const [nodeId, pos] of Object.entries(l.positions as Record<string, unknown>)) {
+    if (typeof pos !== "object" || pos === null) continue;
+    const p = pos as Record<string, unknown>;
+    if (isFiniteNumber(p.x) && isFiniteNumber(p.y)) positions[nodeId] = { x: p.x, y: p.y };
+  }
+  if (typeof l.viewport === "object" && l.viewport !== null) {
+    const vp = l.viewport as Record<string, unknown>;
+    if (isFiniteNumber(vp.x) && isFiniteNumber(vp.y) && isFiniteNumber(vp.zoom) && vp.zoom > 0) {
+      return { positions, viewport: { x: vp.x, y: vp.y, zoom: vp.zoom } };
+    }
+  }
+  return { positions };
+}
+
 /**
  * Seed the App-held `erdLayouts` from a loaded {@link WorkspaceSnapshot} (Story 4.2),
  * dropping any layout whose tab id is not among `tabs` (the restored tab set) — the
- * restore-side twin of {@link toWorkspaceSnapshot}'s pruning. Pure and total: a snapshot
- * with no `erdLayouts` (a pre-4.2 file) yields `{}` so the ERD falls back to dagre. Like
- * `panelSizes`, ERD geometry is React-held App state rather than part of the pure
- * {@link WorkspaceState}, so it is threaded through this sibling helper.
+ * restore-side twin of {@link toWorkspaceSnapshot}'s pruning — and sanitizing what survives
+ * (see {@link sanitizeErdLayout}). Pure and total: a snapshot with no `erdLayouts` (a pre-4.2
+ * file) yields `{}` so the ERD falls back to dagre. Like `panelSizes`, ERD geometry is
+ * React-held App state rather than part of the pure {@link WorkspaceState}, so it is threaded
+ * through this sibling helper.
  */
 export function restoreErdLayouts(
   snapshot: WorkspaceSnapshot,
   tabs: ReadonlyArray<{ readonly id: number }>,
 ): Record<string, ErdTabLayout> {
-  return snapshot.erdLayouts ? pruneErdLayouts(snapshot.erdLayouts, tabs) : {};
+  // Defensive on the container too: `erdLayouts` is no longer shape-gated at the Core load
+  // boundary, so a hand-edited array (whose numeric indices could collide with tab ids) or a
+  // scalar must degrade to "no saved geometry", not be walked as a map.
+  if (
+    !snapshot.erdLayouts ||
+    typeof snapshot.erdLayouts !== "object" ||
+    Array.isArray(snapshot.erdLayouts)
+  ) {
+    return {};
+  }
+  const pruned = pruneErdLayouts(snapshot.erdLayouts, tabs);
+  const out: Record<string, ErdTabLayout> = {};
+  for (const [tabKey, layout] of Object.entries(pruned)) {
+    const clean = sanitizeErdLayout(layout);
+    if (clean !== undefined) out[tabKey] = clean;
+  }
+  return out;
 }
 
 /**
