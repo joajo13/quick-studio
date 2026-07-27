@@ -146,6 +146,23 @@ function TableIcon({ className }: { className: string }): React.JSX.Element {
   );
 }
 
+/** Table-row leading icon for a VIEW — the mockup's `.view-ico` eye glyph (DW-68). */
+function ViewIcon(): React.JSX.Element {
+  return (
+    <svg
+      aria-hidden
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      className="h-3.5 w-3.5 shrink-0 text-t-json"
+    >
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+      <circle cx="12" cy="12" r="2.5" />
+    </svg>
+  );
+}
+
 /** Schema-node leading icon (the mockup's folder glyph on the intermediate level). */
 function SchemaIcon(): React.JSX.Element {
   return (
@@ -358,7 +375,11 @@ export function ConnectionRoot({
                             aria-expanded={hasColumns ? tOpen : undefined}
                             onClick={activate}
                             onKeyDown={onRowKeyDown(activate)}
-                            title={`${table.schema}.${table.name}`}
+                            title={
+                              table.kind === "view"
+                                ? `${table.schema}.${table.name} · vista`
+                                : `${table.schema}.${table.name}`
+                            }
                             className={[
                               "mx-1.5 my-px flex cursor-pointer select-none items-center gap-[7px] rounded-[var(--radius)] py-1.5 pl-11 pr-2.5 text-[12.5px] transition-colors",
                               on
@@ -366,8 +387,18 @@ export function ConnectionRoot({
                                 : "text-muted-foreground hover:bg-muted hover:text-foreground",
                             ].join(" ")}
                           >
-                            <TableIcon className={on ? "text-coral" : "text-muted-foreground"} />
+                            {table.kind === "view" ? (
+                              <ViewIcon />
+                            ) : (
+                              <TableIcon className={on ? "text-coral" : "text-muted-foreground"} />
+                            )}
                             <span className="truncate">{table.name}</span>
+                            {/* The glyph is `aria-hidden` and a row `title` is only a
+                                LAST-RESORT accessible name — name-from-content wins on a
+                                `role="button"` with visible text, so the tooltip alone
+                                never reaches a screen reader. This marker puts the
+                                view/table distinction into the accessible name itself. */}
+                            {table.kind === "view" ? <span className="sr-only">vista</span> : null}
                             <span className="ml-auto shrink-0 text-[10px] opacity-70">
                               {table.columns.length}
                             </span>

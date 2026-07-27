@@ -185,7 +185,9 @@ async function callShutdown(): Promise<Status> {
   }
 }
 
-function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element {
+/** Exported for render-testing only (like `ConnectionRoot` in `SchemaTree.tsx`): `App` itself
+ * cannot be rendered statically, so the `health` testid and status dot are asserted here. */
+export function ConnectionIndicator({ status }: { status: Status }): React.JSX.Element {
   // Neutral status-bar segment (prototype `.statusbar .seg` / `.rail-status .sdot`):
   // green `--ok` when connected, red when errored, muted for stopped AND loading —
   // color is spent only where it is functional, never as decoration.

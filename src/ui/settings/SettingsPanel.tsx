@@ -179,7 +179,7 @@ function ConnectionRow({
               type="button"
               disabled={busy}
               onClick={onRemove}
-              className="rounded-[var(--radius)] border border-err-line bg-err px-2 py-1 font-mono text-xs lowercase text-white transition-colors hover:opacity-90 disabled:opacity-50"
+              className="rounded-[var(--radius)] border border-err bg-err-fill px-2 py-1 font-mono text-xs lowercase text-white transition-colors hover:opacity-90 disabled:opacity-50"
             >
               yes
             </button>

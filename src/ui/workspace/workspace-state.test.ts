@@ -683,6 +683,72 @@ describe("erdLayouts bridge (Story 4.2)", () => {
     };
     expect(restoreErdLayouts(snapshot, restoreWorkspace(snapshot).tabs)).toEqual({});
   });
+
+  // `erdLayouts` is a FIELD-DROP field — the Core load boundary no longer shape-gates it
+  // (gating there discards the WHOLE workspace over one bad number), so the per-entry rescue
+  // has to happen here. These cases all arrive as `unknown` off disk despite the static type.
+  describe("restoreErdLayouts sanitizes malformed geometry off disk", () => {
+    const snapshotWith = (erdLayouts: unknown): WorkspaceSnapshot =>
+      ({
+        version: 1,
+        panelSizes: [20, 80],
+        tabs: [{ id: 1, kind: "erd", title: "ERD 1" }],
+        activeTabId: 1,
+        nextId: 2,
+        erdLayouts,
+      }) as unknown as WorkspaceSnapshot;
+
+    const tabs = [{ id: 1 }];
+
+    test("drops only the malformed positions and keeps the finite ones", () => {
+      const snapshot = snapshotWith({
+        "1": {
+          positions: {
+            good: { x: 10, y: 20 },
+            stringy: { x: 1, y: "nope" },
+            missing: { x: 5 },
+            notAnObject: 7,
+            nulled: null,
+          },
+        },
+      });
+      expect(restoreErdLayouts(snapshot, tabs)).toEqual({
+        "1": { positions: { good: { x: 10, y: 20 } } },
+      });
+    });
+
+    test("drops a viewport with a non-finite field but keeps the positions", () => {
+      const snapshot = snapshotWith({
+        "1": { positions: { good: { x: 1, y: 2 } }, viewport: { x: 0, y: 0, zoom: "big" } },
+      });
+      expect(restoreErdLayouts(snapshot, tabs)).toEqual({
+        "1": { positions: { good: { x: 1, y: 2 } } },
+      });
+    });
+
+    test("drops a viewport whose zoom is zero or negative (degenerate transform)", () => {
+      for (const zoom of [0, -1]) {
+        const snapshot = snapshotWith({
+          "1": { positions: { good: { x: 1, y: 2 } }, viewport: { x: 0, y: 0, zoom } },
+        });
+        expect(restoreErdLayouts(snapshot, tabs)["1"]?.viewport).toBeUndefined();
+      }
+    });
+
+    test("drops an entry with no usable positions object", () => {
+      expect(restoreErdLayouts(snapshotWith({ "1": { positions: "nope" } }), tabs)).toEqual({});
+      expect(restoreErdLayouts(snapshotWith({ "1": 42 }), tabs)).toEqual({});
+    });
+
+    test("degrades to {} when erdLayouts itself is not a plain object", () => {
+      expect(restoreErdLayouts(snapshotWith("nonsense"), tabs)).toEqual({});
+      expect(restoreErdLayouts(snapshotWith([{ positions: {} }]), tabs)).toEqual({});
+    });
+
+    test("a valid layout survives sanitization unchanged", () => {
+      expect(restoreErdLayouts(snapshotWith({ "1": LAYOUT }), tabs)).toEqual({ "1": LAYOUT });
+    });
+  });
 });
 
 describe("lastProvider bridge (Story 8.5)", () => {

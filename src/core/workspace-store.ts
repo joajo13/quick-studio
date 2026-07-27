@@ -99,43 +99,6 @@ function isTabKind(value: unknown): value is WorkspaceTabKind {
   );
 }
 
-/** A finite number (rejects NaN/±Infinity and non-numbers). */
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-/**
- * Type guard: `value` is a well-formed optional `erdLayouts` map (Story 4.2) — a plain
- * object of per-tab layouts, each with a `positions` object of `{x,y}` FINITE coords and
- * an optional `viewport` of finite `{x,y,zoom}`. ABSENT `erdLayouts` is handled by the
- * caller (old v1 files validate without it); this only shape-checks a PRESENT value.
- */
-function isErdLayouts(value: unknown): boolean {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  for (const layout of Object.values(value as Record<string, unknown>)) {
-    if (typeof layout !== "object" || layout === null || Array.isArray(layout)) return false;
-    const l = layout as Record<string, unknown>;
-    if (typeof l.positions !== "object" || l.positions === null || Array.isArray(l.positions)) {
-      return false;
-    }
-    for (const pos of Object.values(l.positions as Record<string, unknown>)) {
-      if (typeof pos !== "object" || pos === null) return false;
-      const p = pos as Record<string, unknown>;
-      if (!isFiniteNumber(p.x) || !isFiniteNumber(p.y)) return false;
-    }
-    if (l.viewport !== undefined) {
-      if (typeof l.viewport !== "object" || l.viewport === null) return false;
-      const vp = l.viewport as Record<string, unknown>;
-      // `zoom` must be a positive scale — 0 or negative yields a degenerate transform
-      // (blank canvas) on restore, and fitView is disabled whenever a viewport exists.
-      if (!isFiniteNumber(vp.x) || !isFiniteNumber(vp.y) || !isFiniteNumber(vp.zoom) || vp.zoom <= 0) {
-        return false;
-      }
-    }
-  }
-  return true;
-}
-
 /**
  * Type guard: `value` is a well-formed {@link WorkspaceSnapshotTab}.
  *
@@ -181,9 +144,16 @@ function isWorkspaceSnapshot(value: unknown): value is WorkspaceSnapshot {
     return false;
   }
   if (typeof v.nextId !== "number" || !Number.isFinite(v.nextId)) return false;
-  // `erdLayouts` is ADDITIVE + optional (Story 4.2): an old v1 file with no such field
-  // still validates (falls back to dagre); a PRESENT value is shape-checked here.
-  if (v.erdLayouts !== undefined && !isErdLayouts(v.erdLayouts)) return false;
+  // `erdLayouts` is ADDITIVE + optional (Story 4.2) and, like `connectionId` above and
+  // `lastProvider` below, a FIELD-DROP field: deliberately NOT gated here. This guard is
+  // ALL-OR-NOTHING, so gating the geometry would let ONE bad coordinate (a partial write, a
+  // hand edit) discard every tab, panel size and layout — and `App` reads that `null` as an
+  // ordinary first launch, enables saving, and overwrites the good file with an empty
+  // workspace. The sanitizing therefore lives UI-side in `restoreErdLayouts` (drop the
+  // malformed entry, keep the rest), which is also what the story's I/O matrix asks for
+  // ("skip entry, no throw"). The SAVE boundary stays strict: `workspace-registry.ts`'s
+  // `checkErdLayouts` rejects malformed geometry with a `bad_request`, so nothing this build
+  // writes can be malformed here.
   // `lastProvider` is ADDITIVE + optional (Story 8.5): a FIELD-DROP field, deliberately NOT
   // gated here. It is a single lightweight enum default hint — an unrecognized value (a future
   // provider kind on downgrade, or a hand-edit) must never discard the whole workspace, so the

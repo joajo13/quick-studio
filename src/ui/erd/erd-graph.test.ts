@@ -15,6 +15,9 @@ import type { SchemaForeignKeyInfo, SchemaTableInfo } from "../../shared/contrac
 import {
   applyLayout,
   connectedNodeIds,
+  positionsOf,
+  reconcilePositions,
+  sanitizeViewport,
   schemaToGraph,
   tableId,
   typeColorClass,
@@ -101,7 +104,7 @@ describe("schemaToGraph — I/O & Edge-Case Matrix", () => {
     expect(graph.edges[0]?.target).toBe(id);
   });
 
-  test("FK to an absent table: edge omitted, no throw", () => {
+  test("FK to an absent table (DW-44): a materialized erdExternal node + dashed-flagged edge, no throw", () => {
     const graph = schemaToGraph([
       table("orders", [{ name: "id" }, { name: "ghost_id" }], {
         foreignKeys: [
@@ -109,8 +112,122 @@ describe("schemaToGraph — I/O & Edge-Case Matrix", () => {
         ],
       }),
     ]);
-    expect(graph.nodes.length).toBe(1);
-    expect(graph.edges).toEqual([]);
+    // One real table node plus one synthesized external node for the absent target.
+    expect(graph.nodes.length).toBe(2);
+    const externalId = tableId("public", "ghost");
+    const external = graph.nodes.find((n) => n.id === externalId);
+    expect(external?.type).toBe("erdExternal");
+    expect(external?.data.schema).toBe("public");
+    expect(external?.data.name).toBe("ghost");
+    expect(external?.data.label).toBe("public.ghost");
+    // External node carries no column list.
+    expect(external?.data.columns).toEqual([]);
+    // The edge is never dropped — it now points at the external node, flagged.
+    expect(graph.edges.length).toBe(1);
+    expect(graph.edges[0]?.source).toBe(tableId("public", "orders"));
+    expect(graph.edges[0]?.target).toBe(externalId);
+    expect(graph.edges[0]?.data.isExternal).toBe(true);
+  });
+
+  test("external node height is header + one caption row (P10), not header + row-container padding", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "ghost_id" }], {
+        foreignKeys: [
+          { columns: ["ghost_id"], referencedSchema: "public", referencedTable: "ghost", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    const external = graph.nodes.find((n) => n.id === tableId("public", "ghost"));
+    // HEADER_HEIGHT (34) + ROW_HEIGHT (22) = 56 — NOT the old nodeHeight(0) (42), which
+    // added NODE_PADDING for a rows container this column-less card never renders.
+    expect(external?.height).toBe(56);
+  });
+
+  test("MySQL cross-database FK: external node labelled with the target database verbatim", () => {
+    // `referencedSchema` holds the *database* name on MySQL; a pinned-database
+    // introspection scopes the owning side but leaves the referenced side unfiltered,
+    // so `auth` never appears in the input table list.
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        schema: "shop",
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "auth", referencedTable: "users", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    const externalId = tableId("auth", "users");
+    const external = graph.nodes.find((n) => n.id === externalId);
+    expect(external?.type).toBe("erdExternal");
+    expect(external?.data.label).toBe("auth.users");
+    expect(graph.edges[0]?.data.isExternal).toBe(true);
+  });
+
+  test("two FKs (from different tables) targeting the same absent table: ONE external node, TWO dashed edges", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "auth", referencedTable: "users", referencedColumns: ["id"] },
+        ],
+      }),
+      table("sessions", [{ name: "id" }, { name: "user_id" }], {
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "auth", referencedTable: "users", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    const externalId = tableId("auth", "users");
+    expect(graph.nodes.filter((n) => n.id === externalId).length).toBe(1);
+    const externalEdges = graph.edges.filter((e) => e.target === externalId);
+    expect(externalEdges.length).toBe(2);
+    expect(externalEdges.every((e) => e.data.isExternal)).toBe(true);
+  });
+
+  test("an in-scope FK still carries isExternal: false", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "public", referencedTable: "users", referencedColumns: ["id"] },
+        ],
+      }),
+      table("users", [{ name: "id" }], { primaryKey: ["id"] }),
+    ]);
+    expect(graph.edges.length).toBe(1);
+    expect(graph.edges[0]?.data.isExternal).toBe(false);
+    // No external node was created — the target was in scope.
+    expect(graph.nodes.every((n) => n.type === "erdTable")).toBe(true);
+  });
+
+  test("applyLayout positions the external node like any other node", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "ghost_id" }], {
+        foreignKeys: [
+          { columns: ["ghost_id"], referencedSchema: "public", referencedTable: "ghost", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    const externalId = tableId("public", "ghost");
+    // Dagre already gave it a finite position.
+    const external = graph.nodes.find((n) => n.id === externalId);
+    expect(Number.isFinite(external?.position.x)).toBe(true);
+    expect(Number.isFinite(external?.position.y)).toBe(true);
+    // The overlay treats it like any positioned node id.
+    const out = applyLayout(graph, { [externalId]: { x: 42, y: 84 } });
+    expect(out.nodes.find((n) => n.id === externalId)?.position).toEqual({ x: 42, y: 84 });
+  });
+
+  test("connectedNodeIds includes the external node as a hover neighbour", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "ghost_id" }], {
+        foreignKeys: [
+          { columns: ["ghost_id"], referencedSchema: "public", referencedTable: "ghost", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    const ordersId = tableId("public", "orders");
+    const externalId = tableId("public", "ghost");
+    expect([...connectedNodeIds(graph.edges, ordersId)].sort()).toEqual(
+      [ordersId, externalId].sort(),
+    );
   });
 
   test("composite FK: a single edge (not one per column)", () => {
@@ -191,6 +308,70 @@ describe("schemaToGraph — I/O & Edge-Case Matrix", () => {
     // Self-referential edge included: it must still get an arrowhead.
     expect(graph.edges.length).toBe(1);
     expect(graph.edges[0]?.markerEnd).toEqual({ type: MarkerType.ArrowClosed });
+  });
+
+  test("a blank referencedTable names nothing to point at: the FK is skipped entirely, no ghost node", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "public", referencedTable: "", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    // Only the real table node — no synthesized node for the blank target, and no edge.
+    expect(graph.nodes.length).toBe(1);
+    expect(graph.nodes[0]?.type).toBe("erdTable");
+    expect(graph.edges).toEqual([]);
+  });
+
+  test("a whitespace-only referencedTable is treated the same as blank: skipped", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "public", referencedTable: "   ", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    expect(graph.nodes.length).toBe(1);
+    expect(graph.edges).toEqual([]);
+  });
+
+  // P13: the blank-target skip is a guard against synthesizing a NAMELESS external card
+  // — it must never fire for a target that is actually PRESENT. `"   "` is a legal
+  // quoted identifier (`CREATE TABLE "   "` in Postgres, MySQL backticks), so a table
+  // really named that way can be in the introspected set, and dropping its FK would
+  // lose a real in-scope relationship: the very failure DW-44 exists to prevent.
+  test("a whitespace-named table that IS in scope keeps its FK edge (the blank guard is absent-target only)", () => {
+    const graph = schemaToGraph([
+      table("   ", [{ name: "id" }], { primaryKey: ["id"] }),
+      table("orders", [{ name: "id" }, { name: "user_id" }], {
+        foreignKeys: [
+          { columns: ["user_id"], referencedSchema: "public", referencedTable: "   ", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    // Two REAL nodes and no synthesized stand-in — the target was in scope all along.
+    expect(graph.nodes.length).toBe(2);
+    expect(graph.nodes.every((n) => n.type === "erdTable")).toBe(true);
+    // The relationship survives, solid (in-scope), pointing at the real node.
+    expect(graph.edges.length).toBe(1);
+    expect(graph.edges[0]?.target).toBe(tableId("public", "   "));
+    expect(graph.edges[0]?.data.isExternal).toBe(false);
+  });
+
+  test("a blank referencedSchema with a REAL referencedTable is unaffected: still external, label falls back to the bare table name", () => {
+    const graph = schemaToGraph([
+      table("orders", [{ name: "id" }, { name: "ghost_id" }], {
+        foreignKeys: [
+          { columns: ["ghost_id"], referencedSchema: "", referencedTable: "ghost", referencedColumns: ["id"] },
+        ],
+      }),
+    ]);
+    const externalId = tableId("", "ghost");
+    const external = graph.nodes.find((n) => n.id === externalId);
+    expect(external?.type).toBe("erdExternal");
+    expect(external?.data.label).toBe("ghost");
+    expect(graph.edges.length).toBe(1);
   });
 
   test("an FK across schemas resolves to the referenced schema's node", () => {
@@ -444,5 +625,91 @@ describe("schemaToGraph — additive isForeignKey column flag (Story 7.4)", () =
     expect(byName.get("user_id")?.isForeignKey).toBe(true);
     expect(byName.get("id")?.isForeignKey).toBe(false);
     expect(byName.get("note")?.isForeignKey).toBe(false);
+  });
+});
+
+describe("positionsOf — layout capture (Story 4.2)", () => {
+  test("maps every node id to its position", () => {
+    expect(
+      positionsOf([
+        { id: "a", position: { x: 1, y: 2 } },
+        { id: "b", position: { x: -3, y: 4.5 } },
+      ]),
+    ).toEqual({ a: { x: 1, y: 2 }, b: { x: -3, y: 4.5 } });
+  });
+
+  test("returns an empty map for no nodes", () => {
+    expect(positionsOf([])).toEqual({});
+  });
+
+  test("SKIPS a non-finite coordinate instead of persisting it", () => {
+    // One NaN/Infinity reaching `workspace.save` is a bad_request for the WHOLE snapshot,
+    // which would silently stop every save for the rest of the session.
+    expect(
+      positionsOf([
+        { id: "ok", position: { x: 1, y: 2 } },
+        { id: "nan", position: { x: Number.NaN, y: 0 } },
+        { id: "inf", position: { x: 0, y: Number.POSITIVE_INFINITY } },
+      ]),
+    ).toEqual({ ok: { x: 1, y: 2 } });
+  });
+});
+
+describe("reconcilePositions — graph-change re-seed (Story 4.2)", () => {
+  const ORDERS = tableId("public", "orders");
+  const USERS = tableId("public", "users");
+  const SAVED = { [ORDERS]: { x: 10, y: 20 } };
+
+  test("re-seeds from the on-screen nodes when the graph is non-empty", () => {
+    expect(reconcilePositions(SAVED, [{ id: ORDERS, position: { x: 99, y: 98 } }])).toEqual({
+      [ORDERS]: { x: 99, y: 98 },
+    });
+  });
+
+  test("drops a vanished node's entry when the graph is non-empty", () => {
+    expect(reconcilePositions(SAVED, [{ id: USERS, position: { x: 1, y: 1 } }])).toEqual({
+      [USERS]: { x: 1, y: 1 },
+    });
+  });
+
+  test("KEEPS the previous map verbatim when the graph is empty", () => {
+    // The restore regression: a restored ACTIVE ERD tab mounts before introspection answers,
+    // so the first derived graph has zero nodes. Re-seeding there would wipe the saved
+    // arrangement, and the tables-arrival re-derivation would silently fall back to dagre.
+    expect(reconcilePositions(SAVED, [])).toBe(SAVED);
+  });
+
+  test("an empty graph after a real drag still keeps the dragged positions", () => {
+    const dragged = reconcilePositions(SAVED, [{ id: ORDERS, position: { x: 5, y: 6 } }]);
+    expect(reconcilePositions(dragged, [])).toEqual({ [ORDERS]: { x: 5, y: 6 } });
+  });
+
+  test("the kept map still restores through applyLayout once the tables arrive", () => {
+    // End-to-end of the regression: empty mount → tables land → the saved position wins.
+    const kept = reconcilePositions(SAVED, []);
+    const laid = applyLayout(schemaToGraph([table("orders", [{ name: "id" }])]), kept);
+    expect(laid.nodes[0]?.id).toBe(ORDERS);
+    expect(laid.nodes[0]?.position).toEqual({ x: 10, y: 20 });
+  });
+});
+
+describe("sanitizeViewport — viewport capture (Story 4.2)", () => {
+  test("passes a finite, positively-zoomed viewport through", () => {
+    expect(sanitizeViewport({ x: -10, y: 20, zoom: 1.5 })).toEqual({ x: -10, y: 20, zoom: 1.5 });
+  });
+
+  test("returns undefined for an absent viewport", () => {
+    expect(sanitizeViewport(undefined)).toBeUndefined();
+  });
+
+  test("rejects a non-finite offset or zoom", () => {
+    expect(sanitizeViewport({ x: Number.NaN, y: 0, zoom: 1 })).toBeUndefined();
+    expect(sanitizeViewport({ x: 0, y: Number.POSITIVE_INFINITY, zoom: 1 })).toBeUndefined();
+    expect(sanitizeViewport({ x: 0, y: 0, zoom: Number.NaN })).toBeUndefined();
+  });
+
+  test("rejects a zero or negative zoom (degenerate, blank canvas on restore)", () => {
+    expect(sanitizeViewport({ x: 0, y: 0, zoom: 0 })).toBeUndefined();
+    expect(sanitizeViewport({ x: 0, y: 0, zoom: -1 })).toBeUndefined();
   });
 });

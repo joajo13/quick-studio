@@ -8,7 +8,8 @@ source_spec: `spec-4-2-persist-erd-layout.md`
 severity: low
 reason: Review budget (3 cycles) was exhausted with the story finalized (status: done, verify green) while the review pass kept recommending an independent follow-up. The work was committed by bmad-loop run 20260710-224752-6cf5; this entry preserves the lingering follow-up recommendation for a deliberate later review.
 decision: [2026-07-21, user] Do a single focused follow-up review of story 4-2 during the post-epic sweep (cheap; closes the lingering budget-exhaustion recommendation).
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-followup-review-4-2-erd-layout
 
 ### DW-2: Harden the per-boot token against same-machine processes and add a Content-Security-Policy (with a nonce for the inline token script) once stories render database content
 
@@ -365,7 +366,8 @@ origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 202
 location: `schemaToGraph` (ERD graph builder)
 reason: When a MySQL connection names a database, columns are scoped to that schema but a FK may reference a table in another database; `schemaToGraph` then drops the edge as an "absent table" with no user indication a real relationship was omitted. Defensible for v1 but an explicit product decision (dangling-edge affordance vs. note vs. silent) is preferable.
 decision: [2026-07-21, user] Draw the cross-database MySQL FK as a DISTINCT edge (dashed / labeled with the target database) to an external node or annotation, marked as cross-database — do not silently drop it.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-erd-visual-fidelity
 
 ### DW-45: `connectionManager.getSchema()` memoizes the schema at connect and never re-introspects, so chat context (and the "N tables" badge) goes stale after DDL runs (create/drop table)
 
@@ -393,7 +395,8 @@ location: sandbox `pushData` / CSP (spec-5-5 crossorigin JS sandbox)
 severity: high
 reason: CSP fetch directives (`connect-src`, `img-src`) do not govern top-level/self navigation, and `sandbox="allow-scripts"` without `allow-top-navigation` still permits a frame to navigate ITSELF. The pushed `FrozenData` is the user's real query output, not public data. Closing this is a genuine architectural/security decision (e.g. gating `pushData` on a confirmed handshake so data never lands in a navigated-away frame, and/or a documented residual) rather than a trivial patch — the `pushData(frame, "*")` target-origin is deliberately `"*"` against the guest's opaque origin.
 decision: [2026-07-21, user] ACCEPT the risk (guest-visible data is already the user's own) — document as out-of-scope, mirroring the DW-36 Option-A posture. RESIDUAL to record explicitly: a hostile/shared report could still exfiltrate FrozenData via scripted same-frame navigation; revisit if untrusted/shared reports are ever introduced. (User chose accept over the recommended sandbox-navigation block.)
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-sandbox-exposure-security
 
 ### DW-48: In exposed mode (`QS_HOST=0.0.0.0`) the sandbox server binds the same wildcard host as Core (LAN-exposing the tokenless guest) while the injected `__QS_SANDBOX_ORIGIN__` is normalized to `127.0.0.1:<port>`, which is unreachable for a remote browser — the sandbox silently fails to load off-host
 
@@ -402,7 +405,8 @@ location: `startCore` (sandbox `Bun.serve`, `bindHost`); `deriveOpenUrl`
 severity: medium
 reason: `startCore` passes `bindHost` straight into the sandbox `Bun.serve`, and `deriveOpenUrl` rewrites the injected origin to loopback. The intent-contract Block-If explicitly reserves the exposure model as a human security decision, so the correct exposed-mode posture (loopback-only sandbox + documented "visualization unavailable when exposed", or a reachable remote origin) is a deliberate call, not an unattended patch.
 decision: [2026-07-21, user] Keep the sandbox bound to LOOPBACK even when the Core is exposed (QS_HOST=0.0.0.0) — never LAN-expose the tokenless guest — and document that report visualizations only render on the host machine in exposed mode. (Closes problem (a); avoids the false-success of (b).)
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-sandbox-exposure-security
 
 ### DW-49: The guest→host signal stream (`height`/`error`/`datum-clicked`) is unbounded in rate/count, so a hostile guest can flood `onSignal` — and via `SandboxFrame`'s `setHeight` a React re-render — thrashing the Ring 2 main thread
 
@@ -447,7 +451,8 @@ source_spec: `spec-7-1-redesign-shell-neutral.md`
 location: `src/ui/workspace/TabBar.tsx`, `src/ui/schema/SchemaTree.tsx`, `src/ui/workspace/Workspace.tsx`, `src/ui/App.tsx`
 severity: low
 reason: The shell's `role="tab"`/`aria-selected`/`aria-pressed`/`aria-label="Schema tables"` and the `health`/`settings-toggle`/`create-table-toggle`/`exposure-banner` testids are load-bearing for a11y and were preserved as a hard constraint, but no `*.test.tsx` renders these four components — they are asserted nowhere. The story's "keep every passing test green" only covers unrelated suites (ChatTabView/QueryTabView/ErdTabView/ReportTabView/ConfirmRun/etc.), so the activation/disclosure semantics, the connection-status dot, and the light-theme flip could all regress unnoticed. Pre-existing gap surfaced by this review; adding shell render tests is worthwhile focused work, not part of a presentation-only pass.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-workspace-shell-component-tests
 
 ### DW-54: The shell's destructive/error reds are hardcoded dark-tuned Tailwind classes (`text-red-400`/`bg-red-500`/`bg-red-500/10`) that do not flip under `:root[data-theme="light"]`, so on the new light theme they render low-contrast on white surfaces — tokenize them (e.g. a themed `--destructive`/`--err` pair) when the light theme is completed across Epic 7
 
@@ -469,7 +474,8 @@ location: `src/ui/data/grid-view.ts` (`csvField`/`rowsToCsv`)
 severity: medium
 reason: `rowsToCsv`'s `csvField` quotes only fields containing `,`/`"`/newline (exactly the escaping the spec prescribed) — it does not neutralize leading formula sigils. Because a DB browser exports arbitrary row content, a cell like `=SUM(A1)`/`+cmd`/`-2+3`/`@foo` becomes a live formula in a spreadsheet app. This is a genuine (well-known) export vulnerability, but the fix is a policy decision the presentation-only spec deliberately did not scope: the common mitigation (prefixing a `'` or tab) MUTATES exported data and many DB tools intentionally preserve fidelity instead. Worth a focused decision + follow-up rather than silently altering export output in an unattended pass.
 decision: [2026-07-21, user] Prefix-guard the CSV export — prepend a `'` to any cell starting with `= + - @` (and tab/CR) — the standard OWASP formula-injection mitigation.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-csv-formula-injection-guard
 
 ### DW-56: Clicking the result-bar Add-Row ("row") button opens the in-grid insert draft at the bottom of the scrollable table body with no scroll-into-view, so on a full/scrolled page the click appears to do nothing
 
@@ -478,7 +484,8 @@ source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
 location: `src/ui/workspace/TabContent.tsx` (Add-Row button → `setInsertOpen(true)`), `src/ui/data/DataGrid.tsx` (`InsertDraftRow` renders at the end of `<tbody>` inside the scroll container)
 severity: low
 reason: The spec required Add-Row to "open/reuse the existing in-grid insert-draft flow" and it does — the draft expands at the bottom of `<tbody>`. But the toolbar button lives at the top of the panel and the draft can be off-screen in a scrolled/full page, so the user gets no visible feedback that the click registered. Fixing it needs a ref + `scrollIntoView` (or a focus handoff) added to `DataGrid`, extra surface beyond the presentation-only reskin. Real but low-consequence UX polish — deferred for focused attention.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-insert-draft-ux
 
 ### DW-57: The result-bar insert draft (`insertOpen`) is not reset on page navigation, so a draft opened (and partially typed) on one page stays open with stale values after Prev/Next loads a different page
 
@@ -487,7 +494,8 @@ source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
 location: `src/ui/workspace/TabContent.tsx` (`insertOpen` state; `InsertDraftRow` value state in `src/ui/data/DataGrid.tsx` — the grid is keyed per table, not per page, so its local draft values persist across page changes)
 severity: low
 reason: `insertOpen` (lifted so the toolbar Add-Row can open the same draft) is only cleared on insert success (`InsertDraftRow.reset()`); `setPage`/prev/next never reset it, and the grid is remounted per bound table (not per page) so `InsertDraftRow`'s local `values` persist too. Paging with a half-filled draft open leaves it open over the newly loaded page with the prior page's typed values. A safe fix is a small `useEffect(() => setInsertOpen(false), [page])` plus a draft-values reset, but it was left out of the presentation pass to avoid adding reset logic near the fetch effect the spec froze. Low-consequence UX edge — deferred.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-insert-draft-ux
 
 ### DW-58: The redesigned Confirm button paints white text on the new `--err` fill (`#ef6a63`), a ~3:1 contrast ratio that falls below WCAG AA (4.5:1) for its 12.5px semibold label
 
@@ -497,7 +505,8 @@ location: `src/ui/workspace/ConfirmRun.tsx` (`footerButtons`, the `bg-[var(--err
 severity: medium
 reason: The white-on-`--err` fill is a faithful port of `confirm-destructive.html` (`.dx-btn-danger { background: var(--err); color: #fff }`), which the spec designates the visual source of truth — so following the contract produced it. The fix (darken `--err`, or the label) is an epic-wide `--err` design-token decision touching every destructive surface, not an isolated component tweak, and it slightly deviates from the prototype the spec mandates. Deferred to a focused a11y/contrast pass over the Epic 7 `--err`/`--warn` palette rather than a unilateral change in a presentation-only story.
 decision: [2026-07-21, user] Darken the `--err` fill (or the on-err text) so the Confirm button label reaches >=4.5:1 WCAG AA — a small token tweak, no design-language change.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirm-err-contrast
 
 ### DW-59: `ConfirmRun` declares `role="alertdialog"` + `aria-modal="true"` but does not enforce modality — no focus trap, no scrim-click dismiss, and background content stays tabbable
 
@@ -506,7 +515,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (the `alertdialog` card + `fixed inset-0` scrim)
 severity: medium
 reason: The prototype markup (and the port) assert `aria-modal="true"`, but the component adds no focus trap and the scrim has no dismiss handler, so a keyboard/AT user can Tab out to the page behind the "modal" and a screen reader announces a boundary that isn't kept. This is a genuine modal-a11y gap, but it is shared across all three callers (Query/Chat/Report) and a proper focus trap is real behavior beyond a presentation-only reskin — best done once as a dedicated shared-modal a11y pass for the epic. Not a regression from the prior inline panel (which claimed no modality at all).
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-60: `ConfirmRun`'s `position: fixed` overlay is rendered in-tree (no portal), so it anchors to an ancestor instead of the viewport if any ancestor establishes a containing block (`transform`/`filter`/`will-change`/`contain`)
 
@@ -515,7 +525,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (`fixed inset-0` root), rendered inside `QueryTabView`/`ChatTabView`/`ReportTabView` trees
 severity: low
 reason: `QueryTabView`'s own root is transform-free today, so the full-screen scrim resolves against the viewport as intended. But the modal is rendered in place (not via a React portal), so a future shell/panel ancestor that applies `transform`/`filter` (common for animations) would silently clip or mis-center it. The durable fix is a portal to `document.body`, which changes the render path and is out of scope for a presentation-only port. Latent fragility, surfaced for the record.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-61: The optional `affectedRows` badge renders for any numeric value — `0`, negative, or `NaN` all paint the red "N rows" badge, and pluralization only special-cases `=== 1`
 
@@ -524,7 +535,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (the `affectedRows !== undefined` badge)
 severity: low
 reason: `affectedRows` is a prop-gated preview with NO Core source today (the `confirmation_required` preview carries only `sql`+`risk`), so this branch is dormant until a future story wires it. When wired, a `0`/negative/`NaN` value would render a misleading red "0 rows"/"-5 rows"/"NaN rows" destruction badge. The right place to add the `Number.isFinite && >= 0` guard (and richer pluralization) is the story that supplies the data with real semantics — deferred with it.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-62: The optional `objectName` type-to-confirm gate bypasses on empty string and is unmatchable for whitespace-bearing names (`typed.trim() === objectName` trims only the left side)
 
@@ -533,7 +545,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (`TypeToConfirmSection` mount gate `objectName !== undefined` + `match = typed.trim() === objectName`)
 severity: low
 reason: `objectName` is a prop-gated escalated-friction input with no Core source today (dormant). Two boundary bugs live in the dormant path: `objectName === ""` passes the `!== undefined` mount gate and matches an empty input immediately (friction fully bypassed), and a name with leading/trailing whitespace can never equal a `.trim()`-ed input (Confirm permanently disabled). Because the gate is UX-only (the Core is the real authorizer) and unreachable until wired, the mount guard (`.trim() !== ""`) and symmetric trimming belong to the story that feeds real object names. Deferred.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-63: The `objectName` type-to-confirm input stays editable while `busy` is true, even though both footer buttons disable — an inconsistent frozen state during an in-flight round-trip
 
@@ -542,7 +555,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (`TypeToConfirmSection` `<input>`, no `disabled={busy}`)
 severity: low
 reason: When a confirm round-trip is in flight (`busy`), Confirm and Cancel both disable to avoid a double-fire, but the type-to-confirm input has no `disabled={busy}`, so it remains editable while the rest of the dialog is frozen. Purely cosmetic (typing changes nothing while the buttons are inert, and the Core is the gate), and on the dormant `objectName` path. Add `disabled={busy}` when the escalated path is wired for real. Deferred.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-64: The type-to-confirm callback wiring (onConfirm/onCancel threaded through `TypeToConfirmSection`) is structurally unreachable by the presentational test's `findButton` tree-walk, so the escalated-confirm path's button callbacks are untested
 
@@ -561,7 +575,8 @@ location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` marker ternary `c.is
 severity: low
 reason: Join/junction tables commonly have columns that are simultaneously PK and FK (an identifying relationship). The single 13px badge slot renders PK-first, so such a column shows the ink key and no blue link — the column-level FK cue is lost. It is NOT invisible overall: `schemaToGraph` still emits the FK edge, so the relationship is drawn on the canvas and lights up on hover; only the per-column glyph is missing. The prototype's card is a one-badge-per-row layout, so surfacing both would need a combined/dual-badge design decision (out of scope for a presentation-only port). Cosmetic; deferred for a badge-layout decision.
 decision: [2026-07-21, user] Show BOTH markers on an ERD column that is PK and FK — the PK key badge PLUS a distinct FK link marker (blue-link glyph) — so a composite PK+FK column reads as both.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-erd-visual-fidelity
 
 ### DW-66: `hoveredNodeId` is never reconciled against the live node set — if the hovered table is removed (and its `tableId` later reused) while the pointer is over it and `onNodeMouseLeave` never fires, a stale id can spuriously highlight a different table's edges
 
@@ -581,7 +596,8 @@ location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` type label; `ErdLege
 severity: low
 reason: The tiny muted type labels and legend faithfully reproduce `design-artifacts/erd.html` (the visual source of truth), but sub-11px muted foreground on a tonal `--card`/`--background` surface is a real WCAG legibility risk, and nothing in the tests checks contrast in light or dark. This is an epic-wide neutral-redesign concern (cf. DW-58, the Epic 7 light-theme/contrast work), not specific to the ERD — folded here so the ERD's small-text surfaces are covered when the epic does a contrast/a11y pass.
 decision: [2026-07-21, user] Adjust the ERD muted type-label + legend text to a token/size that verifies >=AA contrast in BOTH dark and light themes (minimal change to --t-text/size), checked with a measurement.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-erd-visual-fidelity
 
 ### DW-68: `SchemaTableInfo` carries no table-vs-view discriminator, so the schema tree cannot draw the mockup's distinct view icon — every relation renders with the table icon
 
@@ -590,7 +606,8 @@ source_spec: `spec-10-5-multi-root-schema-tree.md`
 location: `src/shared/contract.ts` (`SchemaTableInfo`), `src/core/driver-postgres.ts` / `src/core/driver-mysql.ts` (`listSchema` introspection), `src/ui/schema/SchemaTree.tsx` (`TableIcon`)
 severity: low
 reason: `epic-10-multi-connection-tree.mockup.html` draws views with their own eye glyph (`.view-ico`, `--t-json`) and its annotations call it out ("`reporting`'s items render with the view icon"), but `SchemaTableInfo` carries only `schema`/`name`/`columns`/`primaryKey`/`indexes`/`foreignKeys` — no `kind`/`isView` — and neither driver's introspection surfaces one, so the distinction is not buildable from the data the UI receives. Story 10.5 is a pure UI consumer of Story 10.4's contract and its own intent-contract puts the discriminator explicitly out of scope, so all relations render with the table icon (no regression — the pre-10.5 tree did the same). The fix is a small vertical slice — add `kind: "table" | "view"` to `SchemaTableInfo`, surface it from the pg (`pg_class.relkind`) and MySQL (`information_schema.tables.table_type`) queries, then branch the tree's icon — but it touches the shared contract and both drivers, which is a Ring-1 change a UI story must not make unilaterally.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-schema-tree-view-icon
 - source_spec: `_bmad-output/implementation-artifacts/spec-7-5-redesign-chat-neutral.md`
   summary: The assistant action row renders open-in-editor / thumbs / share / regenerate / more as focusable buttons with action `aria-label`s but no behavior — they announce functionality they don't perform (an a11y/UX smell), an epic-wide decision to either wire them in a later behavioral story or mark them disabled.
   evidence: Spec 7.5 is presentation-only and its Design Notes intentionally ship these as visual affordances (only `copy` is wired); both adversarial reviewers flagged the dead controls. Real but non-blocking, and consistent with the epic's deferred a11y items (cf. DW-58/67).
@@ -1015,4 +1032,251 @@ severity: low
 found_by: Edge Case Hunter follow-up review pass on dw-32-33
 summary: DW-33 hardened the physical-row-locator branch so a legacy inheritance parent (`relkind='r'` + `relhassubclass`) maps to `kind:"other"` and never gets a `ctid` (its `ctid` is non-unique across parent+child heaps). But the precedence ternary checks the primary key FIRST and unconditionally: an inheritance parent that HAS a PK takes `ORDER BY <pk>`. Child tables do not inherit the parent's PK constraint, so `SELECT ... FROM parent` can return duplicate PK values across the parent and every descendant heap — `ORDER BY pk` is therefore not a total order, and paging it can overlap/skip rows exactly like the DW-33 defect, just via the PK path the change left untouched.
 evidence: Verified by reading the precedence at `table-rows.ts:305-310`; the PK branch predates this story (DW-33 rewrote the composition but kept PK first), so this is a pre-existing gap surfaced by the follow-up review, not caused by the change — hence deferred, not patched. Not a trivial patch: `kind:"other"` collapses THREE relation shapes (legacy inheritance parent, declarative partitioned parent, foreign table), and a declarative partitioned parent's PK IS globally total (the partition key is included and enforced), so gating the PK branch on `kind !== "other"` would wrongly drop a valid total order for partitioned tables. A correct fix needs a distinguishing fact (legacy-inheritance-parent vs declarative-partition-parent) that is not currently carried into `SchemaTableInfo` — a contract widening that belongs to a focused pass. Legacy table inheritance is deprecated and rare, so real-world exposure is small.
+status: open
+
+### DW-95: Persisted ERD geometry has no database identity, so relaunching against a different `--db-url` applies the previous database's node positions to same-named tables
+origin: follow-up review of 4-2, 2026-07-27
+source_spec: `spec-4-2-persist-erd-layout.md`
+location: `src/ui/erd/erd-graph.ts:130-132` (`tableId` is `schema\0name` only); `src/shared/contract.ts` (`WorkspaceSnapshot.erdLayouts` keyed by stringified tab id only); `src/core/workspace-store.ts` (`openWorkspaceStore` resolves ONE global `workspace-state.json` in the app dir)
+severity: medium
+found_by: Edge Case Hunter follow-up review pass on 4-2
+summary: A saved layout is keyed by tab id + `tableId(schema, name)` and stored in a single global workspace file, with no discriminator for WHICH database the geometry was arranged against. Launch against database A, arrange the ERD, quit; launch against database B with a same-named schema (`public.users`, `public.orders` — the common case), and the ERD tab restores A's coordinates onto B's tables. Tables unique to B get a fresh dagre spot next to a foreign arrangement, and the first drag re-persists the hybrid. Nothing warns.
+evidence: Verified by reading `tableId` (schema + NUL + name, no connection component), `restoreErdLayouts`/`pruneErdLayouts` (prune by tab id only), and `openWorkspaceStore` (one app-dir file, no per-connection scoping). NOT caused by story 4.2 as specified: the spec's Boundaries pin the key to "tab id plus `tableId(schema, name)`" and 4.2 predates multi-connection (Epic 10). Deferred rather than patched because every fix is a contract decision, not a local repair: adding a `connectionId`/database discriminator to `ErdTabLayout` widens the persisted snapshot shape (save + load validators, the UI bridge, and the drop-on-mismatch policy), and the RIGHT policy is not obvious — a tab bound to a saved connection (Story 10.6) could key by `connectionId`, but a boot-target-only tab has no id to key by, so the same-`--db-url`-different-database case would still slip through. Worth deciding alongside whether ERD layout should follow the tab's connection at all when a tab is reassigned.
+status: open
+
+### DW-96: The ERD cannot be rearranged without a pointer — arrow-key node movement is disabled by `elementsSelectable={false}`, and would not persist even if it fired
+origin: follow-up review of 4-2, 2026-07-27
+source_spec: `spec-4-2-persist-erd-layout.md`
+location: `src/ui/workspace/ErdTabView.tsx` (`<ReactFlow nodesDraggable nodesConnectable={false} elementsSelectable={false}>`); React Flow's arrow-key path (`node.selected` gate; `moveSelectedNodes` fires no `onNodeDragStop`)
+severity: low
+found_by: Blind Hunter follow-up review pass on 4-2
+summary: Story 4.2's entire interaction — rearranging nodes so the arrangement persists — is reachable only by mouse drag. React Flow's built-in arrow-key node move is gated on `node.selected`, and the canvas sets `elementsSelectable={false}` (inherited from 4.1's view-only posture), so a node can never be selected and arrow keys only pan the canvas. Independently, that keyboard path dispatches `moveSelectedNodes` and never fires `onNodeDragStop`, which is the story's only position-capture surface — so enabling selection alone would let a keyboard user move a node that is then never saved.
+evidence: Verified by reading the `<ReactFlow>` props against React Flow's key handler (`isDraggable && node.selected && arrowKeyDiffs[event.key]`) and its `moveSelectedNodes` dispatch, which has no `onNodeDragStop` call site. NOT caused by 4.2: `elementsSelectable={false}` is Story 4.1's view-only decision, and the spec's Boundaries reaffirm "no selection". Deferred rather than patched because a real fix is a two-part product decision, not a flag flip: enabling selection changes the ERD's visual and interaction contract (selection styling, its interaction with the 9.5 hover panel and the 7.4 dim overlay), and capturing keyboard moves needs a second capture seam alongside `onNodeDragStop` (`onNodesChange` position events, debounced) that the story deliberately avoided. Belongs with a deliberate accessibility pass over the canvas surfaces.
+status: open
+
+### DW-97: Light-theme `--t-bool` renders the data grid's type label at 3.49:1 — the exact sub-AA amber DW-67 just darkened `--t-enum` away from, left behind on a neighbouring surface
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `src/ui/styles/globals.css` (light block `--t-bool: #b3781f`); consumer `src/ui/data/DataGrid.tsx:29` via `typeMeta`, rendered as text at `:402` (`style={{ color: meta.color, fontSize: "var(--label-size)" }}`)
+severity: medium
+found_by: Blind Hunter follow-up review pass on dw-erd-visual-fidelity
+summary: DW-67 measured the ERD's small-label tokens and darkened the two that failed in light (`--t-enum` 3.49 -> 5.14, `--t-int` 4.49 -> 5.04). `--t-bool` held the same `#b3781f` that `--t-enum` failed on; the fix diverged the two tokens rather than repairing the shared value, so `--t-bool` keeps the exact ratio judged a failure one line above it in the same file. It is real small text, not a swatch: the data grid's column-header type tag renders it as `color` at `--label-size`, the same size class as the ERD labels the new lock protects.
+evidence: Re-measured with the change's own `contrastRatio` helper against the light block: `--t-bool` `#b3781f` = 3.49 on `--card`, 3.25 on `--muted`, 3.73 on `--background`, against WCAG 1.4.3's 4.5:1 for normal text. Dark passes (7.97 on `--card`). Scope check on the sibling token: `--t-json` (`#1a9b8c`, light 3.21 / 2.99 / 3.44) is NOT a text case — its only consumer is `SchemaTree.tsx:179` via `typeDotClass`, painted as a 6px `bg-t-json` dot at `:387`, so it falls under WCAG 1.4.11's 3:1 for graphical objects and clears it on `--card` and `--background`, missing only on `--muted` (2.99). Worth folding into the same pass but at lower stakes than the text failure. NOT caused by this story: the intent contract's Never explicitly forbade touching `--t-bool` and `--t-json`, and `globals.css:151-152` records the deliberate decision to leave `--t-bool` behind. Deferred for that reason — but the cost is now one token edit plus one entry in `contrast.test.ts`'s TOKENS list, since `contrast.ts` and the CSS-parsing harness already exist. Whoever fixes it should decide whether the data grid gets its own surface list (it renders on `--card`/`--background`, not `--muted`) and whether the schema tree's dots get a separate 3:1 graphical-object lock rather than being folded into a text-contrast test.
+status: open
+
+### DW-98: The ERD dims unconnected nodes to `opacity: 0.4` on hover, dropping every label to ~1.6-2.1:1 — far below the AA the new lock asserts for the same tokens
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `src/ui/workspace/ErdTabView.tsx` (`displayNodes`, `style: { ...n.style, opacity: connected.has(n.id) ? 1 : 0.4 }`); measured against `src/ui/styles/globals.css`
+severity: medium
+found_by: Blind Hunter and Edge Case Hunter, independently, on the dw-erd-visual-fidelity follow-up review
+summary: Story 7.4's hover emphasis dims every node NOT connected to the hovered one to 40% opacity. That alpha composites the type labels, column names and header text down to roughly 1.6-2.1:1 against the canvas — well under WCAG 1.4.3's 4.5:1 — for as long as the pointer rests on any node, which on a wide ERD is most of the nodes most of the time. DW-67's new lock measures token values only and is blind to the alpha the component applies, so "every ERD small-label pair reaches AA" is true of the at-rest canvas and false of the hover state the same file ships.
+evidence: Both reviewers computed it independently and agree within rounding: light `--t-time` `#7d54cf` at alpha 0.4 over `--card` composites to ~1.6-1.7:1 (4.85:1 at full strength); light `--muted-foreground` ~1.78:1; dark `--t-time` ~2.14:1; dark `--muted-foreground` ~2.01:1. NOT caused by this story: `displayNodes` and the 0.4 value are Story 7.4's dim overlay, untouched by the change; the change only made the gap visible by asserting conformance next to it. Deferred rather than patched because the fix is a design decision, not a repair: raising the dim floor (0.4 -> ~0.65) weakens the emphasis the overlay exists to create, and the alternative — dimming only the node CHROME while leaving text at full opacity — means restructuring how the overlay is applied (it currently sets one `style.opacity` on the whole node). A third option is to accept it as a transient pointer-driven state and say so explicitly. `contrast.test.ts`'s SURFACES comment now records the scope limit and points here.
+status: open
+
+### DW-99: No CI workflow runs the test suite — 1906 tests, including the new WCAG AA conformance lock, execute only on developer machines
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `.github/workflows/` (`release.yml`, `publish.yml`, `keyring-spike.yml`); `package.json:24` defines the `test` script nothing calls
+severity: medium
+found_by: Blind Hunter follow-up review pass on dw-erd-visual-fidelity
+summary: The repo has three workflows and none of them runs `bun test`. `release.yml` (including its `windows-latest` leg) does `bun install` -> `bun run build` -> `bun build --compile` -> a `--version` smoke check; `publish.yml` publishes; `keyring-spike.yml` is the only workflow invoking `bun test`, and only for the single file `src/core/keychain.test.ts`. So every regression guard in the repo — the ERD derivation matrix, the layout-persistence contract, the RPC and driver suites, and now the DW-67 AA lock whose whole purpose is to be an enforcement mechanism rather than a comment — is a local convention, not a gate. A contributor can merge a change that reintroduces a sub-AA token, or any other regression, with a green checks column.
+evidence: `grep -rn "bun test" .github/workflows/` returns exactly two hits, both `keyring-spike.yml:71` and `:108`, both `bun test src/core/keychain.test.ts`. Confirmed `release.yml`'s job steps carry no test invocation. Strictly pre-existing and far outside this story's scope (an ERD/contrast change), but it materially weakens the acceptance criterion this story was written to satisfy, so it is recorded rather than left implicit. The fix is small — a `bun install && bunx tsc --noEmit && bun test` job on `ubuntu-latest` for pushes and PRs — but choosing the trigger matrix, whether the Windows leg also runs it, and how to handle the suites that touch the keychain or spawn servers is a deliberate decision.
+status: open
+
+### DW-100: `src/core/driver.test.ts` reads a source file via `new URL(import.meta.url).pathname`, which yields an unopenable `/C:/…` path on native Windows
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `src/core/driver.test.ts:829-839`
+severity: low
+found_by: Blind Hunter follow-up review pass on dw-erd-visual-fidelity
+summary: The test resolves a sibling source file by taking `.pathname` off `import.meta.url` and handing the string to `Bun.file`. On native Windows that yields `/C:/Users/…`, a path `Bun.file` cannot open, so the test fails for reasons unrelated to what it asserts. `Bun.file` accepts a `URL` object directly, which makes the conversion unnecessary.
+evidence: The new `src/ui/styles/contrast.test.ts` had the identical pattern and was corrected during this story's own review (patch P8) by passing `new URL("./globals.css", import.meta.url)` straight to `Bun.file`; the precedent it was copied from was left untouched because it is outside the story's files. Pre-existing, and currently latent: per DW-99 no CI leg runs this suite at all, so the failure surfaces only for a contributor developing on native Windows (WSL, macOS and Linux are unaffected). One-line fix, mechanically identical to the one already applied.
+status: open
+
+### DW-101: `startCore` boots the sandbox with no `try`/`finally` after the Core socket is already listening, and the DW-48 clamp turned that from a near-impossible path into a reachable one
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/core/server.ts` (`startSandbox({ host: bindHost, port: 0, bundle })` call site, after `Bun.serve`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter, independently, on the follow-up review pass
+summary: A throw from `startSandboxServer` propagates out of `startCore` with the Core's own `Bun.serve` already bound, and nothing releases it — under Bun a live listening server keeps the event loop alive, so the process reports a boot failure and then does not exit, holding the port.
+evidence: The missing guard is pre-existing, but the set of configurations that can reach it is not. Before DW-48 the sandbox bound the SAME host `Bun.serve` had just accepted for the Core, so by the time it ran the address was already proven bindable. After the clamp the sandbox binds an address the Core never validated — specifically `::1` for any IPv6-shaped input — and the two are separately available: a container/netns with `net.ipv6.conf.lo.disable_ipv6=1` accepts a `QS_HOST=::` or global-v6 Core bind and then fails `Bun.serve({hostname: "::1"})`. `isLoopbackHost`'s missing octet-range check (DW-104) is a second, independent way to reach the same throw. The prior pass recorded the missing guard as untouched pre-existing risk; that understates it. Fix is a `try { … } catch { server.stop(true); throw }` around the sandbox boot — small, but it is error-path behavior the DW-47/DW-48 spec's contract scoped to documentation and a bind clamp only.
+status: open
+
+### DW-102: `startCore` never validates the origin an injected `startSandboxServer` factory returns, so `Core.sandboxOrigin`'s loopback guarantee holds only for the default factory
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/core/server.ts` (`StartCoreOptions.startSandboxServer`; `options.startSandboxServer ?? startSandboxServer`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter, independently, on the follow-up review pass
+summary: The DW-48 clamp lives inside `startSandboxServer`, but the whole factory is a replaceable option and `startCore` takes the returned `origin` unchecked — an injected factory that binds off-loopback flows straight into `frame-src`, the injected `__QS_SANDBOX_ORIGIN__` and the iframe `src`, with no signal.
+evidence: `server.test.ts` already exercises the injection seam, so this is a live path, not a hypothetical. The follow-up review corrected the docstrings that overstated the guarantee (`Core.sandboxOrigin` and the `sandbox-server.ts` module header now name the seam explicitly), which is the documentation half; making the guarantee TRUE at the boundary that publishes it is the structural half and was deliberately left out. Fix is one assertion at `startCore`: parse `sandboxServer.origin`, strip IPv6 brackets, and require `isLoopbackHost` on the host — cheap, but it adds a new boot-time failure mode, and the DW-47/DW-48 intent contract scoped the change to a clamp plus comments.
+status: open
+
+### DW-103: The sandbox iframe has no guest ready-handshake and no load timeout, so a frame that never loads produces no error signal at all — which is exactly the documented off-host exposed-mode path
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/ui/sandbox/SandboxFrame.tsx`; `src/ui/workspace/ChatTabView.tsx` (the `onError` wiring)
+severity: medium
+found_by: Edge Case Hunter, follow-up review pass
+summary: `onError` fires only on guest-EMITTED signals, so a sandbox origin that is unreachable from the viewer's machine yields a permanently blank frame with no message, no console error and no fallback — indistinguishable from a chart that is merely slow.
+evidence: DW-48 makes this the expected experience for every remote viewer of an exposed Core, and the three exposure surfaces now document the consequence in prose — but the person actually looking at the blank box gets nothing at the failure point itself. The DW-47 decision explicitly ruled a `pushDoc` ready-handshake out of scope (it was the mitigation the user declined in favour of ACCEPT), so the handshake half must not be revisited unattended; a plain LOAD TIMEOUT that surfaces "sandbox unreachable from this machine" through the existing `onError` path is a distinct affordance that decision did not rule on, and is the cheap half. Deferred rather than patched because it is new UI behavior in a story contract-limited to a bind clamp and comments.
+status: open
+
+### DW-104: `LOOPBACK_V4_RE` matches the shape of a dotted quad but not the 0-255 octet range, and DW-48 promoted that predicate from a warning heuristic into a containment control
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/core/binding.ts` (`LOOPBACK_V4_RE`, `isLoopbackHost`)
+severity: low
+found_by: Edge Case Hunter (also named in the prior pass's residuals), follow-up review pass
+summary: `/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/` accepts `127.1.2.999`, so such a host is classified loopback: no Port-Exposure Warning fires, `sandboxBindHost` passes it through verbatim, and the boot dies on a misleading `Bun.serve` port error instead of a "bad host" one.
+evidence: Not a containment hole — no value matching that regex is routable, so nothing off-machine can reach it either way. What changed with DW-48 is the predicate's ROLE: before, `isLoopbackHost` decided whether to print a warning; now it also decides whether a tokenless origin binds a host verbatim, which makes an unearned accept a bindability and diagnosis failure rather than a cosmetic one (see DW-101). The follow-up review corrected the docstrings that called the match "validated" and removed the circular "Core's own boot rejects it first" argument, but left the regex alone: adding the range check flips `isExposed` for these values (a `127.1.2.999` bind would begin warning), which is behavior change outside a documentation-and-clamp story. One-line fix plus a decision about the warning.
+status: open
+
+### DW-105: `ConfirmRun`'s new modality enforces focus and pointer containment but not SCROLL containment — the page still scrolls freely behind an `aria-modal` scrim
+
+origin: follow-up review of dw-59-63-confirmrun-hardening, 2026-07-27
+source_spec: `spec-dw-59-63-confirmrun-hardening.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (`ModalOverlay`'s `inert` effect; no `overflow` lock on `document.body`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter, independently, on the follow-up review pass
+summary: `inert` blocks focus, pointer events and AT traversal on the background, but it does not block wheel/trackpad/touch scrolling, so the app scrolls under the destructive-confirm dialog while it is open.
+evidence: DW-59 scoped the gap as "no focus trap, no scrim-click dismiss, background stays tabbable" and all three are now closed; scroll lock was never named, and the docblock has been corrected to state the omission explicitly rather than let the modality contract read as complete. It is deferred rather than patched for two reasons: locking `document.body { overflow: hidden }` reflows the whole app when the scrollbar disappears (a scrollbar-gutter compensation decision, not a `ConfirmRun` detail), and this is the third finding in a row — with DW-105's siblings on focus containment — that belongs to a shared-modal policy rather than to one dialog. The repo already depends on `@radix-ui/react-dialog` + `react-remove-scroll` (used only by the currently-unreferenced `CommandDialog`), so "extract a shared modal primitive" and "adopt the existing one" are both live options and the choice is a human one.
+status: open
+
+### DW-106: `dependents` is the one `ConfirmRun` dormant prop DW-61/62/63 left unguarded — blank endpoints render empty FK lines and the list is uncapped inside a 480px card
+
+origin: follow-up review of dw-59-63-confirmrun-hardening, 2026-07-27
+source_spec: `spec-dw-59-63-confirmrun-hardening.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (the `dependents !== undefined && dependents.length > 0` block)
+severity: low
+found_by: Blind Hunter, follow-up review pass
+summary: `affectedRows` and `objectName` were hardened against malformed upstream data by DW-61 and DW-62; `dependents` — the third prop from the same never-yet-populated Core preview — renders whatever it is handed, so `{from: "", to: ""}` paints a blank `→ FK →` row and an N-entry array paints N unbounded rows in a `max-w-[480px]` dialog.
+evidence: Genuinely dormant: no Core source supplies `dependents` today (the `confirmation_required` preview carries only `sql` + `risk`), which is exactly why DW-61/62/63 were themselves deferred once before being bundled. The asymmetry is real but the fix is not mechanical the way the other two were — it needs a display policy (drop blank-endpoint entries? cap at N with a "+M more"? scroll the list?) that only makes sense against the shape of the data the supplying story actually ships. Deferring it to that story keeps the guard and its semantics in one place, matching the reasoning that deferred DW-61/62 originally.
+status: open
+
+### DW-107: The workspace tab strip is not a conformant ARIA tabs pattern — orphaned `role="tab"` (no `aria-controls`, no `role="tabpanel"`), no roving tabindex, and no Arrow/Home/End navigation
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/TabBar.tsx` (the `role="tablist"` container, `tabIndex={0}` on every row, the Enter/Space-only `onKeyDown`), `src/ui/workspace/Workspace.tsx` (the tab-body region)
+severity: medium
+found_by: Blind Hunter (items 5 and 7), corroborated by the prior pass's own residual note
+summary: `grep -rn 'role="tabpanel"|aria-controls' src/ui` returns zero non-test hits, so every `role="tab"` is orphaned; and because each row is hardcoded `tabIndex={0}` with no Arrow/Home/End handler, Tab walks through every open tab instead of escaping the strip.
+evidence: Pre-existing — DW-53 pinned the hooks that EXIST, and this story deliberately shipped `TabBar.test.tsx` so it stays green under the correct fix (`tabIndex={active ? 0 : -1}` plus arrow handlers), rather than cementing the anti-pattern; that was mutation-verified. Fixing it is real behavior change in the component (new key handlers, a focus model, `aria-controls`/`id` wiring across two files) and so was explicitly out of scope under this spec's `Block If: pinning any DW-53 hook would require changing a component's rendered markup, props, handlers, or behavior`. The consequence is not cosmetic: a screen-reader user is told "tab 1 of 3" with no announced panel relationship, and a keyboard user cannot traverse the strip the way the role promises.
+status: open
+
+### DW-108: The per-tab close `<button>` is an interactive descendant of `role="tab"`, whose children ARIA treats as presentational — the `Close <title>` label may never be exposed to assistive tech
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/TabBar.tsx` (the `<button aria-label={`Close ${tab.title}`}>` nested inside the `role="tab"` div)
+severity: low
+found_by: Blind Hunter (item 6)
+summary: ARIA's presentational-children rule means content inside `role="tab"` may be flattened, so the close button's `aria-label` — which `TabBar.test.tsx` asserts and treats as a11y coverage — is present in the markup but not necessarily in the accessibility tree.
+evidence: Real but narrow, and shares a root cause with DW-107: the durable fix (move the close control out of the tab element, or restructure the row) is the same restructuring the APG pattern needs, so the two should be decided together rather than patched independently. The test asserting the label is not wrong — it pins the string the markup must carry — it is just weaker evidence of a11y than it reads as, which is why this is recorded rather than silently accepted. Confirming the practical impact needs a real AT check (NVDA/VoiceOver), which this repo's static-markup harness cannot do.
+status: open
+
+### DW-109: `openTableTab` titles a table tab with the table name verbatim, so two table tabs on the same-named table in different connections share a title AND an identical `aria-label="Close <name>"`
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/workspace-state.ts` (`openTableTab`, `const title = ref.name`) vs. the `openTab` comment at the same file's generic path
+severity: medium
+found_by: Edge Case Hunter
+summary: The reducer's own comment on the generic path states that suffixing the monotonic id means "two coexisting tabs of the same kind can never share a title", but `openTableTab` bypasses that rule and assigns `ref.name` unsuffixed — so `public.users` opened on two different connections yields two indistinguishable tabs and two identical close labels.
+evidence: Verified by reading the reducer: `openTab` builds `` `${KIND_LABEL[kind]} ${id}` `` while `openTableTab` sets `title = ref.name`, and the multi-connection story (Epic 10) made two same-named tables on different connections an ordinary state rather than a corner case. Consequence is a genuine a11y defect (a screen-reader user hears the same "Close users" for two different tabs) plus a sighted-user ambiguity. Not caused by this story — the test file surfaced it by asserting close labels are title-derived — and fixing it is a reducer behavior change (title disambiguation policy: connection prefix? schema qualifier? id suffix on collision only?) that also touches restore/persist snapshots, so it belongs to a focused story with a decision, not to a test-only pass.
+status: open
+
+### DW-110: `SaveIndicator` (DW-22's save-failure status, `data-testid="save-status"` + `bg-err` dot) has no render test because it is module-private and this spec forbade a second production export
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/App.tsx` (`function SaveIndicator()`, module-private)
+severity: low
+found_by: Blind Hunter (item 10)
+summary: `SaveIndicator` is a byte-for-byte sibling of the now-tested `ConnectionIndicator` — same status-bar shape, its own testid, its own `bg-err` dot — and is exactly as unrenderable-through-`App` and exactly as untested, but covering it needs the same `export` widening this spec's `Never` clause restricted to `ConnectionIndicator` alone.
+evidence: The gap is asymmetric and provable: `App.test.tsx` now pins `data-testid="health"` and its dot token in every phase, while `data-testid="save-status"` is asserted nowhere in the repo. The `Workspace`-side SLOT that renders it IS now covered (`Workspace.test.tsx` passes a `saveIndicator` stub and mutation-verified that deleting `{saveIndicator}` from the JSX turns red), so what remains uncovered is only the indicator's own markup. Deliberately not patched: this spec's `Never` list permits exactly one production edit, and widening a second component's visibility inside a review pass would be a spec deviation. A three-line follow-up: add `export` to `SaveIndicator` and assert its testid, copy and dot token.
+status: open
+
+### DW-111: The port-exposure banner and three other alert surfaces paint raw Tailwind red instead of the `--err-fill` / `--err-soft` semantic tokens, so they never follow a theme
+
+origin: second follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/Workspace.tsx:212,217,220-221` (`ExposureBanner`), `src/ui/workspace/TabContent.tsx:430-438`, `src/ui/schema/CreateTablePanel.tsx:39,71,241`, `src/ui/data/DataGrid.tsx:510`
+severity: low
+found_by: Blind Hunter (item 18)
+summary: `border-red-700 bg-red-600 text-white` / `text-red-400` / `bg-red-950/40` are literal palette values with no light-theme override, while `--err-fill` and `--err-soft` — added by DW-58 for exactly this white-on-red destructive case and already carrying light/dark overrides — sit unused by these four components.
+evidence: Verified by grep: `src/ui/styles/globals.css:245-248` exposes `--color-err-fill` / `--color-err-soft`, and `grep -rn "bg-red-\|text-red-\|border-red-" src/ui --include=*.tsx` returns hits in exactly those four non-test files. The Blind Hunter framed this as "the exposure banner is the one alert outside the token system"; it is not — it is four components, which is what makes this a token-adoption sweep rather than a one-line fix, and why it is recorded rather than patched inside a test-only pass. Pre-existing and untouched by this story (`Workspace.tsx` is byte-identical to baseline). Consequence is confined to theme fidelity: under the light theme these surfaces keep dark-theme reds. Note the coupling to DW-53's own residual — the light-theme flip is unobservable in the `renderToStaticMarkup` harness, so whoever adopts the tokens cannot verify the fix with this repo's current test infrastructure.
+status: open
+
+### DW-112: The launcher rail's landmark, its five launcher buttons and the `+` New-tab button's singleton-fallback logic have no test — `Workspace.test.tsx` covers the two DW-53 toggles and nothing else in the rail
+
+origin: second follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/Workspace.tsx:131` (`nav aria-label="Open a new tab"`), `:132-139` (`role="img"` brand mark), `:141-154` (the `LAUNCHER_KINDS.map` buttons and their `aria-label`s), `:464-483` (the `+` button and its `activeTab.kind !== "settings" && !== "create-table"` fallback)
+severity: low
+found_by: Blind Hunter (item 9)
+summary: The new shell test file pins `settings-toggle`, `create-table-toggle` and `exposure-banner` — the three hooks DW-53 named — leaving the rest of the same rail (a nav landmark, a labelled brand mark, five per-kind launcher buttons, and the `+` button's real branch logic) assertable by nothing.
+evidence: Confirmed by reading `Workspace.tsx` against `Workspace.test.tsx`: no assertion mentions `"Open a new tab"`, `role="img"`, `aria-label="New tab"`, or any `LAUNCH_LABEL` string. The markup half is cheap to add; the `+` button's fallback — "`+` duplicates the active tab's kind but must never mint a second Settings or create-table tab" — is genuine branch logic and is NOT cheaply reachable in this harness: unlike `TabBar`, `Workspace` uses hooks, so the function-call + tree-walk pattern `TabBar.test.tsx` uses to reach handlers cannot be applied to it, and `renderToStaticMarkup` drops the `onClick`. Out of scope here rather than skipped: none of these are DW-53 hooks, and the spec's I/O matrix enumerates the three testids it pins. A focused story should decide whether the rail gets markup-level coverage only, or whether reaching `Workspace`'s handlers at all justifies the jsdom/testing-library dependency the repo has so far refused.
+status: open
+
+### DW-113: An IPv6 exposure bind renders as `:::4123` in the port-exposure banner — the address the warning exists to communicate becomes unreadable
+
+origin: second follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/Workspace.tsx:215` (`{exposure.host}:{exposure.port}`)
+severity: low
+found_by: Edge Case Hunter
+summary: The banner interpolates `host` and `port` with a bare colon, so a `QS_HOST=::` bind (all IPv6 interfaces, the IPv6 counterpart of the `0.0.0.0` case the banner was written for) prints `:::4123` instead of the bracketed `[::]:4123` form every tool and browser expects.
+evidence: `QS_HOST` is user-settable and is exactly what the banner's own remediation copy tells the user to unset, so an IPv6 value is an ordinary configuration, not a corner case. Pre-existing — this story changed no production markup — and surfaced only because the new test fixture pins the rendered address (`0.0.0.0:4123`), which made the interpolation's assumption visible. Not patched: fixing it is a production render change in `Workspace.tsx`, which this spec's `Never` clause forbids outright, and the correct fix should bracket the host once at a shared formatting seam rather than inline in one banner, since the same `ExposureInfo` is surfaced elsewhere. Consequence is real but bounded: the warning still fires and still says the app is reachable off-machine; only the literal address is ambiguous.
+status: open
+
+### DW-114: Views are now distinguishable in the schema tree but nowhere else — the tab bar, ERD and workspace still paint every relation with the base-table glyph
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/workspace/TabBar.tsx:21`, `src/ui/workspace/Workspace.tsx:58`, `src/ui/workspace/ErdTabView.tsx:51`
+severity: low
+found_by: Blind Hunter
+summary: DW-68 taught the schema tree a view/table visual language (teal eye vs grid glyph), but the three other independent copies of the table glyph still render `<rect x="3" y="4" width="18" height="16" rx="1.5"/>` for every relation, so clicking the teal eye on `revenue_view` opens a tab carrying a table-grid icon — the affordance contradicts itself one click later.
+evidence: Each of the four glyph sites is a hand-copied local SVG, not a shared icon module (verified: `TableIcon` in `SchemaTree.tsx` is module-private and the other three are separate inline components). DW-68's contract explicitly scoped them out (`Never`: "Do not touch the other three independent copies of the table glyph ... or factor them into a shared icon module"), so this is a deliberate scope decision, not an implementation defect — but it means the visual language ships half-applied. Also blocked on a shape decision the tree story could not make: `ViewIcon` bakes in `text-t-json` and takes no props (mirroring the prop-less `SchemaIcon`), so a `TabBar` at a different size/tint cannot reuse it. Follow-up candidate: extract a shared, `className`-parameterised relation-icon pair and apply `kind` at every relation-rendering surface — which first needs `kind` to reach the tab model (`TableRef` carries `connectionId` but not `kind`), so it pairs naturally with the DW-109 per-tab identity work.
+status: open
+
+### DW-115: Opening a view and trying to edit a row surfaces the raw internal string "expected exactly one primary-key column, got 0" instead of a "views are read-only" affordance
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/data/row-mutations.ts:131-132`, `src/ui/workspace/TabContent.tsx` (`canMutate`)
+severity: medium
+found_by: Blind Hunter
+summary: A view almost never carries a primary key, so the mutation gate fails on the PK check and the user is shown an implementation-detail message that names the wrong cause — and DW-68 makes this MORE reachable by giving views a distinct, inviting glyph that advertises them as a first-class thing to click.
+evidence: `SchemaTableInfo.kind` now exists and is populated by both drivers, but `git grep '\.kind === "view"'` over `src/` returns only the two new call sites in `SchemaTree.tsx` — the signal that would let the grid say "this relation is a view, it is read-only" is plumbed and unused. Pre-existing (views have always been browsable and have always failed this way; DW-68 changed no mutation path), and out of a presentation-only tree story's scope. Note this is the same class as the deferred Story 10.5 finding where a saved-connection tab degrades to read-only with no explanation — both want one legible "why is this read-only" affordance rather than two ad-hoc messages. Follow-up candidate: gate `canMutate` on `kind !== "view"` explicitly and render a named read-only reason.
+status: open
+
+### DW-116: The light-theme `--t-json` eye glyph measures 2.99:1 on `--muted` (hover) and 2.82:1 on `coral-soft` (selected) — under WCAG 1.4.11's 3:1 non-text minimum
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/styles/globals.css:164` (`--t-json: #1a9b8c`), consumed at `src/ui/schema/SchemaTree.tsx` (`ViewIcon`)
+severity: low
+found_by: Blind Hunter
+summary: DW-68 promotes `--t-json` from a 6px decorative dot to a 14px informational glyph, and in the light theme that glyph falls under the 3:1 icon minimum on two of its four backgrounds (2.99 on `--muted`, 2.82 on `coral-soft` over `--card`); dark clears comfortably everywhere (6.15-8.80).
+evidence: Ratios computed directly from the shipped token values against the composited backgrounds (`--coral-soft` is a translucent overlay, so it was composited over `--card`/`--background` before measuring). `contrast.test.ts:235-240` already ledgers `--t-json` as a known sub-3:1-on-`--muted` token and deliberately excludes it from the ERD's enforced list, so the deferral is legitimate and pre-existing to this change — what is new is using it as a foreground glyph rather than a dot. Not fixable here: a durable fix darkens the light-theme `--t-json` (or adds an on-surface variant) in `globals.css`, which this presentation-only slice is contract-forbidden to edit, and the token is shared with the data-grid and ERD so the change needs one coordinated pass. Mitigated in this story: the view/table distinction is carried by SHAPE (eye vs grid) and by an `sr-only` "vista" marker in the row's accessible name, so no information is lost at low contrast — colour is a redundant channel, not the only one.
+status: open
+
+### DW-117: A relation in the DEFAULT namespace renders a schema tree tooltip of `.tablename` — a leading bare dot — while the schema node above it reads `(default)`
+
+origin: review of spec-dw-68-schema-tree-view-icon.md, 2026-07-27
+source_spec: `spec-dw-68-schema-tree-view-icon.md`
+location: `src/ui/schema/SchemaTree.tsx` (table-row `title`)
+severity: low
+found_by: Edge Case Hunter
+summary: The row tooltip interpolates `` `${table.schema}.${table.name}` `` unconditionally, so a table whose `schema` is the empty string (the default-namespace case the tree elsewhere renders as `(default)`) gets a tooltip beginning with a bare separator dot.
+evidence: Pre-existing and unchanged in shape by DW-68 — the tooltip already had this exact template before this story, which only appended a ` · vista` suffix for views. The blank-schema case is real and already special-cased elsewhere in the same file (the schema node renders `(default)` rather than a nameless node) and in `App.tsx`/`TabContent.tsx` (an optimistically-created table carries `schema: ""`, which the Core resolves to the real default), so the tooltip is the one surface that did not get the treatment. Not patched: it is outside DW-68's stated scope (the icon branch) and the fix wants to reuse whatever label helper the schema node already uses rather than adding a second ad-hoc ternary. Cosmetic; the table name itself is still legible.
 status: open

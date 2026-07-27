@@ -3,11 +3,15 @@
  * extracted in Story 5.3, redesigned to the neutral look in Story 7.3).
  *
  * Purely presentational — a neutral scrim + `alertdialog` card ported from
- * `design-artifacts/confirm-destructive.html`. Red (`--err`) appears ONLY on the
- * functional destructive bits: the danger icon, the affected-rows badge, the
- * statement's left border, and the filled Confirm button. Everything else is
- * neutral / ink. There is NO top color line — the card reads from its shadow +
- * hairline ring alone.
+ * `design-artifacts/confirm-destructive.html`. Destructive red appears ONLY on the
+ * functional destructive bits: the danger icon, the affected-rows badge and the
+ * statement's left border all take `--err` directly, while the filled Confirm
+ * button carries an `--err` rim over an `--err-fill` body (DW-58 — `--err` under
+ * white text is 3.04:1, below AA, so the darker fill carries the label at 5.65:1
+ * and the lighter rim stays as the button's 1.4.11 boundary against the `--muted`
+ * footer: 5.10:1 in the dark theme, which is the only one the app activates today).
+ * Everything else is neutral / ink. There is NO top color line — the card reads
+ * from its shadow + hairline ring alone.
  *
  * The caller owns ALL state (which SQL is pending, `busy`, re-entrancy) and the
  * gate — this component never calls `execute` itself, it only reports the two
@@ -80,7 +84,7 @@ function footerButtons({
         disabled={confirmDisabled}
         onClick={onConfirm}
         aria-label="Confirm"
-        className="inline-flex items-center gap-1.5 rounded-[20px] border border-[var(--err)] bg-[var(--err)] px-4 py-2 text-[12.5px] font-semibold text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+        className="inline-flex items-center gap-1.5 rounded-[20px] border border-[var(--err)] bg-[var(--err-fill)] px-4 py-2 text-[12.5px] font-semibold text-white transition-[filter] hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.9} className="h-3.5 w-3.5" aria-hidden="true">
           <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13" strokeLinecap="round" strokeLinejoin="round" />

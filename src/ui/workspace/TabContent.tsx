@@ -285,6 +285,14 @@ function TableTabView({
     setGrid((g) => (g.selectedRow === null ? g : selectRow(g, -1)));
   }, [filterQuery]);
 
+  // `TableTabView` is keyed by bound table, not by page, so Prev/Next would otherwise
+  // leave a half-typed insert draft open over a freshly loaded page. Collapse it on page
+  // change; `InsertDraftRow` clears its own typed values when `open` goes false.
+  // Keyed on `[page]` only — an edit/delete reload (`reloadNonce`) must NOT discard a draft.
+  useEffect(() => {
+    setInsertOpen(false);
+  }, [page]);
+
   // Export the currently-shown rows to a client-side CSV — no rpc, no contract change.
   const onExport = (): void => {
     if (data === null) return;
