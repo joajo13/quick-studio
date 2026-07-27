@@ -40,21 +40,66 @@ export function filterRows(rows: ReadonlyArray<FrozenRow>, query: string): Reado
 }
 
 /** Escape one CSV field (RFC-4180-ish): quote + double interior quotes when it holds a
- * comma, a quote, or a newline; otherwise emit it verbatim. */
+ * comma, a quote, or a newline; otherwise emit it verbatim. Runs AFTER
+ * {@link formulaGuard}, so a guard quote lands inside the RFC-4180 quoting. */
 function csvField(value: string): string {
   return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
 /**
+ * CSV/formula-injection mitigation: a field whose FIRST character is `=`, `+`, `-`, `@`,
+ * a tab or a CR is treated as a live formula when the exported file is opened in Excel /
+ * Google Sheets. Prefixing the OWASP guard character `'` forces the spreadsheet app to
+ * read it back as literal text. This deliberately trades byte-fidelity for safety: the
+ * export is lossy by one leading `'`, so a non-spreadsheet consumer (pandas, `COPY ... FROM
+ * ... CSV`) sees that character too. Nothing else about the payload is rewritten, and a
+ * sigil past position 0 cannot start a formula, so it is left alone.
+ */
+function formulaGuard(value: string): string {
+  return /^[=+\-@\t\r]/.test(value) ? `'${value}` : value;
+}
+
+/**
+ * Serialize one piece of user/DB-authored text: guard FIRST, then escape — so the guard
+ * lands inside the RFC-4180 quoting (`=a,b` → `"'=a,b"`, never `'"=a,b"`). Both
+ * text-bearing sites — column names and `string` cells — go through here so the two
+ * copies of that order can never drift apart.
+ */
+function csvText(text: string): string {
+  return csvField(formulaGuard(text));
+}
+
+/**
+ * One CSV field for one cell. Only `string` cells carry user/DB-authored text and get the
+ * guard; `number`/`boolean`/`date`/`null` are machine-formatted by {@link cellText}, so a
+ * leading `-` there is a real minus sign and prefixing it would corrupt the exported
+ * value. The switch is exhaustive on purpose — a new `FrozenCell` kind fails to compile
+ * here instead of silently slipping past the guard.
+ */
+function csvCell(cell: FrozenCell): string {
+  switch (cell.kind) {
+    case "string":
+      return csvText(cell.value);
+    case "null":
+    case "number":
+    case "boolean":
+    case "date":
+      return csvField(cellText(cell));
+  }
+}
+
+/**
  * Serialize the loaded page to an RFC-4180-ish CSV: a header row of column names then
- * one row per `FrozenRow`, fields escaped by {@link csvField} and `null` → empty field.
+ * one row per `FrozenRow`, `null` → empty field. Column names and `string` cells are both
+ * formula-guarded by {@link csvText} before escaping; the other cell kinds are escaped as
+ * they are by {@link csvCell}.
  * Pure — the caller triggers the client-side download; this never issues an RPC.
  */
 export function rowsToCsv(
   columns: ReadonlyArray<FrozenColumn>,
   rows: ReadonlyArray<FrozenRow>,
 ): string {
-  const header = columns.map((c) => csvField(c.name)).join(",");
-  const lines = rows.map((row) => row.map((cell) => csvField(cellText(cell))).join(","));
+  const header = columns.map((c) => csvText(c.name)).join(",");
+  const lines = rows.map((row) => row.map((cell) => csvCell(cell)).join(","));
   return [header, ...lines].join("\n");
 }

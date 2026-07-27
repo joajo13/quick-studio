@@ -395,7 +395,8 @@ location: sandbox `pushData` / CSP (spec-5-5 crossorigin JS sandbox)
 severity: high
 reason: CSP fetch directives (`connect-src`, `img-src`) do not govern top-level/self navigation, and `sandbox="allow-scripts"` without `allow-top-navigation` still permits a frame to navigate ITSELF. The pushed `FrozenData` is the user's real query output, not public data. Closing this is a genuine architectural/security decision (e.g. gating `pushData` on a confirmed handshake so data never lands in a navigated-away frame, and/or a documented residual) rather than a trivial patch — the `pushData(frame, "*")` target-origin is deliberately `"*"` against the guest's opaque origin.
 decision: [2026-07-21, user] ACCEPT the risk (guest-visible data is already the user's own) — document as out-of-scope, mirroring the DW-36 Option-A posture. RESIDUAL to record explicitly: a hostile/shared report could still exfiltrate FrozenData via scripted same-frame navigation; revisit if untrusted/shared reports are ever introduced. (User chose accept over the recommended sandbox-navigation block.)
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-sandbox-exposure-security
 
 ### DW-48: In exposed mode (`QS_HOST=0.0.0.0`) the sandbox server binds the same wildcard host as Core (LAN-exposing the tokenless guest) while the injected `__QS_SANDBOX_ORIGIN__` is normalized to `127.0.0.1:<port>`, which is unreachable for a remote browser — the sandbox silently fails to load off-host
 
@@ -404,7 +405,8 @@ location: `startCore` (sandbox `Bun.serve`, `bindHost`); `deriveOpenUrl`
 severity: medium
 reason: `startCore` passes `bindHost` straight into the sandbox `Bun.serve`, and `deriveOpenUrl` rewrites the injected origin to loopback. The intent-contract Block-If explicitly reserves the exposure model as a human security decision, so the correct exposed-mode posture (loopback-only sandbox + documented "visualization unavailable when exposed", or a reachable remote origin) is a deliberate call, not an unattended patch.
 decision: [2026-07-21, user] Keep the sandbox bound to LOOPBACK even when the Core is exposed (QS_HOST=0.0.0.0) — never LAN-expose the tokenless guest — and document that report visualizations only render on the host machine in exposed mode. (Closes problem (a); avoids the false-success of (b).)
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-sandbox-exposure-security
 
 ### DW-49: The guest→host signal stream (`height`/`error`/`datum-clicked`) is unbounded in rate/count, so a hostile guest can flood `onSignal` — and via `SandboxFrame`'s `setHeight` a React re-render — thrashing the Ring 2 main thread
 
@@ -471,7 +473,8 @@ location: `src/ui/data/grid-view.ts` (`csvField`/`rowsToCsv`)
 severity: medium
 reason: `rowsToCsv`'s `csvField` quotes only fields containing `,`/`"`/newline (exactly the escaping the spec prescribed) — it does not neutralize leading formula sigils. Because a DB browser exports arbitrary row content, a cell like `=SUM(A1)`/`+cmd`/`-2+3`/`@foo` becomes a live formula in a spreadsheet app. This is a genuine (well-known) export vulnerability, but the fix is a policy decision the presentation-only spec deliberately did not scope: the common mitigation (prefixing a `'` or tab) MUTATES exported data and many DB tools intentionally preserve fidelity instead. Worth a focused decision + follow-up rather than silently altering export output in an unattended pass.
 decision: [2026-07-21, user] Prefix-guard the CSV export — prepend a `'` to any cell starting with `= + - @` (and tab/CR) — the standard OWASP formula-injection mitigation.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-csv-formula-injection-guard
 
 ### DW-56: Clicking the result-bar Add-Row ("row") button opens the in-grid insert draft at the bottom of the scrollable table body with no scroll-into-view, so on a full/scrolled page the click appears to do nothing
 
@@ -1079,4 +1082,48 @@ severity: low
 found_by: Blind Hunter follow-up review pass on dw-erd-visual-fidelity
 summary: The test resolves a sibling source file by taking `.pathname` off `import.meta.url` and handing the string to `Bun.file`. On native Windows that yields `/C:/Users/…`, a path `Bun.file` cannot open, so the test fails for reasons unrelated to what it asserts. `Bun.file` accepts a `URL` object directly, which makes the conversion unnecessary.
 evidence: The new `src/ui/styles/contrast.test.ts` had the identical pattern and was corrected during this story's own review (patch P8) by passing `new URL("./globals.css", import.meta.url)` straight to `Bun.file`; the precedent it was copied from was left untouched because it is outside the story's files. Pre-existing, and currently latent: per DW-99 no CI leg runs this suite at all, so the failure surfaces only for a contributor developing on native Windows (WSL, macOS and Linux are unaffected). One-line fix, mechanically identical to the one already applied.
+status: open
+
+### DW-101: `startCore` boots the sandbox with no `try`/`finally` after the Core socket is already listening, and the DW-48 clamp turned that from a near-impossible path into a reachable one
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/core/server.ts` (`startSandbox({ host: bindHost, port: 0, bundle })` call site, after `Bun.serve`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter, independently, on the follow-up review pass
+summary: A throw from `startSandboxServer` propagates out of `startCore` with the Core's own `Bun.serve` already bound, and nothing releases it — under Bun a live listening server keeps the event loop alive, so the process reports a boot failure and then does not exit, holding the port.
+evidence: The missing guard is pre-existing, but the set of configurations that can reach it is not. Before DW-48 the sandbox bound the SAME host `Bun.serve` had just accepted for the Core, so by the time it ran the address was already proven bindable. After the clamp the sandbox binds an address the Core never validated — specifically `::1` for any IPv6-shaped input — and the two are separately available: a container/netns with `net.ipv6.conf.lo.disable_ipv6=1` accepts a `QS_HOST=::` or global-v6 Core bind and then fails `Bun.serve({hostname: "::1"})`. `isLoopbackHost`'s missing octet-range check (DW-104) is a second, independent way to reach the same throw. The prior pass recorded the missing guard as untouched pre-existing risk; that understates it. Fix is a `try { … } catch { server.stop(true); throw }` around the sandbox boot — small, but it is error-path behavior the DW-47/DW-48 spec's contract scoped to documentation and a bind clamp only.
+status: open
+
+### DW-102: `startCore` never validates the origin an injected `startSandboxServer` factory returns, so `Core.sandboxOrigin`'s loopback guarantee holds only for the default factory
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/core/server.ts` (`StartCoreOptions.startSandboxServer`; `options.startSandboxServer ?? startSandboxServer`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter, independently, on the follow-up review pass
+summary: The DW-48 clamp lives inside `startSandboxServer`, but the whole factory is a replaceable option and `startCore` takes the returned `origin` unchecked — an injected factory that binds off-loopback flows straight into `frame-src`, the injected `__QS_SANDBOX_ORIGIN__` and the iframe `src`, with no signal.
+evidence: `server.test.ts` already exercises the injection seam, so this is a live path, not a hypothetical. The follow-up review corrected the docstrings that overstated the guarantee (`Core.sandboxOrigin` and the `sandbox-server.ts` module header now name the seam explicitly), which is the documentation half; making the guarantee TRUE at the boundary that publishes it is the structural half and was deliberately left out. Fix is one assertion at `startCore`: parse `sandboxServer.origin`, strip IPv6 brackets, and require `isLoopbackHost` on the host — cheap, but it adds a new boot-time failure mode, and the DW-47/DW-48 intent contract scoped the change to a clamp plus comments.
+status: open
+
+### DW-103: The sandbox iframe has no guest ready-handshake and no load timeout, so a frame that never loads produces no error signal at all — which is exactly the documented off-host exposed-mode path
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/ui/sandbox/SandboxFrame.tsx`; `src/ui/workspace/ChatTabView.tsx` (the `onError` wiring)
+severity: medium
+found_by: Edge Case Hunter, follow-up review pass
+summary: `onError` fires only on guest-EMITTED signals, so a sandbox origin that is unreachable from the viewer's machine yields a permanently blank frame with no message, no console error and no fallback — indistinguishable from a chart that is merely slow.
+evidence: DW-48 makes this the expected experience for every remote viewer of an exposed Core, and the three exposure surfaces now document the consequence in prose — but the person actually looking at the blank box gets nothing at the failure point itself. The DW-47 decision explicitly ruled a `pushDoc` ready-handshake out of scope (it was the mitigation the user declined in favour of ACCEPT), so the handshake half must not be revisited unattended; a plain LOAD TIMEOUT that surfaces "sandbox unreachable from this machine" through the existing `onError` path is a distinct affordance that decision did not rule on, and is the cheap half. Deferred rather than patched because it is new UI behavior in a story contract-limited to a bind clamp and comments.
+status: open
+
+### DW-104: `LOOPBACK_V4_RE` matches the shape of a dotted quad but not the 0-255 octet range, and DW-48 promoted that predicate from a warning heuristic into a containment control
+
+origin: follow-up review of dw-47-48-sandbox-exposure-security, 2026-07-27
+source_spec: `spec-dw-47-48-sandbox-exposure-security.md`
+location: `src/core/binding.ts` (`LOOPBACK_V4_RE`, `isLoopbackHost`)
+severity: low
+found_by: Edge Case Hunter (also named in the prior pass's residuals), follow-up review pass
+summary: `/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/` accepts `127.1.2.999`, so such a host is classified loopback: no Port-Exposure Warning fires, `sandboxBindHost` passes it through verbatim, and the boot dies on a misleading `Bun.serve` port error instead of a "bad host" one.
+evidence: Not a containment hole — no value matching that regex is routable, so nothing off-machine can reach it either way. What changed with DW-48 is the predicate's ROLE: before, `isLoopbackHost` decided whether to print a warning; now it also decides whether a tokenless origin binds a host verbatim, which makes an unearned accept a bindability and diagnosis failure rather than a cosmetic one (see DW-101). The follow-up review corrected the docstrings that called the match "validated" and removed the circular "Core's own boot rejects it first" argument, but left the regex alone: adding the range check flips `isExposed` for these values (a `127.1.2.999` bind would begin warning), which is behavior change outside a documentation-and-clamp story. One-line fix plus a decision about the warning.
 status: open

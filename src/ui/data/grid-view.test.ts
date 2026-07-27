@@ -87,4 +87,58 @@ describe("rowsToCsv", () => {
   test("header-only output when there are no rows", () => {
     expect(rowsToCsv(columns, [])).toBe("id,name,note");
   });
+
+  test("prefixes a string cell that starts with a formula sigil", () => {
+    const csv = rowsToCsv(columns, [[{ kind: "string", value: "=SUM(A1)" }]]);
+    expect(csv.split("\n")[1]).toBe("'=SUM(A1)");
+  });
+
+  // One case per sigil so a regression names the sigil that broke instead of aborting the
+  // rest. The CR case is additionally quoted by `csvField` (CR is structural); the tab is
+  // not, since a tab is not an RFC-4180 special character.
+  test.each([
+    ["+cmd", "'+cmd"],
+    ["-2+3", "'-2+3"],
+    ["@foo", "'@foo"],
+    ["\tx", "'\tx"],
+    ["\rx", "\"'\rx\""],
+  ])("guards the sigil in %j", (value, expected) => {
+    const csv = rowsToCsv(columns, [[{ kind: "string", value }]]);
+    expect(csv.split("\n")[1]).toBe(expected);
+  });
+
+  test("the guard lands inside the RFC-4180 quoting, not outside it", () => {
+    const csv = rowsToCsv(columns, [[{ kind: "string", value: "=a,b" }]]);
+    expect(csv.split("\n")[1]).toBe("\"'=a,b\"");
+  });
+
+  test("guards a column name that starts with a formula sigil", () => {
+    const hostile: ReadonlyArray<FrozenColumn> = [{ name: "=1+1", type: "string" }];
+    expect(rowsToCsv(hostile, [])).toBe("'=1+1");
+  });
+
+  test("a guarded column name is quoted the same way a guarded cell is", () => {
+    const hostile: ReadonlyArray<FrozenColumn> = [{ name: "=a,b", type: "string" }];
+    expect(rowsToCsv(hostile, [])).toBe("\"'=a,b\"");
+  });
+
+  test("a value that already starts with the guard character is left alone", () => {
+    const csv = rowsToCsv(columns, [[{ kind: "string", value: "'=x" }]]);
+    expect(csv.split("\n")[1]).toBe("'=x");
+  });
+
+  test("leaves a negative number cell unguarded (a real minus sign)", () => {
+    const csv = rowsToCsv(columns, [[{ kind: "number", value: -5 }]]);
+    expect(csv.split("\n")[1]).toBe("-5");
+  });
+
+  test("leaves a sigil that is not the first character alone", () => {
+    const csv = rowsToCsv(columns, [[{ kind: "string", value: "a=b" }]]);
+    expect(csv.split("\n")[1]).toBe("a=b");
+  });
+
+  test("empty and null cells stay empty fields", () => {
+    const csv = rowsToCsv(columns, [[{ kind: "string", value: "" }, { kind: "null" }]]);
+    expect(csv.split("\n")[1]).toBe(",");
+  });
 });
