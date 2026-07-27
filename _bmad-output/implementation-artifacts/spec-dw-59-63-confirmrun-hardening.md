@@ -2,8 +2,9 @@
 title: 'ConfirmRun modality + dormant-prop hardening (DW-59..DW-63)'
 type: 'bugfix'
 created: '2026-07-27'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'ef970d3ea3a8e64f95ee863e3dcb591659d7c542'
+final_revision: 'fbb7d67a4b5c647a04fcf4b973f1de3be25e325c'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
