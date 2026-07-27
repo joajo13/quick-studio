@@ -41,8 +41,10 @@
  * `renderToStaticMarkup` (no jsdom in this repo) `document` is undefined, so the
  * portal guard renders the scrim in-tree instead, keeping every existing structural
  * assertion intact; in the browser the same markup is reparented to `body`.
- * `ModalOverlay` is generic over its `children` — extractable to a shared module the
- * day a second modal ships.
+ * `ModalOverlay` takes the dialog as opaque `children` — extractable to a shared
+ * module the day a second modal ships. What it deliberately does NOT do: lock
+ * background SCROLLING (`inert` blocks focus and pointer events, not the wheel), so
+ * the page still scrolls behind the scrim.
  *
  * The three dormant escalated props are guarded by DOM-free pure helpers so their
  * edge cases are unit-testable without a renderer: `affectedRowsBadge` refuses to
@@ -88,9 +90,10 @@ export function affectedRowsBadge(
   value?: number,
 ): { count: string; noun: string; destructive: boolean } | null {
   if (value === undefined) return null;
-  // `isSafeInteger` subsumes finite+integral AND rejects counts past 2^53, where
-  // `String(value)` would render exponential notation ("1e+21 rows").
-  if (!Number.isFinite(value) || !Number.isSafeInteger(value) || value < 0) return null;
+  // `isSafeInteger` is the whole guard: it is false for `NaN`/`±Infinity` and for
+  // fractions, AND it rejects counts past 2^53, where `String(value)` would render
+  // exponential notation ("1e+21 rows"). A separate `isFinite` check would be dead.
+  if (!Number.isSafeInteger(value) || value < 0) return null;
   if (value === 0) return { count: "0", noun: "No rows", destructive: false };
   return { count: String(value), noun: value === 1 ? "row" : "rows", destructive: true };
 }
@@ -115,7 +118,13 @@ export function typeToConfirmTarget(objectName?: string): string | null {
  * free and keeps this helper correct standalone.
  */
 export function typeToConfirmMatches(typed: string, target: string): boolean {
-  return typed.trim() === target.trim();
+  const trimmedTarget = target.trim();
+  // A blank target carries no friction to satisfy, so matching it would let an EMPTY
+  // input pass the gate. `ConfirmRun` can't reach this (the gate only mounts for a
+  // `typeToConfirmTarget` result, non-blank by construction), but this is an exported
+  // helper and `false` is the safe direction for a confirm predicate.
+  if (trimmedTarget === "") return false;
+  return typed.trim() === trimmedTarget;
 }
 
 /**
@@ -141,9 +150,13 @@ export function nextTrapIndex(count: number, current: number, backwards: boolean
  * Esc/Cancel being inert while `busy`.
  */
 export function isScrimDismiss(
-  e: { target: EventTarget | null; currentTarget: EventTarget | null },
+  e: { target: EventTarget | null; currentTarget: EventTarget | null; button: number },
   busy: boolean,
 ): boolean {
+  // PRIMARY button only. `mousedown` fires for every button, so without this a
+  // right-click (opening the context menu over the scrim) or a middle-click (X11
+  // paste, auto-scroll) would cancel a pending destructive confirmation.
+  if (e.button !== 0) return false;
   // `currentTarget !== null` first: a synthetic/targetless event would otherwise
   // satisfy `null === null` and cancel a pending destructive confirmation.
   return e.currentTarget !== null && e.target === e.currentTarget && !busy;
@@ -177,6 +190,7 @@ function ModalOverlay({
   const scrimRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
   const capturedRef = useRef(false);
+  const restoreTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Capture the outgoing focus owner during RENDER, not in an effect. React applies
   // the footer's `autoFocus` itself during commit (`commitMount`), and a child's
@@ -196,10 +210,10 @@ function ModalOverlay({
   // overlays are skipped by their `data-modal-overlay` marker: two dialogs open at
   // once must not inert each other into mutual uselessness.
   //
-  // DECLARED BEFORE the focus-restore effect on purpose. React runs a component's
-  // effect cleanups in hook-declaration order, and `focus()` on a node inside an
-  // inert subtree is a spec no-op — with `<div id="root">` the app's only body
-  // child, restoring focus first would silently fail for EVERY caller.
+  // NOTE: `focus()` on a node inside an inert subtree is a spec no-op, so the focus
+  // restore below MUST NOT run before this cleanup (with `<div id="root">` the app's
+  // only body child, it would silently fail for every caller). That is guaranteed by
+  // the restore being deferred to a macrotask, not by this hook's declaration order.
   useEffect(() => {
     const overlayNode = scrimRef.current;
     if (overlayNode === null) return;
@@ -216,21 +230,39 @@ function ModalOverlay({
   }, []);
 
   // Restore focus to whatever held it before the dialog opened, once it unmounts.
-  // `isConnected` guards the case where that element left the DOM in the meantime
-  // (focusing a detached node silently drops focus to `<body>`).
-  useEffect(
-    () => () => {
-      // `StrictMode` (dev) simulates unmount+remount by running cleanups while the
-      // DOM stays mounted; React only detaches host refs on a REAL unmount. A still
-      // -connected scrim therefore means this is the simulated pass — restoring focus
-      // there would yank it out of a dialog that is still on screen.
-      const scrim = scrimRef.current;
-      if (scrim !== null && scrim.isConnected) return;
+  //
+  // SCHEDULED, not run inline, and that is load-bearing. `StrictMode` (active in
+  // `src/ui/main.tsx`) simulates an unmount+remount on mount, and React 19 detaches
+  // host refs DURING that simulation: `doubleInvokeEffectsOnFiber` runs
+  // `disappearLayoutEffects` (which calls `safelyDetachRef` for every host fiber)
+  // BEFORE `disconnectPassiveEffect` runs this cleanup. So `scrimRef.current` is
+  // already `null` on the simulated pass too, and no ref-based "is this real?" guard
+  // can tell the two apart — an inline restore fires on every dev mount, yanks focus
+  // off the auto-focused Cancel button onto the background trigger, and then loses it
+  // to `<body>` entirely once `reconnectPassiveEffects` re-inerts that subtree.
+  //
+  // A deferred restore DOES tell them apart: React re-runs the effect synchronously
+  // within the same double-invoke, so the pending timer is cancelled before it can
+  // fire, while a real unmount leaves nothing to cancel it. It also makes the restore
+  // independent of cleanup ORDER — by the time it runs, the `inert` sweep above has
+  // finished and the target is focusable again.
+  useEffect(() => {
+    if (restoreTimerRef.current !== null) {
+      clearTimeout(restoreTimerRef.current);
+      restoreTimerRef.current = null;
+    }
+    return () => {
       const previouslyFocused = previouslyFocusedRef.current;
-      if (previouslyFocused !== null && previouslyFocused.isConnected) previouslyFocused.focus();
-    },
-    [],
-  );
+      if (previouslyFocused === null) return;
+      restoreTimerRef.current = setTimeout(() => {
+        restoreTimerRef.current = null;
+        // Re-checked at FIRE time, not at schedule time: the element may have left the
+        // DOM while the dialog was open (focusing a detached node silently drops focus
+        // to `<body>`). `preventScroll` keeps a dismiss from jumping the viewport.
+        if (previouslyFocused.isConnected) previouslyFocused.focus({ preventScroll: true });
+      }, 0);
+    };
+  }, []);
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLDivElement>): void {
     if (e.key !== "Tab") return;
@@ -263,8 +295,10 @@ function ModalOverlay({
 
   // SSR / `renderToStaticMarkup` (this repo's entire structural-test harness, no
   // jsdom by convention) has no `document.body` to portal into and no meaning for
-  // `createPortal` — render the scrim in-tree so the markup is byte-identical to
-  // the pre-DW-59 tree. The browser path gets the durable `document.body` anchor.
+  // `createPortal` — render the scrim in-tree, keeping the pre-DW-59 SHAPE (same
+  // element nesting, same classes, so every existing structural assertion holds).
+  // Not byte-identical: the scrim now also serializes `data-modal-overlay=""`. The
+  // browser path gets the durable `document.body` anchor.
   return typeof document === "undefined" ? scrim : createPortal(scrim, document.body);
 }
 

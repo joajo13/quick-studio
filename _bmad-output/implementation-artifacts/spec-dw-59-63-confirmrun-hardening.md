@@ -109,6 +109,20 @@ warnings: [oversized]
   - `[low]` `[patch]` `react-dom` was imported before `react`, against the repo's framework-first order — reordered.
   - `[low]` `[patch]` The card's JSX children kept their old 8-space depth after the `ModalOverlay` refactor while the opening tag moved to 4 — reindented (no formatter is configured in this repo, so nothing would have fixed it later).
 
+### 2026-07-27 — Review pass (follow-up)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 6: (high 0, medium 1, low 5)
+- defer: 2: (high 0, medium 1, low 1)
+- reject: 18: (high 0, medium 2, low 16)
+- addressed_findings:
+  - `[medium]` `[patch]` The previous pass's `StrictMode` focus-restore guard rested on a premise that is FALSE in React 19: `doubleInvokeEffectsOnFiber` runs `disappearLayoutEffects` — which calls `safelyDetachRef` on every host fiber — BEFORE `disconnectPassiveEffect`, so `scrimRef.current` is already `null` on the simulated pass too and the `isConnected` guard never fires (verified in `node_modules/react-dom/cjs/react-dom-client.development.js:18697` and `:15196-15198`). Every dev mount therefore restored focus to the background trigger, which `reconnectPassiveEffects` then re-inerted, leaving focus on `<body>` with Esc and the Tab trap both dead. Replaced the ref-identity guard with a `setTimeout(…, 0)` restore that the re-running effect cancels — React re-runs it synchronously inside the same double-invoke, a real unmount has nothing to cancel it — which also removes the restore's dependence on cleanup ORDER relative to the `inert` sweep.
+  - `[low]` `[patch]` `handleMouseDown` inspected no `MouseEvent.button`, so right-clicking the scrim to open the browser context menu (or a middle-click) cancelled a pending destructive confirmation — `isScrimDismiss` now requires the primary button, with the button taken into the pure predicate so it stays unit-testable.
+  - `[low]` `[patch]` The focus restore passed no `{ preventScroll: true }`, so dismissing the dialog could jump the viewport to the restored element.
+  - `[low]` `[patch]` `typeToConfirmMatches("", "  ")` returned `true` — an exported friction predicate that satisfies itself for a blank target. Unreachable through `ConfirmRun` (the gate only mounts for a non-blank `typeToConfirmTarget`), but wrong for any future direct caller; a blank target now never matches.
+  - `[low]` `[patch]` `affectedRowsBadge` kept `!Number.isFinite(value) ||` directly under a comment stating that `isSafeInteger` subsumes it — dead predicate removed, comment made accurate.
+  - `[low]` `[patch]` Two more docblock over-claims: the SSR path is not "byte-identical to the pre-DW-59 tree" (the scrim now serializes `data-modal-overlay=""` — corrected to same-shape), and `ModalOverlay` is not "generic over its `children`" in any type sense. Also recorded what the modality contract deliberately does NOT cover (background scrolling), so the docblock stops reading as complete.
+
 ## Design Notes
 
 **Why a `children`-taking wrapper and not hooks in `ConfirmRun`.** `ConfirmRun.test.tsx` calls `ConfirmRun({...})` as a plain function to walk the real element tree — any hook in `ConfirmRun` itself throws there (no dispatcher). Wrapping as `<ModalOverlay>{card}</ModalOverlay>` keeps `ConfirmRun` a pure function, and because `findButton` recurses through `element.props.children`, the card (with both buttons inlined) is still reachable. A nested component that *rendered* the card instead would hide the buttons from the walker — the DW-64 failure mode. Direct invocation also never executes `ModalOverlay`'s body, so no hook runs in that path.
@@ -148,16 +162,25 @@ Status: done
 
 ### Files changed
 
-- `src/ui/workspace/ConfirmRun.tsx` — `ModalOverlay` (portal + trap + inert + focus restore + scrim dismiss), five exported DOM-free helpers (`affectedRowsBadge`, `typeToConfirmTarget`, `typeToConfirmMatches`, `nextTrapIndex`, `isScrimDismiss`), badge/footer wiring, `disabled={busy}` on the input, docblock.
-- `src/ui/workspace/ConfirmRun.test.tsx` — 22 new tests: every pure helper across every I/O-matrix row, the SSR-guard branch, the neutral-`0` badge, nonsense counts, blank `objectName`, the DW-63 disabled input (asserted by identity), and the `ModalOverlay` wiring walk.
+- `src/ui/workspace/ConfirmRun.tsx` — `ModalOverlay` (portal + trap + inert + deferred focus restore + primary-button scrim dismiss), five exported DOM-free helpers (`affectedRowsBadge`, `typeToConfirmTarget`, `typeToConfirmMatches`, `nextTrapIndex`, `isScrimDismiss`), badge/footer wiring, `disabled={busy}` on the input, docblock.
+- `src/ui/workspace/ConfirmRun.test.tsx` — 24 new tests: every pure helper across every I/O-matrix row, the SSR-guard branch, the neutral-`0` badge, nonsense counts, blank `objectName`, the DW-63 disabled input (asserted by identity), the `ModalOverlay` wiring walk, and (pass 2) the non-primary-button and blank-target predicate cases.
 
 ### Review findings breakdown
 
-- Patches applied: 10 (2 medium, 8 low) — see `## Review Triage Log`.
-- Deferred: 5 — listed below for the orchestrator to ledger.
-- Rejected: 14 (e.g. "adopt `@radix-ui/react-dialog` instead" — explicitly forbidden by this spec; "trimming the target weakens the friction" — symmetric trimming is exactly what DW-62 prescribes; `document.body` being null; `-1` as an unknown-count sentinel on a prop with no source).
+**Pass 1** (implementation review): patches applied 10 (2 medium, 8 low); deferred 5; rejected 14.
 
-### Deferred findings — for the orchestrator to ledger
+**Pass 2** (independent follow-up review): patches applied 6 (1 medium, 5 low); deferred 2 (ledgered as DW-105, DW-106); rejected 18.
+
+The medium patch in pass 2 corrected a pass-1 patch that was built on a false premise about React 19's `StrictMode` double-invoke — see the triage log. Pass-2 rejects were dominated by findings the frozen intent contract explicitly decides against ("adopt `@radix-ui/react-dialog`" — a `Never`; "blank `objectName` should fail closed" and "don't trim the displayed target" — both the prescribed I/O-matrix behavior for DW-62; "format large counts with `toLocaleString`" — locale formatting is a `Never`; "surface corrupt `affectedRows` instead of dropping it silently" — the matrix says silently dropped), plus four restatements of findings pass 1 had already deferred and several unreachable-by-construction cases (`nextTrapIndex` with a stale index, `document.body` null).
+
+### Deferred findings — pass 2 (appended to the ledger as DW-105, DW-106)
+
+- summary: `ModalOverlay` enforces focus and pointer containment but not SCROLL containment — `inert` does not block the wheel/trackpad, so the app scrolls freely behind the `aria-modal` scrim.
+  evidence: DW-59 scoped the gap as focus trap + scrim dismiss + untabbable background, all three now closed; scroll lock was never named. Not patched because `body { overflow: hidden }` reflows the whole app when the scrollbar disappears (a scrollbar-gutter decision, not a `ConfirmRun` detail), and it is the third containment finding that belongs to a shared-modal policy. The docblock now states the omission rather than letting the contract read as complete.
+- summary: `dependents` is the one dormant prop left unguarded while `affectedRows` and `objectName` were hardened — blank endpoints paint an empty `→ FK →` row and the list is uncapped inside a 480px card.
+  evidence: Genuinely dormant (no Core source), which is why DW-61/62/63 were themselves deferred before being bundled. Unlike those two the fix is not mechanical: it needs a display policy (drop blanks? cap with "+N more"? scroll?) that only makes sense against the shape of the data the supplying story ships.
+
+### Deferred findings — pass 1 (still unledgered; the orchestrator owns these)
 
 - summary: When `busy` disables every control, or when a user clicks a non-focusable region of the dialog (the `<pre>`, the risk text), focus falls to `<body>` and the card-level Esc handler stops firing until focus returns to the dialog.
   evidence: Browsers blur a focused element when it becomes `disabled`; the Esc handler lives on the card and React handlers only fire for events originating in their subtree. Tab still recovers (the background is `inert`, so the only focusable controls are the dialog's), so this is a friction gap, not a dead end. The durable fix is a focus-containment policy (`tabIndex={-1}` on the card plus re-focusing it when the focusable set empties), which is a shared-modal decision rather than a `ConfirmRun` detail.
@@ -172,14 +195,17 @@ Status: done
 
 ### Verification
 
-- `bun test src/ui/workspace/ConfirmRun.test.tsx` — 36 pass, 0 fail (was 12 tests before this story; every pre-existing assertion kept, none weakened).
-- `bun test` — 1961 pass, 1 skip, 0 fail across 88 files.
+- `bun test src/ui/workspace/ConfirmRun.test.tsx` — 38 pass, 0 fail (12 before this story, 36 after pass 1, +2 in pass 2; every pre-existing assertion kept, none weakened).
+- `bun test` — 1963 pass, 1 skip, 0 fail across 88 files.
 - `bunx tsc --noEmit` — clean under `strict` + `noUncheckedIndexedAccess`.
 - `rg -n 'amber-|red-[0-9]' src/ui/workspace/ConfirmRun.tsx` — no matches.
-- `git diff --stat` — only `ConfirmRun.tsx` and `ConfirmRun.test.tsx`; the three callers, `src/ui/styles/contrast.test.ts` and the deferred-work ledger are untouched.
+- `rg -n '<ConfirmRun' src/ --glob '!*.test.tsx'` — the same three call sites, none changed.
+- `git diff --stat` — only `ConfirmRun.tsx` and `ConfirmRun.test.tsx`; the three callers and `src/ui/styles/contrast.test.ts` are untouched.
+- Manual: the React 19 `StrictMode` claim behind the pass-2 medium patch was verified against the installed `node_modules/react-dom/cjs/react-dom-client.development.js` (`doubleInvokeEffectsOnFiber` at `:18697`, `disappearLayoutEffects` → `safelyDetachRef` at `:15196-15198`), not taken on the reviewer's word.
 
 ### Residual risks
 
-- Everything `ModalOverlay` does at runtime (portal, trap, `inert`, focus restore) is structurally untestable in this repo's no-jsdom harness — the pure halves are unit-tested, the DOM orchestration is verified by reasoning about React's commit/cleanup order, not by a test. The two medium patches in this pass both lived in exactly that blind spot, which is why a follow-up review is recommended.
-- The dormant-prop guards (DW-61/62/63) are still dormant: no Core source supplies `affectedRows`, `dependents` or `objectName` today, so their behavior is proven only at the helper level.
+- Everything `ModalOverlay` does at runtime (portal, trap, `inert`, focus restore) is structurally untestable in this repo's no-jsdom harness — the pure halves are unit-tested, the DOM orchestration is verified by reasoning about React's commit/cleanup order, not by a test. Both passes' medium findings lived in exactly that blind spot, and pass 2 showed a pass-1 patch there had been reasoned from a wrong premise. The new restore is scheduled-and-cancelled rather than ref-guarded, which is order-independent and therefore a weaker thing to get wrong, but it is still unverified by any executing test.
+- Focus CONTAINMENT (as opposed to the Tab trap) remains open: `busy` disables every control and a click on the `<pre>` drops focus to `<body>`, from where Esc and the trap stop receiving keydown. Deferred in pass 1, restated by both reviewers in pass 2, and left alone deliberately — it needs the same shared-modal decision as DW-105.
+- The dormant-prop guards (DW-61/62/63) are still dormant: no Core source supplies `affectedRows`, `dependents` or `objectName` today, so their behavior is proven only at the helper level. `dependents` has no guard at all (DW-106).
 - Pre-existing DW-64 stands: `findButton` cannot walk into `TypeToConfirmSection`, so the escalated footer's callbacks have no behavioral test.

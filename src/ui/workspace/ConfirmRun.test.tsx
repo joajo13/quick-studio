@@ -88,6 +88,16 @@ describe("typeToConfirmMatches", () => {
     expect(typeToConfirmMatches("public.order", "public.orders")).toBe(false);
     expect(typeToConfirmMatches("", "public.orders")).toBe(false);
   });
+
+  test("a blank target never matches — an empty gate must not auto-pass", () => {
+    // Unreachable through `ConfirmRun` (the gate only mounts for a non-blank
+    // `typeToConfirmTarget`), but this is an exported helper: a future caller wiring
+    // it up directly must not get a friction gate that satisfies itself.
+    expect(typeToConfirmMatches("", "")).toBe(false);
+    expect(typeToConfirmMatches("", "   ")).toBe(false);
+    expect(typeToConfirmMatches("   ", "   ")).toBe(false);
+    expect(typeToConfirmMatches("anything", "")).toBe(false);
+  });
 });
 
 describe("nextTrapIndex", () => {
@@ -119,21 +129,32 @@ describe("isScrimDismiss", () => {
   // ever checks identity, so plain objects exercise it faithfully without a DOM.
   const scrim = { id: "scrim" } as unknown as EventTarget;
   const insideTheCard = { id: "confirm-button" } as unknown as EventTarget;
+  /** `MouseEvent.button`: 0 primary, 1 middle (X11 paste / auto-scroll), 2 secondary. */
+  const PRIMARY = 0;
 
   test("a press on the scrim itself dismisses", () => {
-    expect(isScrimDismiss({ target: scrim, currentTarget: scrim }, false)).toBe(true);
+    expect(isScrimDismiss({ target: scrim, currentTarget: scrim, button: PRIMARY }, false)).toBe(true);
   });
 
   test("a press that bubbled from inside the card does NOT dismiss", () => {
-    expect(isScrimDismiss({ target: insideTheCard, currentTarget: scrim }, false)).toBe(false);
+    expect(isScrimDismiss({ target: insideTheCard, currentTarget: scrim, button: PRIMARY }, false)).toBe(false);
   });
 
   test("a scrim press mid-round-trip does NOT dismiss (busy)", () => {
-    expect(isScrimDismiss({ target: scrim, currentTarget: scrim }, true)).toBe(false);
+    expect(isScrimDismiss({ target: scrim, currentTarget: scrim, button: PRIMARY }, true)).toBe(false);
   });
 
   test("a targetless event does NOT dismiss (null === null must not cancel)", () => {
-    expect(isScrimDismiss({ target: null, currentTarget: null }, false)).toBe(false);
+    expect(isScrimDismiss({ target: null, currentTarget: null, button: PRIMARY }, false)).toBe(false);
+  });
+
+  test("a non-primary button on the scrim does NOT dismiss", () => {
+    // `mousedown` fires for EVERY button: right-clicking the scrim to open the browser
+    // context menu, or middle-clicking it, must not cancel a pending destructive
+    // confirmation the user is still reading.
+    for (const button of [1, 2, 3, 4]) {
+      expect(isScrimDismiss({ target: scrim, currentTarget: scrim, button }, false)).toBe(false);
+    }
   });
 });
 
