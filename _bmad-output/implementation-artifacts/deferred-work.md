@@ -451,7 +451,8 @@ source_spec: `spec-7-1-redesign-shell-neutral.md`
 location: `src/ui/workspace/TabBar.tsx`, `src/ui/schema/SchemaTree.tsx`, `src/ui/workspace/Workspace.tsx`, `src/ui/App.tsx`
 severity: low
 reason: The shell's `role="tab"`/`aria-selected`/`aria-pressed`/`aria-label="Schema tables"` and the `health`/`settings-toggle`/`create-table-toggle`/`exposure-banner` testids are load-bearing for a11y and were preserved as a hard constraint, but no `*.test.tsx` renders these four components — they are asserted nowhere. The story's "keep every passing test green" only covers unrelated suites (ChatTabView/QueryTabView/ErdTabView/ReportTabView/ConfirmRun/etc.), so the activation/disclosure semantics, the connection-status dot, and the light-theme flip could all regress unnoticed. Pre-existing gap surfaced by this review; adding shell render tests is worthwhile focused work, not part of a presentation-only pass.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-workspace-shell-component-tests
 
 ### DW-54: The shell's destructive/error reds are hardcoded dark-tuned Tailwind classes (`text-red-400`/`bg-red-500`/`bg-red-500/10`) that do not flip under `:root[data-theme="light"]`, so on the new light theme they render low-contrast on white surfaces — tokenize them (e.g. a themed `--destructive`/`--err` pair) when the light theme is completed across Epic 7
 
@@ -514,7 +515,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (the `alertdialog` card + `fixed inset-0` scrim)
 severity: medium
 reason: The prototype markup (and the port) assert `aria-modal="true"`, but the component adds no focus trap and the scrim has no dismiss handler, so a keyboard/AT user can Tab out to the page behind the "modal" and a screen reader announces a boundary that isn't kept. This is a genuine modal-a11y gap, but it is shared across all three callers (Query/Chat/Report) and a proper focus trap is real behavior beyond a presentation-only reskin — best done once as a dedicated shared-modal a11y pass for the epic. Not a regression from the prior inline panel (which claimed no modality at all).
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-60: `ConfirmRun`'s `position: fixed` overlay is rendered in-tree (no portal), so it anchors to an ancestor instead of the viewport if any ancestor establishes a containing block (`transform`/`filter`/`will-change`/`contain`)
 
@@ -523,7 +525,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (`fixed inset-0` root), rendered inside `QueryTabView`/`ChatTabView`/`ReportTabView` trees
 severity: low
 reason: `QueryTabView`'s own root is transform-free today, so the full-screen scrim resolves against the viewport as intended. But the modal is rendered in place (not via a React portal), so a future shell/panel ancestor that applies `transform`/`filter` (common for animations) would silently clip or mis-center it. The durable fix is a portal to `document.body`, which changes the render path and is out of scope for a presentation-only port. Latent fragility, surfaced for the record.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-61: The optional `affectedRows` badge renders for any numeric value — `0`, negative, or `NaN` all paint the red "N rows" badge, and pluralization only special-cases `=== 1`
 
@@ -532,7 +535,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (the `affectedRows !== undefined` badge)
 severity: low
 reason: `affectedRows` is a prop-gated preview with NO Core source today (the `confirmation_required` preview carries only `sql`+`risk`), so this branch is dormant until a future story wires it. When wired, a `0`/negative/`NaN` value would render a misleading red "0 rows"/"-5 rows"/"NaN rows" destruction badge. The right place to add the `Number.isFinite && >= 0` guard (and richer pluralization) is the story that supplies the data with real semantics — deferred with it.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-62: The optional `objectName` type-to-confirm gate bypasses on empty string and is unmatchable for whitespace-bearing names (`typed.trim() === objectName` trims only the left side)
 
@@ -541,7 +545,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (`TypeToConfirmSection` mount gate `objectName !== undefined` + `match = typed.trim() === objectName`)
 severity: low
 reason: `objectName` is a prop-gated escalated-friction input with no Core source today (dormant). Two boundary bugs live in the dormant path: `objectName === ""` passes the `!== undefined` mount gate and matches an empty input immediately (friction fully bypassed), and a name with leading/trailing whitespace can never equal a `.trim()`-ed input (Confirm permanently disabled). Because the gate is UX-only (the Core is the real authorizer) and unreachable until wired, the mount guard (`.trim() !== ""`) and symmetric trimming belong to the story that feeds real object names. Deferred.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-63: The `objectName` type-to-confirm input stays editable while `busy` is true, even though both footer buttons disable — an inconsistent frozen state during an in-flight round-trip
 
@@ -550,7 +555,8 @@ source_spec: `spec-7-3-redesign-query-confirm-neutral.md`
 location: `src/ui/workspace/ConfirmRun.tsx` (`TypeToConfirmSection` `<input>`, no `disabled={busy}`)
 severity: low
 reason: When a confirm round-trip is in flight (`busy`), Confirm and Cancel both disable to avoid a double-fire, but the type-to-confirm input has no `disabled={busy}`, so it remains editable while the rest of the dialog is frozen. Purely cosmetic (typing changes nothing while the buttons are inert, and the Core is the gate), and on the dormant `objectName` path. Add `disabled={busy}` when the escalated path is wired for real. Deferred.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-confirmrun-hardening
 
 ### DW-64: The type-to-confirm callback wiring (onConfirm/onCancel threaded through `TypeToConfirmSection`) is structurally unreachable by the presentational test's `findButton` tree-walk, so the escalated-confirm path's button callbacks are untested
 
@@ -1129,4 +1135,103 @@ severity: low
 found_by: Edge Case Hunter (also named in the prior pass's residuals), follow-up review pass
 summary: `/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/` accepts `127.1.2.999`, so such a host is classified loopback: no Port-Exposure Warning fires, `sandboxBindHost` passes it through verbatim, and the boot dies on a misleading `Bun.serve` port error instead of a "bad host" one.
 evidence: Not a containment hole — no value matching that regex is routable, so nothing off-machine can reach it either way. What changed with DW-48 is the predicate's ROLE: before, `isLoopbackHost` decided whether to print a warning; now it also decides whether a tokenless origin binds a host verbatim, which makes an unearned accept a bindability and diagnosis failure rather than a cosmetic one (see DW-101). The follow-up review corrected the docstrings that called the match "validated" and removed the circular "Core's own boot rejects it first" argument, but left the regex alone: adding the range check flips `isExposed` for these values (a `127.1.2.999` bind would begin warning), which is behavior change outside a documentation-and-clamp story. One-line fix plus a decision about the warning.
+status: open
+
+### DW-105: `ConfirmRun`'s new modality enforces focus and pointer containment but not SCROLL containment — the page still scrolls freely behind an `aria-modal` scrim
+
+origin: follow-up review of dw-59-63-confirmrun-hardening, 2026-07-27
+source_spec: `spec-dw-59-63-confirmrun-hardening.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (`ModalOverlay`'s `inert` effect; no `overflow` lock on `document.body`)
+severity: medium
+found_by: Blind Hunter + Edge Case Hunter, independently, on the follow-up review pass
+summary: `inert` blocks focus, pointer events and AT traversal on the background, but it does not block wheel/trackpad/touch scrolling, so the app scrolls under the destructive-confirm dialog while it is open.
+evidence: DW-59 scoped the gap as "no focus trap, no scrim-click dismiss, background stays tabbable" and all three are now closed; scroll lock was never named, and the docblock has been corrected to state the omission explicitly rather than let the modality contract read as complete. It is deferred rather than patched for two reasons: locking `document.body { overflow: hidden }` reflows the whole app when the scrollbar disappears (a scrollbar-gutter compensation decision, not a `ConfirmRun` detail), and this is the third finding in a row — with DW-105's siblings on focus containment — that belongs to a shared-modal policy rather than to one dialog. The repo already depends on `@radix-ui/react-dialog` + `react-remove-scroll` (used only by the currently-unreferenced `CommandDialog`), so "extract a shared modal primitive" and "adopt the existing one" are both live options and the choice is a human one.
+status: open
+
+### DW-106: `dependents` is the one `ConfirmRun` dormant prop DW-61/62/63 left unguarded — blank endpoints render empty FK lines and the list is uncapped inside a 480px card
+
+origin: follow-up review of dw-59-63-confirmrun-hardening, 2026-07-27
+source_spec: `spec-dw-59-63-confirmrun-hardening.md`
+location: `src/ui/workspace/ConfirmRun.tsx` (the `dependents !== undefined && dependents.length > 0` block)
+severity: low
+found_by: Blind Hunter, follow-up review pass
+summary: `affectedRows` and `objectName` were hardened against malformed upstream data by DW-61 and DW-62; `dependents` — the third prop from the same never-yet-populated Core preview — renders whatever it is handed, so `{from: "", to: ""}` paints a blank `→ FK →` row and an N-entry array paints N unbounded rows in a `max-w-[480px]` dialog.
+evidence: Genuinely dormant: no Core source supplies `dependents` today (the `confirmation_required` preview carries only `sql` + `risk`), which is exactly why DW-61/62/63 were themselves deferred once before being bundled. The asymmetry is real but the fix is not mechanical the way the other two were — it needs a display policy (drop blank-endpoint entries? cap at N with a "+M more"? scroll the list?) that only makes sense against the shape of the data the supplying story actually ships. Deferring it to that story keeps the guard and its semantics in one place, matching the reasoning that deferred DW-61/62 originally.
+status: open
+
+### DW-107: The workspace tab strip is not a conformant ARIA tabs pattern — orphaned `role="tab"` (no `aria-controls`, no `role="tabpanel"`), no roving tabindex, and no Arrow/Home/End navigation
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/TabBar.tsx` (the `role="tablist"` container, `tabIndex={0}` on every row, the Enter/Space-only `onKeyDown`), `src/ui/workspace/Workspace.tsx` (the tab-body region)
+severity: medium
+found_by: Blind Hunter (items 5 and 7), corroborated by the prior pass's own residual note
+summary: `grep -rn 'role="tabpanel"|aria-controls' src/ui` returns zero non-test hits, so every `role="tab"` is orphaned; and because each row is hardcoded `tabIndex={0}` with no Arrow/Home/End handler, Tab walks through every open tab instead of escaping the strip.
+evidence: Pre-existing — DW-53 pinned the hooks that EXIST, and this story deliberately shipped `TabBar.test.tsx` so it stays green under the correct fix (`tabIndex={active ? 0 : -1}` plus arrow handlers), rather than cementing the anti-pattern; that was mutation-verified. Fixing it is real behavior change in the component (new key handlers, a focus model, `aria-controls`/`id` wiring across two files) and so was explicitly out of scope under this spec's `Block If: pinning any DW-53 hook would require changing a component's rendered markup, props, handlers, or behavior`. The consequence is not cosmetic: a screen-reader user is told "tab 1 of 3" with no announced panel relationship, and a keyboard user cannot traverse the strip the way the role promises.
+status: open
+
+### DW-108: The per-tab close `<button>` is an interactive descendant of `role="tab"`, whose children ARIA treats as presentational — the `Close <title>` label may never be exposed to assistive tech
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/TabBar.tsx` (the `<button aria-label={`Close ${tab.title}`}>` nested inside the `role="tab"` div)
+severity: low
+found_by: Blind Hunter (item 6)
+summary: ARIA's presentational-children rule means content inside `role="tab"` may be flattened, so the close button's `aria-label` — which `TabBar.test.tsx` asserts and treats as a11y coverage — is present in the markup but not necessarily in the accessibility tree.
+evidence: Real but narrow, and shares a root cause with DW-107: the durable fix (move the close control out of the tab element, or restructure the row) is the same restructuring the APG pattern needs, so the two should be decided together rather than patched independently. The test asserting the label is not wrong — it pins the string the markup must carry — it is just weaker evidence of a11y than it reads as, which is why this is recorded rather than silently accepted. Confirming the practical impact needs a real AT check (NVDA/VoiceOver), which this repo's static-markup harness cannot do.
+status: open
+
+### DW-109: `openTableTab` titles a table tab with the table name verbatim, so two table tabs on the same-named table in different connections share a title AND an identical `aria-label="Close <name>"`
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/workspace-state.ts` (`openTableTab`, `const title = ref.name`) vs. the `openTab` comment at the same file's generic path
+severity: medium
+found_by: Edge Case Hunter
+summary: The reducer's own comment on the generic path states that suffixing the monotonic id means "two coexisting tabs of the same kind can never share a title", but `openTableTab` bypasses that rule and assigns `ref.name` unsuffixed — so `public.users` opened on two different connections yields two indistinguishable tabs and two identical close labels.
+evidence: Verified by reading the reducer: `openTab` builds `` `${KIND_LABEL[kind]} ${id}` `` while `openTableTab` sets `title = ref.name`, and the multi-connection story (Epic 10) made two same-named tables on different connections an ordinary state rather than a corner case. Consequence is a genuine a11y defect (a screen-reader user hears the same "Close users" for two different tabs) plus a sighted-user ambiguity. Not caused by this story — the test file surfaced it by asserting close labels are title-derived — and fixing it is a reducer behavior change (title disambiguation policy: connection prefix? schema qualifier? id suffix on collision only?) that also touches restore/persist snapshots, so it belongs to a focused story with a decision, not to a test-only pass.
+status: open
+
+### DW-110: `SaveIndicator` (DW-22's save-failure status, `data-testid="save-status"` + `bg-err` dot) has no render test because it is module-private and this spec forbade a second production export
+
+origin: follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/App.tsx` (`function SaveIndicator()`, module-private)
+severity: low
+found_by: Blind Hunter (item 10)
+summary: `SaveIndicator` is a byte-for-byte sibling of the now-tested `ConnectionIndicator` — same status-bar shape, its own testid, its own `bg-err` dot — and is exactly as unrenderable-through-`App` and exactly as untested, but covering it needs the same `export` widening this spec's `Never` clause restricted to `ConnectionIndicator` alone.
+evidence: The gap is asymmetric and provable: `App.test.tsx` now pins `data-testid="health"` and its dot token in every phase, while `data-testid="save-status"` is asserted nowhere in the repo. The `Workspace`-side SLOT that renders it IS now covered (`Workspace.test.tsx` passes a `saveIndicator` stub and mutation-verified that deleting `{saveIndicator}` from the JSX turns red), so what remains uncovered is only the indicator's own markup. Deliberately not patched: this spec's `Never` list permits exactly one production edit, and widening a second component's visibility inside a review pass would be a spec deviation. A three-line follow-up: add `export` to `SaveIndicator` and assert its testid, copy and dot token.
+status: open
+
+### DW-111: The port-exposure banner and three other alert surfaces paint raw Tailwind red instead of the `--err-fill` / `--err-soft` semantic tokens, so they never follow a theme
+
+origin: second follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/Workspace.tsx:212,217,220-221` (`ExposureBanner`), `src/ui/workspace/TabContent.tsx:430-438`, `src/ui/schema/CreateTablePanel.tsx:39,71,241`, `src/ui/data/DataGrid.tsx:510`
+severity: low
+found_by: Blind Hunter (item 18)
+summary: `border-red-700 bg-red-600 text-white` / `text-red-400` / `bg-red-950/40` are literal palette values with no light-theme override, while `--err-fill` and `--err-soft` — added by DW-58 for exactly this white-on-red destructive case and already carrying light/dark overrides — sit unused by these four components.
+evidence: Verified by grep: `src/ui/styles/globals.css:245-248` exposes `--color-err-fill` / `--color-err-soft`, and `grep -rn "bg-red-\|text-red-\|border-red-" src/ui --include=*.tsx` returns hits in exactly those four non-test files. The Blind Hunter framed this as "the exposure banner is the one alert outside the token system"; it is not — it is four components, which is what makes this a token-adoption sweep rather than a one-line fix, and why it is recorded rather than patched inside a test-only pass. Pre-existing and untouched by this story (`Workspace.tsx` is byte-identical to baseline). Consequence is confined to theme fidelity: under the light theme these surfaces keep dark-theme reds. Note the coupling to DW-53's own residual — the light-theme flip is unobservable in the `renderToStaticMarkup` harness, so whoever adopts the tokens cannot verify the fix with this repo's current test infrastructure.
+status: open
+
+### DW-112: The launcher rail's landmark, its five launcher buttons and the `+` New-tab button's singleton-fallback logic have no test — `Workspace.test.tsx` covers the two DW-53 toggles and nothing else in the rail
+
+origin: second follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/Workspace.tsx:131` (`nav aria-label="Open a new tab"`), `:132-139` (`role="img"` brand mark), `:141-154` (the `LAUNCHER_KINDS.map` buttons and their `aria-label`s), `:464-483` (the `+` button and its `activeTab.kind !== "settings" && !== "create-table"` fallback)
+severity: low
+found_by: Blind Hunter (item 9)
+summary: The new shell test file pins `settings-toggle`, `create-table-toggle` and `exposure-banner` — the three hooks DW-53 named — leaving the rest of the same rail (a nav landmark, a labelled brand mark, five per-kind launcher buttons, and the `+` button's real branch logic) assertable by nothing.
+evidence: Confirmed by reading `Workspace.tsx` against `Workspace.test.tsx`: no assertion mentions `"Open a new tab"`, `role="img"`, `aria-label="New tab"`, or any `LAUNCH_LABEL` string. The markup half is cheap to add; the `+` button's fallback — "`+` duplicates the active tab's kind but must never mint a second Settings or create-table tab" — is genuine branch logic and is NOT cheaply reachable in this harness: unlike `TabBar`, `Workspace` uses hooks, so the function-call + tree-walk pattern `TabBar.test.tsx` uses to reach handlers cannot be applied to it, and `renderToStaticMarkup` drops the `onClick`. Out of scope here rather than skipped: none of these are DW-53 hooks, and the spec's I/O matrix enumerates the three testids it pins. A focused story should decide whether the rail gets markup-level coverage only, or whether reaching `Workspace`'s handlers at all justifies the jsdom/testing-library dependency the repo has so far refused.
+status: open
+
+### DW-113: An IPv6 exposure bind renders as `:::4123` in the port-exposure banner — the address the warning exists to communicate becomes unreadable
+
+origin: second follow-up review of dw-workspace-shell-component-tests, 2026-07-27
+source_spec: `spec-dw-workspace-shell-component-tests.md`
+location: `src/ui/workspace/Workspace.tsx:215` (`{exposure.host}:{exposure.port}`)
+severity: low
+found_by: Edge Case Hunter
+summary: The banner interpolates `host` and `port` with a bare colon, so a `QS_HOST=::` bind (all IPv6 interfaces, the IPv6 counterpart of the `0.0.0.0` case the banner was written for) prints `:::4123` instead of the bracketed `[::]:4123` form every tool and browser expects.
+evidence: `QS_HOST` is user-settable and is exactly what the banner's own remediation copy tells the user to unset, so an IPv6 value is an ordinary configuration, not a corner case. Pre-existing — this story changed no production markup — and surfaced only because the new test fixture pins the rendered address (`0.0.0.0:4123`), which made the interpolation's assumption visible. Not patched: fixing it is a production render change in `Workspace.tsx`, which this spec's `Never` clause forbids outright, and the correct fix should bracket the host once at a shared formatting seam rather than inline in one banner, since the same `ExposureInfo` is surfaced elsewhere. Consequence is real but bounded: the warning still fires and still says the app is reachable off-machine; only the literal address is ambiguous.
 status: open
