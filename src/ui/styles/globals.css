@@ -140,7 +140,7 @@
   --coral-line: rgba(0, 0, 0, 0.22);
   --scrollbar-thumb: rgba(0, 0, 0, 0.15);
   --scrollbar-thumb-hover: rgba(0, 0, 0, 0.25);
-  --t-int: #2f6fd6;
+  --t-int: #2c66cd; /* DW-67: darkened from #2f6fd6 (4.49:1 on --card) to 5.04:1, AA */
   --t-time: #7d54cf;
   --t-bool: #b3781f;
   --t-json: #1a9b8c;
@@ -148,7 +148,9 @@
   --t-key: #0d0d0d;
   /* Story 7.4 ERD functional colors, light values (erd.html light palette). */
   --t-num: #157a56;
-  --t-enum: #b3781f;
+  /* DW-67: darkened from #b3781f (3.49:1 on --card) to #8f5f14 (5.14:1), AA. --t-bool
+     (data grid, out of scope) keeps the old value — the two intentionally diverge now. */
+  --t-enum: #8f5f14;
   --edge: #00000026;
   --edge-hot: var(--t-int); /* keep in sync with dark: hot edge == the int/blue accent */
   --focus-ring: #0d0d0d; /* 2px ink :focus-visible outline on light surfaces */

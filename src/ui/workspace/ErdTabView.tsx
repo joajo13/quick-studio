@@ -113,25 +113,35 @@ export function ErdTableNode({ data }: NodeProps): React.JSX.Element {
               key={c.name}
               className="flex min-w-0 items-center gap-2 border-t border-[var(--border)] px-3 py-1 first:border-t-0"
             >
-              {c.isPrimaryKey ? (
-                <span
-                  aria-label="primary key"
-                  title="primary key"
-                  className="inline-flex shrink-0 text-[var(--t-key)]"
-                >
-                  <KeyIcon />
-                </span>
-              ) : c.isForeignKey ? (
-                <span
-                  aria-label="foreign key"
-                  title="foreign key"
-                  className="inline-flex shrink-0 text-[var(--t-int)]"
-                >
-                  <LinkIcon />
-                </span>
-              ) : (
-                <span aria-hidden className="inline-block h-[13px] w-[13px] shrink-0" />
-              )}
+              {/* DW-65: a fixed-width slot renders PK and FK independently — the same
+                  idiom `ErdHoverPanel` already uses below — so a PK∩FK column (an
+                  identifying FK in a join/junction table) shows BOTH badges instead of
+                  losing its FK cue to a mutually-exclusive PK-wins chain. Fixed width
+                  (not one that grows only on PK∩FK rows) keeps every row's name start
+                  aligned, the same job the old 13px spacer did. */}
+              <span className="inline-flex w-[30px] shrink-0 items-center gap-1">
+                {c.isPrimaryKey && (
+                  <span
+                    aria-label="primary key"
+                    title="primary key"
+                    className="inline-flex shrink-0 text-[var(--t-key)]"
+                  >
+                    <KeyIcon />
+                  </span>
+                )}
+                {c.isForeignKey && (
+                  <span
+                    aria-label="foreign key"
+                    title="foreign key"
+                    className="inline-flex shrink-0 text-[var(--t-int)]"
+                  >
+                    <LinkIcon />
+                  </span>
+                )}
+                {!c.isPrimaryKey && !c.isForeignKey && (
+                  <span aria-hidden className="inline-block h-[13px] w-[13px] shrink-0" />
+                )}
+              </span>
               <span
                 className={
                   c.isPrimaryKey
@@ -142,7 +152,7 @@ export function ErdTableNode({ data }: NodeProps): React.JSX.Element {
                 {c.name}
               </span>
               <span
-                className={`ml-auto max-w-[55%] shrink-0 truncate text-[10px] uppercase tracking-[0.04em] ${typeClass}`}
+                className={`ml-auto max-w-[55%] shrink-0 truncate text-[10.5px] uppercase tracking-[0.04em] ${typeClass}`}
                 style={{ color: `var(--${typeClass})` }}
               >
                 {c.dataType}
@@ -156,8 +166,55 @@ export function ErdTableNode({ data }: NodeProps): React.JSX.Element {
   );
 }
 
+/**
+ * The DW-44 external-reference node: a stand-in for an FK target absent from the
+ * introspected set (a MySQL cross-database FK the pinned-database introspection never
+ * covered, or the Postgres cross-schema equivalent). It is header-plus-caption only —
+ * an external node's `data.columns` is always empty (the referenced table was never
+ * introspected, so no column list exists to show) — with a DASHED border in place of
+ * the solid one, built from the same neutral tokens as the real node (`--border`,
+ * `--muted-foreground`, `--card`): no new hue, functional color only.
+ *
+ * The dashed border alone is a NON-text graphical cue (`--border` vs `--card` measures
+ * well under WCAG 1.4.11's 3:1 in both themes), so it cannot be the only marker that
+ * this card is out of scope. P1 (post-DW-44 review) adds a visible caption row below
+ * the header — `external reference`, styled like a column row so the card's height
+ * stays predictable (see `EXTERNAL_NODE_HEIGHT` in `erd-graph.ts`) — using
+ * `--muted-foreground` on `--card`, which is independently AA-locked by
+ * `contrast.test.ts`. Because that caption is now real text assistive tech reads, this
+ * node has NO hand-rolled `role="group"` / `aria-label`: React Flow v12 already wraps
+ * every node in a focusable `role="group"` with `aria-roledescription="node"`, and a
+ * hand-rolled INNER named-but-unfocusable group only misdirects the accessible name
+ * away from the element assistive tech actually lands on. Exported for render tests.
+ */
+export function ErdExternalNode({ data }: NodeProps): React.JSX.Element {
+  const node = data as unknown as ErdNodeData;
+  return (
+    <div
+      className="overflow-hidden rounded-[10px] border border-dashed border-[var(--border)] bg-[var(--card)]"
+      style={{ width: 240, fontFamily: "var(--font-mono)", fontSize: "12px" }}
+    >
+      {/* Target handle only: derivation never emits an edge whose `source` is an
+          external node id (an external node only ever appears as an FK `target`). */}
+      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+      <div className="flex items-center gap-2 px-3 py-2 text-[var(--muted-foreground)]">
+        <span className="shrink-0">
+          <TableIcon />
+        </span>
+        <span className="truncate text-[12.5px] font-semibold">{node.label}</span>
+      </div>
+      {/* P1: the visible marker — same row geometry/typography idiom as a column row's
+          type label, so this card's cross-database status is legible to a sighted user
+          who cannot resolve the dashed border, not just to a screen reader. */}
+      <div className="border-t border-dashed border-[var(--border)] px-3 py-1 text-[10.5px] uppercase tracking-[0.04em] text-[var(--muted-foreground)]">
+        external reference
+      </div>
+    </div>
+  );
+}
+
 /** Registered once (stable identity) so React Flow does not warn about a new object each render. */
-const NODE_TYPES = { erdTable: ErdTableNode };
+const NODE_TYPES = { erdTable: ErdTableNode, erdExternal: ErdExternalNode };
 
 /** The empty-state shown when the connected schema has zero tables. */
 function ErdEmptyState(): React.JSX.Element {
@@ -267,12 +324,21 @@ function ErdLegend(): React.JSX.Element {
  * `ErdNodeData.columns` the node already carries (no new schema derivation, no Core
  * call). It reuses the same `KeyIcon`/`LinkIcon` glyphs and `--t-key`/`--t-int` badge
  * colours as the node rows, on the same `--card`/`--border` surface the toolbar/legend
- * use. Unlike the compact node row (a mutually-exclusive PK-wins chain), a PK∩FK column
- * here shows BOTH badges — the roomier layout closes DW-65 without touching the row.
- * Column names render at the panel's 12px mono base; the data-type label is 10.5px — at or
- * above the node-row's own type size, so DW-67's sub-11px muted-on-tonal contrast risk is
- * not worsened relative to the node rows (this panel does not fix DW-67, only avoids making
- * it worse). Exported for isolated render tests.
+ * use. A PK∩FK column shows BOTH badges via the same fixed-width slot idiom the compact
+ * node row now also uses (DW-65 is closed on both surfaces, not just here). Column names
+ * render at the panel's 12px mono base; the data-type label is 10.5px, the size this
+ * panel and the legend already used, which the node row was aligned TO — a consistency
+ * tidy-up, NOT part of the DW-67 fix: WCAG's large-text exception starts at 18.66px
+ * bold / 24px, so 10px and 10.5px are held to the identical 4.5:1 and the size moves
+ * nothing about conformance. What conformance rests on is the token measurement, which
+ * `contrast.test.ts` locks against `--card` in dark AND light.
+ *
+ * This component tolerates an empty `columns` (it simply renders zero column rows,
+ * never a crash), but on the live canvas it is never handed one: `erdHoverPanelData`
+ * suppresses the panel entirely for a column-less DW-44 `erdExternal` node, whose own
+ * card already carries the label and the `external reference` caption. The tolerance is
+ * a defensive property of the component, not the path the ERD takes. Exported for
+ * isolated render tests.
  */
 export function ErdHoverPanel({ data }: { data: ErdNodeData }): React.JSX.Element {
   return (
@@ -340,6 +406,82 @@ export function ErdHoverPanel({ data }: { data: ErdNodeData }): React.JSX.Elemen
       </div>
     </div>
   );
+}
+
+/**
+ * The stroke treatment for one rendered ERD edge — whether it is currently the
+ * hovered/connected "hot" edge and whether its target is a synthesized `erdExternal`
+ * node (DW-44, dashed). Pure and exported so `ErdTabView.test.tsx` can unit-test all
+ * four `hot` × `isExternal` combinations directly, instead of the dashed treatment's
+ * only evidence being a regex grep over this file's source text. Does not change the
+ * rendered result: same `--edge`/`--edge-hot` tokens and widths as before extraction,
+ * `strokeDasharray` present iff `isExternal`.
+ */
+export function erdEdgeStyle({
+  hot,
+  isExternal,
+}: {
+  hot: boolean;
+  isExternal: boolean;
+}): { stroke: string; strokeWidth: number; strokeDasharray?: string } {
+  return {
+    stroke: hot ? "var(--edge-hot)" : "var(--edge)",
+    strokeWidth: hot ? 2 : 1.5,
+    ...(isExternal ? { strokeDasharray: "6 4" } : {}),
+  };
+}
+
+/**
+ * The whole presentation-only edge overlay: map each derived edge to itself plus the
+ * `className`/`style` the canvas renders it with. Pure and exported (P15) because the
+ * seam that actually decides the DW-44 dashed treatment is not `erdEdgeStyle` — which
+ * was already unit-tested — but the WIRING that feeds it `e.data.isExternal` and the
+ * hover comparison that computes `hot`. Testing only the style function left that
+ * wiring uncovered: replacing the `isExternal` argument with a literal `false` kept
+ * every test green. Ids, `markerEnd`, `data`, source/target and ORDER are preserved —
+ * this maps 1:1 over the input and never rebuilds or reorders it.
+ */
+export function erdEdgeOverlay<
+  E extends {
+    readonly source: string;
+    readonly target: string;
+    readonly data: { readonly isExternal: boolean };
+  },
+>(
+  edges: ReadonlyArray<E>,
+  hoveredNodeId: string | null,
+): Array<E & { className: string; style: ReturnType<typeof erdEdgeStyle> }> {
+  return edges.map((e) => {
+    const hot =
+      hoveredNodeId !== null && (e.source === hoveredNodeId || e.target === hoveredNodeId);
+    return {
+      ...e,
+      className: hot ? "erd-edge-hot" : "erd-edge",
+      style: erdEdgeStyle({ hot, isExternal: e.data.isExternal }),
+    };
+  });
+}
+
+/**
+ * Which node's hover panel (Story 9.5) the canvas should render, or `null` for none.
+ * Pure and exported (P15) so the three suppression rules are directly testable instead
+ * of being reachable only through a real pointer hover, which `renderToStaticMarkup`
+ * can never produce:
+ *  - nothing hovered;
+ *  - the hovered id is not (yet / no longer) among the live nodes — the DW-66 guard, so
+ *    a just-reconciled id never renders a stale panel;
+ *  - the hovered node is a DW-44 `erdExternal` stand-in — a column-less card whose panel
+ *    would be an empty floating box duplicating the label with no out-of-scope cue, so
+ *    the node's own `external reference` caption carries the whole story instead.
+ */
+export function erdHoverPanelData(
+  nodes: ReadonlyArray<{ readonly id: string; readonly type?: string; readonly data: unknown }>,
+  hoveredNodeId: string | null,
+): ErdNodeData | null {
+  if (hoveredNodeId === null) return null;
+  const hovered = nodes.find((n) => n.id === hoveredNodeId);
+  if (!hovered || hovered.type === "erdExternal") return null;
+  return hovered.data as ErdNodeData;
 }
 
 export function ErdTabView({
@@ -425,24 +567,16 @@ export function ErdTabView({
 
   // Presentation-only: overlay a `className`/`style` onto each already-derived edge so
   // the ones touching the hovered node render `--edge-hot` (blue) and the rest `--edge`.
+  // DW-44: an edge flagged `data.isExternal` (its target is a synthesized `erdExternal`
+  // node) additionally gets a dashed stroke — still the same `--edge`/`--edge-hot`
+  // tokens, just a `strokeDasharray`, so the hover highlight treatment is unchanged.
   // The edge ids, `markerEnd`, `data`, source/target, and order are all preserved — this
-  // maps 1:1 over `graph.edges` without rebuilding or reordering it.
-  const edges = useMemo(
-    () =>
-      graph.edges.map((e) => {
-        const hot =
-          hoveredNodeId !== null && (e.source === hoveredNodeId || e.target === hoveredNodeId);
-        return {
-          ...e,
-          className: hot ? "erd-edge-hot" : "erd-edge",
-          style: {
-            stroke: hot ? "var(--edge-hot)" : "var(--edge)",
-            strokeWidth: hot ? 2 : 1.5,
-          },
-        };
-      }),
-    [graph.edges, hoveredNodeId],
-  );
+  // maps 1:1 over `graph.edges` without rebuilding or reordering it. The mapping itself
+  // lives in the pure, unit-tested `erdEdgeOverlay` (P15).
+  const edges = useMemo(() => erdEdgeOverlay(graph.edges, hoveredNodeId), [
+    graph.edges,
+    hoveredNodeId,
+  ]);
 
   // The connected-node set for the hovered table (itself + FK neighbours), from the pure,
   // unit-tested helper. `null` when nothing is hovered OR when the hovered id is not (yet /
@@ -565,19 +699,17 @@ export function ErdTabView({
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={26} color="var(--border)" />
-        {hoveredNodeId !== null &&
-          (() => {
-            // Look up the hovered node's data in the live node array. Guarded on presence
-            // so a just-reconciled (DW-66) id never renders a stale panel.
-            const hoveredData = nodes.find((n) => n.id === hoveredNodeId)?.data as
-              | ErdNodeData
-              | undefined;
-            return hoveredData ? (
-              <Panel position="top-left">
-                <ErdHoverPanel data={hoveredData} />
-              </Panel>
-            ) : null;
-          })()}
+        {/* All three suppression rules (nothing hovered, the DW-66 stale-id guard, and
+            the P11 `erdExternal` gate) live in the pure, unit-tested `erdHoverPanelData`
+            (P15) — a real pointer hover is not reachable from `renderToStaticMarkup`. */}
+        {(() => {
+          const panelData = erdHoverPanelData(nodes, hoveredNodeId);
+          return panelData === null ? null : (
+            <Panel position="top-left">
+              <ErdHoverPanel data={panelData} />
+            </Panel>
+          );
+        })()}
         <Panel position="bottom-right">
           <ErdToolbar onViewportCommand={handleToolbarCommand} />
         </Panel>

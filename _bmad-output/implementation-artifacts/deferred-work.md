@@ -366,7 +366,8 @@ origin: migrated from legacy ledger (code review of spec-4-1-render-erd.md), 202
 location: `schemaToGraph` (ERD graph builder)
 reason: When a MySQL connection names a database, columns are scoped to that schema but a FK may reference a table in another database; `schemaToGraph` then drops the edge as an "absent table" with no user indication a real relationship was omitted. Defensible for v1 but an explicit product decision (dangling-edge affordance vs. note vs. silent) is preferable.
 decision: [2026-07-21, user] Draw the cross-database MySQL FK as a DISTINCT edge (dashed / labeled with the target database) to an external node or annotation, marked as cross-database — do not silently drop it.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-erd-visual-fidelity
 
 ### DW-45: `connectionManager.getSchema()` memoizes the schema at connect and never re-introspects, so chat context (and the "N tables" badge) goes stale after DDL runs (create/drop table)
 
@@ -562,7 +563,8 @@ location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` marker ternary `c.is
 severity: low
 reason: Join/junction tables commonly have columns that are simultaneously PK and FK (an identifying relationship). The single 13px badge slot renders PK-first, so such a column shows the ink key and no blue link — the column-level FK cue is lost. It is NOT invisible overall: `schemaToGraph` still emits the FK edge, so the relationship is drawn on the canvas and lights up on hover; only the per-column glyph is missing. The prototype's card is a one-badge-per-row layout, so surfacing both would need a combined/dual-badge design decision (out of scope for a presentation-only port). Cosmetic; deferred for a badge-layout decision.
 decision: [2026-07-21, user] Show BOTH markers on an ERD column that is PK and FK — the PK key badge PLUS a distinct FK link marker (blue-link glyph) — so a composite PK+FK column reads as both.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-erd-visual-fidelity
 
 ### DW-66: `hoveredNodeId` is never reconciled against the live node set — if the hovered table is removed (and its `tableId` later reused) while the pointer is over it and `onNodeMouseLeave` never fires, a stale id can spuriously highlight a different table's edges
 
@@ -582,7 +584,8 @@ location: `src/ui/workspace/ErdTabView.tsx` (`ErdTableNode` type label; `ErdLege
 severity: low
 reason: The tiny muted type labels and legend faithfully reproduce `design-artifacts/erd.html` (the visual source of truth), but sub-11px muted foreground on a tonal `--card`/`--background` surface is a real WCAG legibility risk, and nothing in the tests checks contrast in light or dark. This is an epic-wide neutral-redesign concern (cf. DW-58, the Epic 7 light-theme/contrast work), not specific to the ERD — folded here so the ERD's small-text surfaces are covered when the epic does a contrast/a11y pass.
 decision: [2026-07-21, user] Adjust the ERD muted type-label + legend text to a token/size that verifies >=AA contrast in BOTH dark and light themes (minimal change to --t-text/size), checked with a measurement.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-erd-visual-fidelity
 
 ### DW-68: `SchemaTableInfo` carries no table-vs-view discriminator, so the schema tree cannot draw the mockup's distinct view icon — every relation renders with the table icon
 
@@ -1036,4 +1039,44 @@ severity: low
 found_by: Blind Hunter follow-up review pass on 4-2
 summary: Story 4.2's entire interaction — rearranging nodes so the arrangement persists — is reachable only by mouse drag. React Flow's built-in arrow-key node move is gated on `node.selected`, and the canvas sets `elementsSelectable={false}` (inherited from 4.1's view-only posture), so a node can never be selected and arrow keys only pan the canvas. Independently, that keyboard path dispatches `moveSelectedNodes` and never fires `onNodeDragStop`, which is the story's only position-capture surface — so enabling selection alone would let a keyboard user move a node that is then never saved.
 evidence: Verified by reading the `<ReactFlow>` props against React Flow's key handler (`isDraggable && node.selected && arrowKeyDiffs[event.key]`) and its `moveSelectedNodes` dispatch, which has no `onNodeDragStop` call site. NOT caused by 4.2: `elementsSelectable={false}` is Story 4.1's view-only decision, and the spec's Boundaries reaffirm "no selection". Deferred rather than patched because a real fix is a two-part product decision, not a flag flip: enabling selection changes the ERD's visual and interaction contract (selection styling, its interaction with the 9.5 hover panel and the 7.4 dim overlay), and capturing keyboard moves needs a second capture seam alongside `onNodeDragStop` (`onNodesChange` position events, debounced) that the story deliberately avoided. Belongs with a deliberate accessibility pass over the canvas surfaces.
+status: open
+
+### DW-97: Light-theme `--t-bool` renders the data grid's type label at 3.49:1 — the exact sub-AA amber DW-67 just darkened `--t-enum` away from, left behind on a neighbouring surface
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `src/ui/styles/globals.css` (light block `--t-bool: #b3781f`); consumer `src/ui/data/DataGrid.tsx:29` via `typeMeta`, rendered as text at `:402` (`style={{ color: meta.color, fontSize: "var(--label-size)" }}`)
+severity: medium
+found_by: Blind Hunter follow-up review pass on dw-erd-visual-fidelity
+summary: DW-67 measured the ERD's small-label tokens and darkened the two that failed in light (`--t-enum` 3.49 -> 5.14, `--t-int` 4.49 -> 5.04). `--t-bool` held the same `#b3781f` that `--t-enum` failed on; the fix diverged the two tokens rather than repairing the shared value, so `--t-bool` keeps the exact ratio judged a failure one line above it in the same file. It is real small text, not a swatch: the data grid's column-header type tag renders it as `color` at `--label-size`, the same size class as the ERD labels the new lock protects.
+evidence: Re-measured with the change's own `contrastRatio` helper against the light block: `--t-bool` `#b3781f` = 3.49 on `--card`, 3.25 on `--muted`, 3.73 on `--background`, against WCAG 1.4.3's 4.5:1 for normal text. Dark passes (7.97 on `--card`). Scope check on the sibling token: `--t-json` (`#1a9b8c`, light 3.21 / 2.99 / 3.44) is NOT a text case — its only consumer is `SchemaTree.tsx:179` via `typeDotClass`, painted as a 6px `bg-t-json` dot at `:387`, so it falls under WCAG 1.4.11's 3:1 for graphical objects and clears it on `--card` and `--background`, missing only on `--muted` (2.99). Worth folding into the same pass but at lower stakes than the text failure. NOT caused by this story: the intent contract's Never explicitly forbade touching `--t-bool` and `--t-json`, and `globals.css:151-152` records the deliberate decision to leave `--t-bool` behind. Deferred for that reason — but the cost is now one token edit plus one entry in `contrast.test.ts`'s TOKENS list, since `contrast.ts` and the CSS-parsing harness already exist. Whoever fixes it should decide whether the data grid gets its own surface list (it renders on `--card`/`--background`, not `--muted`) and whether the schema tree's dots get a separate 3:1 graphical-object lock rather than being folded into a text-contrast test.
+status: open
+
+### DW-98: The ERD dims unconnected nodes to `opacity: 0.4` on hover, dropping every label to ~1.6-2.1:1 — far below the AA the new lock asserts for the same tokens
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `src/ui/workspace/ErdTabView.tsx` (`displayNodes`, `style: { ...n.style, opacity: connected.has(n.id) ? 1 : 0.4 }`); measured against `src/ui/styles/globals.css`
+severity: medium
+found_by: Blind Hunter and Edge Case Hunter, independently, on the dw-erd-visual-fidelity follow-up review
+summary: Story 7.4's hover emphasis dims every node NOT connected to the hovered one to 40% opacity. That alpha composites the type labels, column names and header text down to roughly 1.6-2.1:1 against the canvas — well under WCAG 1.4.3's 4.5:1 — for as long as the pointer rests on any node, which on a wide ERD is most of the nodes most of the time. DW-67's new lock measures token values only and is blind to the alpha the component applies, so "every ERD small-label pair reaches AA" is true of the at-rest canvas and false of the hover state the same file ships.
+evidence: Both reviewers computed it independently and agree within rounding: light `--t-time` `#7d54cf` at alpha 0.4 over `--card` composites to ~1.6-1.7:1 (4.85:1 at full strength); light `--muted-foreground` ~1.78:1; dark `--t-time` ~2.14:1; dark `--muted-foreground` ~2.01:1. NOT caused by this story: `displayNodes` and the 0.4 value are Story 7.4's dim overlay, untouched by the change; the change only made the gap visible by asserting conformance next to it. Deferred rather than patched because the fix is a design decision, not a repair: raising the dim floor (0.4 -> ~0.65) weakens the emphasis the overlay exists to create, and the alternative — dimming only the node CHROME while leaving text at full opacity — means restructuring how the overlay is applied (it currently sets one `style.opacity` on the whole node). A third option is to accept it as a transient pointer-driven state and say so explicitly. `contrast.test.ts`'s SURFACES comment now records the scope limit and points here.
+status: open
+
+### DW-99: No CI workflow runs the test suite — 1906 tests, including the new WCAG AA conformance lock, execute only on developer machines
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `.github/workflows/` (`release.yml`, `publish.yml`, `keyring-spike.yml`); `package.json:24` defines the `test` script nothing calls
+severity: medium
+found_by: Blind Hunter follow-up review pass on dw-erd-visual-fidelity
+summary: The repo has three workflows and none of them runs `bun test`. `release.yml` (including its `windows-latest` leg) does `bun install` -> `bun run build` -> `bun build --compile` -> a `--version` smoke check; `publish.yml` publishes; `keyring-spike.yml` is the only workflow invoking `bun test`, and only for the single file `src/core/keychain.test.ts`. So every regression guard in the repo — the ERD derivation matrix, the layout-persistence contract, the RPC and driver suites, and now the DW-67 AA lock whose whole purpose is to be an enforcement mechanism rather than a comment — is a local convention, not a gate. A contributor can merge a change that reintroduces a sub-AA token, or any other regression, with a green checks column.
+evidence: `grep -rn "bun test" .github/workflows/` returns exactly two hits, both `keyring-spike.yml:71` and `:108`, both `bun test src/core/keychain.test.ts`. Confirmed `release.yml`'s job steps carry no test invocation. Strictly pre-existing and far outside this story's scope (an ERD/contrast change), but it materially weakens the acceptance criterion this story was written to satisfy, so it is recorded rather than left implicit. The fix is small — a `bun install && bunx tsc --noEmit && bun test` job on `ubuntu-latest` for pushes and PRs — but choosing the trigger matrix, whether the Windows leg also runs it, and how to handle the suites that touch the keychain or spawn servers is a deliberate decision.
+status: open
+
+### DW-100: `src/core/driver.test.ts` reads a source file via `new URL(import.meta.url).pathname`, which yields an unopenable `/C:/…` path on native Windows
+origin: follow-up review of dw-erd-visual-fidelity, 2026-07-27
+source_spec: `spec-dw-erd-visual-fidelity.md`
+location: `src/core/driver.test.ts:829-839`
+severity: low
+found_by: Blind Hunter follow-up review pass on dw-erd-visual-fidelity
+summary: The test resolves a sibling source file by taking `.pathname` off `import.meta.url` and handing the string to `Bun.file`. On native Windows that yields `/C:/Users/…`, a path `Bun.file` cannot open, so the test fails for reasons unrelated to what it asserts. `Bun.file` accepts a `URL` object directly, which makes the conversion unnecessary.
+evidence: The new `src/ui/styles/contrast.test.ts` had the identical pattern and was corrected during this story's own review (patch P8) by passing `new URL("./globals.css", import.meta.url)` straight to `Bun.file`; the precedent it was copied from was left untouched because it is outside the story's files. Pre-existing, and currently latent: per DW-99 no CI leg runs this suite at all, so the failure surfaces only for a contributor developing on native Windows (WSL, macOS and Linux are unaffected). One-line fix, mechanically identical to the one already applied.
 status: open

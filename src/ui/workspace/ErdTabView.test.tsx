@@ -14,8 +14,55 @@ import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { SchemaTableInfo } from "../../shared/contract.ts";
 import type { ErdNodeData } from "../erd/erd-graph.ts";
-import { tableId } from "../erd/erd-graph.ts";
-import { ErdHoverPanel, ErdTabView } from "./ErdTabView.tsx";
+import { schemaToGraph, tableId } from "../erd/erd-graph.ts";
+import {
+  erdEdgeOverlay,
+  erdEdgeStyle,
+  erdHoverPanelData,
+  ErdHoverPanel,
+  ErdTabView,
+} from "./ErdTabView.tsx";
+
+// DW-44: a schema whose FK points outside the introspected set (`ghost` is never
+// listed) — used by both the external-node render test and (implicitly, via
+// `ErdTabView`) proves the dashed edge never crashes the surface.
+const EXTERNAL_SAMPLE: SchemaTableInfo[] = [
+  {
+    schema: "public",
+    name: "orders",
+    columns: [
+      { name: "id", dataType: "integer", nullable: false },
+      { name: "ghost_id", dataType: "integer", nullable: false },
+    ],
+    primaryKey: ["id"],
+    indexes: [],
+    foreignKeys: [
+      { columns: ["ghost_id"], referencedSchema: "public", referencedTable: "ghost", referencedColumns: ["id"] },
+    ],
+  },
+];
+
+// DW-65: a join/junction table shape with a plain PK, a plain (non-key) column, a
+// plain FK, and a PK∩FK identifying-relationship column — the case the compact node
+// row's old mutually-exclusive badge ternary lost the FK cue on.
+const JOIN_SAMPLE: SchemaTableInfo[] = [
+  {
+    schema: "public",
+    name: "order_items",
+    columns: [
+      { name: "id", dataType: "integer", nullable: false },
+      { name: "note", dataType: "text", nullable: true },
+      { name: "product_id", dataType: "integer", nullable: false },
+      { name: "order_id", dataType: "bigint", nullable: false },
+    ],
+    primaryKey: ["id", "order_id"],
+    indexes: [],
+    foreignKeys: [
+      { columns: ["product_id"], referencedSchema: "public", referencedTable: "products", referencedColumns: ["id"] },
+      { columns: ["order_id"], referencedSchema: "public", referencedTable: "orders", referencedColumns: ["id"] },
+    ],
+  },
+];
 
 const SAMPLE: SchemaTableInfo[] = [
   {
@@ -156,5 +203,193 @@ describe("ErdHoverPanel — hovered-table column detail (Story 9.5)", () => {
     // `id` (PK) + `order_id` (PK∩FK) → 2 PK badges; `product_id` (FK) + `order_id` → 2 FK.
     expect(pkBadges).toBe(2);
     expect(fkBadges).toBe(2);
+  });
+
+  test("a column-less external node renders NO column rows (no crash on empty data.columns)", () => {
+    // The DW-44 shape: an `erdExternal` node's data carries no columns at all.
+    const EXTERNAL_DATA: ErdNodeData = {
+      schema: "public",
+      name: "ghost",
+      label: "public.ghost",
+      columns: [],
+    };
+    const out = renderToStaticMarkup(<ErdHoverPanel data={EXTERNAL_DATA} />);
+    expect(out).toContain("public.ghost");
+    // No column row was rendered, so neither badge (nor any column name) appears.
+    expect(out).not.toContain('aria-label="primary key"');
+    expect(out).not.toContain('aria-label="foreign key"');
+  });
+});
+
+describe("ErdTableNode row — dual PK+FK badges (DW-65) via ErdTabView", () => {
+  test("a PK∩FK column's row shows BOTH the PK and FK badges, other rows stay aligned", () => {
+    const out = renderToStaticMarkup(<ErdTabView tables={JOIN_SAMPLE} />);
+    const pkBadges = out.split('aria-label="primary key"').length - 1;
+    const fkBadges = out.split('aria-label="foreign key"').length - 1;
+    // `id` (PK only) + `order_id` (PK∩FK) → 2 PK badges.
+    // `product_id` (FK only) + `order_id` (PK∩FK) → 2 FK badges.
+    expect(pkBadges).toBe(2);
+    expect(fkBadges).toBe(2);
+    // Every column name still renders, proving the fixed badge slot didn't drop a row.
+    expect(out).toContain("note");
+    expect(out).toContain("product_id");
+    expect(out).toContain("order_id");
+  });
+});
+
+describe("ErdExternalNode — DW-44 out-of-scope FK target", () => {
+  test("an FK to an absent table renders a dashed external node naming the target verbatim", () => {
+    const out = renderToStaticMarkup(<ErdTabView tables={EXTERNAL_SAMPLE} />);
+    // The real table still renders normally.
+    expect(out).toContain("public.orders");
+    // The external node renders the verbatim target namespace + table.
+    expect(out).toContain("public.ghost");
+    // P1: a VISIBLE caption marks the card as an out-of-scope reference — legible to a
+    // sighted user who cannot resolve the dashed border, not just to a screen reader
+    // (the old hand-rolled `aria-label` this replaces was invisible text-only).
+    expect(out).toContain("external reference");
+  });
+
+  // P2: the old assertion here (`expect(out).toContain("react-flow__edge")`) was
+  // vacuously true — React Flow renders `<div class="react-flow__edges">`
+  // UNCONDITIONALLY, and "react-flow__edge" is a substring of that wrapper's own class,
+  // so the check passed even for a table set with ZERO foreign keys. The relationship-
+  // never-dropped guarantee is instead verified at the derivation + style layer, which
+  // CAN fail: the edge exists, targets the external node, and is flagged for the dashed
+  // treatment.
+  // SCOPE NOTE: `renderToStaticMarkup` never runs layout and never paints an edge
+  // `<path>` (no DOM measurement), so edge *painting* is verified here — at the
+  // derivation/style layer — rather than by grepping rendered markup.
+  test("the external edge is never dropped and is flagged for the dashed stroke treatment", () => {
+    const graph = schemaToGraph(EXTERNAL_SAMPLE);
+    expect(graph.edges.length).toBe(1);
+    expect(graph.edges[0]?.data.isExternal).toBe(true);
+    expect(
+      erdEdgeStyle({ hot: false, isExternal: graph.edges[0]!.data.isExternal }).strokeDasharray,
+    ).toBe("6 4");
+  });
+});
+
+describe("erdEdgeStyle — pure edge stroke treatment (P3)", () => {
+  test("cold, in-scope edge: --edge / 1.5, no dasharray", () => {
+    expect(erdEdgeStyle({ hot: false, isExternal: false })).toEqual({
+      stroke: "var(--edge)",
+      strokeWidth: 1.5,
+    });
+  });
+
+  test("hot, in-scope edge: --edge-hot / 2, no dasharray", () => {
+    expect(erdEdgeStyle({ hot: true, isExternal: false })).toEqual({
+      stroke: "var(--edge-hot)",
+      strokeWidth: 2,
+    });
+  });
+
+  test("cold, external edge: --edge / 1.5, dasharray present", () => {
+    expect(erdEdgeStyle({ hot: false, isExternal: true })).toEqual({
+      stroke: "var(--edge)",
+      strokeWidth: 1.5,
+      strokeDasharray: "6 4",
+    });
+  });
+
+  test("hot, external edge: --edge-hot / 2, dasharray present", () => {
+    expect(erdEdgeStyle({ hot: true, isExternal: true })).toEqual({
+      stroke: "var(--edge-hot)",
+      strokeWidth: 2,
+      strokeDasharray: "6 4",
+    });
+  });
+});
+
+// P15: `erdEdgeStyle` alone left the seam that MATTERS untested — the wiring that feeds
+// it `e.data.isExternal` and computes `hot`. Replacing that argument with a literal
+// `false` kept the whole suite green, so the dashed treatment's only real evidence was
+// still a source read. These exercise the mapping itself.
+describe("erdEdgeOverlay — the hover/dashed wiring over the derived edges (P15)", () => {
+  const ORDERS = tableId("public", "orders");
+  const GHOST = tableId("public", "ghost");
+
+  test("nothing hovered: every edge is cold, and the external one is still dashed", () => {
+    const graph = schemaToGraph(EXTERNAL_SAMPLE);
+    const [edge] = erdEdgeOverlay(graph.edges, null);
+    expect(edge?.className).toBe("erd-edge");
+    expect(edge?.style).toEqual({
+      stroke: "var(--edge)",
+      strokeWidth: 1.5,
+      strokeDasharray: "6 4",
+    });
+  });
+
+  test("hovering the SOURCE table heats its edge and keeps the dash (both flags wired)", () => {
+    const graph = schemaToGraph(EXTERNAL_SAMPLE);
+    const [edge] = erdEdgeOverlay(graph.edges, ORDERS);
+    expect(edge?.className).toBe("erd-edge-hot");
+    expect(edge?.style).toEqual({
+      stroke: "var(--edge-hot)",
+      strokeWidth: 2,
+      strokeDasharray: "6 4",
+    });
+  });
+
+  test("hovering the external TARGET also heats the edge (target side of the comparison)", () => {
+    const graph = schemaToGraph(EXTERNAL_SAMPLE);
+    expect(erdEdgeOverlay(graph.edges, GHOST)[0]?.className).toBe("erd-edge-hot");
+  });
+
+  // `SAMPLE` is the fully in-scope pair (orders -> users, both introspected), so nothing
+  // in it may come out dashed — the assertion a hardcoded `isExternal: true` would fail.
+  test("an in-scope edge never gets a dasharray — the isExternal argument is really read", () => {
+    const graph = schemaToGraph(SAMPLE);
+    const overlaid = erdEdgeOverlay(graph.edges, null);
+    expect(overlaid.length).toBeGreaterThan(0);
+    expect(overlaid.every((e) => e.style.strokeDasharray === undefined)).toBe(true);
+  });
+
+  test("ids, source/target, data and ORDER pass through untouched (a 1:1 overlay)", () => {
+    const graph = schemaToGraph(JOIN_SAMPLE);
+    const overlaid = erdEdgeOverlay(graph.edges, ORDERS);
+    expect(overlaid.map((e) => e.id)).toEqual(graph.edges.map((e) => e.id));
+    expect(overlaid.map((e) => e.target)).toEqual(graph.edges.map((e) => e.target));
+    expect(overlaid.map((e) => e.data)).toEqual(graph.edges.map((e) => e.data));
+  });
+});
+
+// P15: the panel-suppression rules are new production behaviour reachable only through a
+// real pointer hover, which `renderToStaticMarkup` cannot produce — so before this they
+// had no coverage at all, while the only related test drove `ErdHoverPanel` directly with
+// a shape the canvas can no longer hand it.
+describe("erdHoverPanelData — which hovered node gets a panel (P15)", () => {
+  const ORDERS_DATA: ErdNodeData = {
+    schema: "public",
+    name: "orders",
+    label: "public.orders",
+    columns: [{ name: "id", dataType: "integer", isPrimaryKey: true, isForeignKey: false }],
+  };
+  const GHOST_DATA: ErdNodeData = {
+    schema: "public",
+    name: "ghost",
+    label: "public.ghost",
+    columns: [],
+  };
+  const NODES = [
+    { id: tableId("public", "orders"), type: "erdTable", data: ORDERS_DATA },
+    { id: tableId("public", "ghost"), type: "erdExternal", data: GHOST_DATA },
+  ];
+
+  test("nothing hovered: no panel", () => {
+    expect(erdHoverPanelData(NODES, null)).toBeNull();
+  });
+
+  test("a hovered real table: its data, for the panel to render", () => {
+    expect(erdHoverPanelData(NODES, tableId("public", "orders"))).toEqual(ORDERS_DATA);
+  });
+
+  test("a hovered DW-44 external node: no panel at all (not an empty one)", () => {
+    expect(erdHoverPanelData(NODES, tableId("public", "ghost"))).toBeNull();
+  });
+
+  test("a hovered id no longer among the nodes (DW-66): no stale panel", () => {
+    expect(erdHoverPanelData(NODES, tableId("public", "dropped"))).toBeNull();
   });
 });
