@@ -483,7 +483,8 @@ source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
 location: `src/ui/workspace/TabContent.tsx` (Add-Row button → `setInsertOpen(true)`), `src/ui/data/DataGrid.tsx` (`InsertDraftRow` renders at the end of `<tbody>` inside the scroll container)
 severity: low
 reason: The spec required Add-Row to "open/reuse the existing in-grid insert-draft flow" and it does — the draft expands at the bottom of `<tbody>`. But the toolbar button lives at the top of the panel and the draft can be off-screen in a scrolled/full page, so the user gets no visible feedback that the click registered. Fixing it needs a ref + `scrollIntoView` (or a focus handoff) added to `DataGrid`, extra surface beyond the presentation-only reskin. Real but low-consequence UX polish — deferred for focused attention.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-insert-draft-ux
 
 ### DW-57: The result-bar insert draft (`insertOpen`) is not reset on page navigation, so a draft opened (and partially typed) on one page stays open with stale values after Prev/Next loads a different page
 
@@ -492,7 +493,8 @@ source_spec: `spec-7-2-redesign-tables-grid-neutral.md`
 location: `src/ui/workspace/TabContent.tsx` (`insertOpen` state; `InsertDraftRow` value state in `src/ui/data/DataGrid.tsx` — the grid is keyed per table, not per page, so its local draft values persist across page changes)
 severity: low
 reason: `insertOpen` (lifted so the toolbar Add-Row can open the same draft) is only cleared on insert success (`InsertDraftRow.reset()`); `setPage`/prev/next never reset it, and the grid is remounted per bound table (not per page) so `InsertDraftRow`'s local `values` persist too. Paging with a half-filled draft open leaves it open over the newly loaded page with the prior page's typed values. A safe fix is a small `useEffect(() => setInsertOpen(false), [page])` plus a draft-values reset, but it was left out of the presentation pass to avoid adding reset logic near the fetch effect the spec froze. Low-consequence UX edge — deferred.
-status: open
+status: done 2026-07-27
+resolution: resolved by sweep bundle dw-dw-insert-draft-ux
 
 ### DW-58: The redesigned Confirm button paints white text on the new `--err` fill (`#ef6a63`), a ~3:1 contrast ratio that falls below WCAG AA (4.5:1) for its 12.5px semibold label
 

@@ -16,6 +16,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { FrozenCell, FrozenColumn, FrozenData, FrozenRow } from "../../shared/contract.ts";
+import { revealInsertDraft, shouldRevealInsertDraft } from "./insert-draft-ux.ts";
 import type { CellEdit } from "./row-mutations.ts";
 
 /** Map a neutral column type to its DESIGN.md `t-*` color var + a short SQL-ish label. */
@@ -210,9 +211,37 @@ function InsertDraftRow({
   // clicks can both pass it and fire two inserts (a duplicate row). A ref flips
   // instantly, before any await, so only one insert is ever in flight per draft.
   const firing = useRef(false);
+  // The draft is the last child of `<tbody>` inside the grid's `overflow-auto`
+  // container, so opening it from the result-bar Add-Row can leave it off-screen.
+  // Ref lives on the TRAILING commit/cancel row so the reveal lands the draft's
+  // BOTTOM edge inside the viewport; the inputs row directly above comes with it
+  // whenever the container can fit both rows (it cannot help if it fits neither).
+  const rowRef = useRef<HTMLTableRowElement | null>(null);
+  // Seeded closed, NOT with `open`: this component can mount already-open — the
+  // `rows`/`indexes` toggle unmounts the grid while `insertOpen` stays lifted, and
+  // Add-Row is clickable while the grid is absent (loading / load error). Seeding
+  // with `open` would classify that mount as "already open" and skip the reveal,
+  // which is the exact inert-click symptom DW-56 is about.
+  const prevOpenRef = useRef(false);
 
   // The draft row must span every data-row cell, including the actions column.
   const span = Math.max(1, columns.length + (actionsCol ? 1 : 0));
+
+  useEffect(() => {
+    // Reveal only on the closed→open edge — never on an unrelated re-render, which
+    // would yank the viewport away from wherever the user scrolled to.
+    if (shouldRevealInsertDraft(prevOpenRef.current, open)) revealInsertDraft(rowRef.current);
+    // A parent-driven close (e.g. page navigation) must discard the draft exactly like
+    // Cancel does. Functional updates that bail when already empty: with deps `[open]`
+    // this cannot loop today, but a fresh `{}` would still cost a pointless re-render on
+    // every close, and the bail keeps it safe if the deps ever widen. Never calls
+    // `onOpenChange`: this effect reacts to `open`, it does not drive it.
+    if (!open) {
+      setValues((v) => (Object.keys(v).length === 0 ? v : {}));
+      setNulls((n) => (Object.keys(n).length === 0 ? n : {}));
+    }
+    prevOpenRef.current = open;
+  }, [open]);
 
   const reset = (): void => {
     setValues({});
@@ -287,7 +316,7 @@ function InsertDraftRow({
         })}
         {actionsCol ? <td className="px-3 py-1" aria-hidden /> : null}
       </tr>
-      <tr style={{ borderBottom: "1px solid var(--border)" }}>
+      <tr ref={rowRef} style={{ borderBottom: "1px solid var(--border)" }}>
         <td colSpan={span} className="px-3 py-1.5">
           <div className="flex items-center gap-2">
             <button
