@@ -54,6 +54,22 @@ const DESCRIPTION = "Lightweight, local-first database manager (Postgres + MySQL
  */
 const LICENSE_ID = "MIT";
 
+/**
+ * Repository URL stamped into every generated manifest — REQUIRED, not cosmetic.
+ * `publish.yml` publishes via OIDC, and npm then attaches a sigstore provenance
+ * statement naming the repo the build came from. The registry REJECTS the publish
+ * (422) unless the manifest's own `repository.url` matches that statement, so a
+ * manifest without this field cannot be published from CI at all:
+ *
+ *   422 Unprocessable Entity — Error verifying sigstore provenance bundle:
+ *   package.json: "repository.url" is "", expected to match
+ *   "https://github.com/joajo13/quick-studio" from provenance
+ *
+ * That is exactly how the first v0.1.0 publish died. Kept in lockstep with the
+ * root package.json by `build-npm-packages.test.ts`.
+ */
+const REPOSITORY_URL = "git+https://github.com/joajo13/quick-studio.git";
+
 // The shared platform table now lives in `scripts/platforms.ts` — THE
 // authoritative mapping, consumed by Story 11.2's release matrix and Story
 // 11.3's shim `SUPPORTED` keys. Note the deliberate token mismatch: the npm
@@ -182,6 +198,7 @@ export function buildNpmPackages(options: BuildNpmPackagesOptions): void {
       version,
       description: `${DESCRIPTION} Prebuilt binary for ${row.os}-${row.cpu}.`,
       license: LICENSE_ID,
+      repository: { type: "git", url: REPOSITORY_URL },
       os: [row.os],
       cpu: [row.cpu],
       files: [binaryName, "LICENSE"],
@@ -215,6 +232,7 @@ export function buildNpmPackages(options: BuildNpmPackagesOptions): void {
     version,
     description: DESCRIPTION,
     license: LICENSE_ID,
+    repository: { type: "git", url: REPOSITORY_URL },
     bin: { "quick-studio": shimName },
     files: [shimName, "README.md", "LICENSE"],
     engines: { node: ">=18" },

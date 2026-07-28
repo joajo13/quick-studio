@@ -157,6 +157,18 @@ describe("buildNpmPackages — happy path", () => {
     }
   });
 
+  // Without `repository.url`, npm's OIDC publish fails with a 422: it attaches a
+  // sigstore provenance statement naming the source repo and refuses to publish a
+  // manifest that does not match it. Cosmetic-looking field, hard publish blocker
+  // — the first v0.1.0 attempt died here, after the packages were already built.
+  test("every generated package declares repository.url (required by provenance)", () => {
+    for (const { pkg } of [...EXPECTED, { pkg: "quick-studio" }]) {
+      const m = readManifest(pkg) as { repository?: { type?: string; url?: string } };
+      expect(m.repository?.url).toBeTruthy();
+      expect(m.repository?.url).toContain("github.com/joajo13/quick-studio");
+    }
+  });
+
   test("main package contains the shim and README at its root", () => {
     expect(existsSync(path.join(outDir, "quick-studio", "quick-studio.cjs"))).toBe(true);
     expect(existsSync(path.join(outDir, "quick-studio", "README.md"))).toBe(true);
@@ -253,6 +265,20 @@ describe("the repository's own license declaration", () => {
     // "MIT License" with no terms would satisfy a title-only check.
     expect(text).toContain("Permission is hereby granted, free of charge");
     expect(text).toMatch(/Copyright \(c\) \d{4}/);
+  });
+
+  test("the repository URL the generator stamps matches the one package.json declares", () => {
+    // These two drifting apart is silent until a release: the generated manifests
+    // would name a repo that the provenance statement does not, and npm 422s.
+    const pkg = JSON.parse(readFileSync(path.join(REPO, "package.json"), "utf8")) as {
+      repository?: { url?: string };
+    };
+    expect(pkg.repository?.url).toBeTruthy();
+
+    const source = readFileSync(path.join(REPO, "scripts", "build-npm-packages.ts"), "utf8");
+    const match = source.match(/const REPOSITORY_URL = "([^"]+)"/);
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(pkg.repository!.url);
   });
 
   test("the id the generator stamps matches the one package.json declares", () => {

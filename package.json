@@ -4,6 +4,10 @@
   "type": "module",
   "description": "Lightweight local-first DB manager (Postgres + MySQL) — walking skeleton",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/joajo13/quick-studio.git"
+  },
   "bin": {
     "quick-studio": "bin/quick-studio.cjs"
   },
