@@ -26,7 +26,7 @@ const VERSION = "0.0.1";
 
 // key → { asset, binaryName, os, cpu }
 const EXPECTED = [
-  { pkg: "quick-studio-win32-x64", asset: "quick-studio-windows-x64.exe", binaryName: "quick-studio.exe", os: "win32", cpu: "x64" },
+  { pkg: "quick-studio-windows-x64", asset: "quick-studio-windows-x64.exe", binaryName: "quick-studio.exe", os: "win32", cpu: "x64" },
   { pkg: "quick-studio-linux-x64", asset: "quick-studio-linux-x64", binaryName: "quick-studio", os: "linux", cpu: "x64" },
   { pkg: "quick-studio-linux-arm64", asset: "quick-studio-linux-arm64", binaryName: "quick-studio", os: "linux", cpu: "arm64" },
 ] as const;

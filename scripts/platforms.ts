@@ -34,6 +34,17 @@ export const PKG_PREFIX = "quick-studio-";
 export interface PlatformRow {
   /** `<platform>-<arch>` key, identical to the shim's SUPPORTED keys. */
   readonly key: string;
+  /**
+   * Suffix of the PUBLISHED npm package name (`PKG_PREFIX + pkgKey`). Usually
+   * identical to `key`, and deliberately NOT derived from it: npm's automated
+   * filter flagged `quick-studio-win32-x64` as a security-holding package one
+   * second after it was created (2026-07-22T20:33Z), which permanently blocks
+   * that name, so Windows publishes as `windows-x64` instead. `key` must keep
+   * matching `process.platform`-`process.arch` for the shim's lookup — only the
+   * published name moves. Same reason the asset already says `windows`, not
+   * `win32`.
+   */
+  readonly pkgKey: string;
   /** npm `os` field value (`process.platform`). */
   readonly os: string;
   /** npm `cpu` field value (`process.arch`). */
@@ -47,6 +58,7 @@ export interface PlatformRow {
 export const PLATFORMS: readonly PlatformRow[] = [
   {
     key: "win32-x64",
+    pkgKey: "windows-x64",
     os: "win32",
     cpu: "x64",
     asset: "quick-studio-windows-x64.exe",
@@ -54,6 +66,7 @@ export const PLATFORMS: readonly PlatformRow[] = [
   },
   {
     key: "linux-x64",
+    pkgKey: "linux-x64",
     os: "linux",
     cpu: "x64",
     asset: "quick-studio-linux-x64",
@@ -61,6 +74,7 @@ export const PLATFORMS: readonly PlatformRow[] = [
   },
   {
     key: "linux-arm64",
+    pkgKey: "linux-arm64",
     os: "linux",
     cpu: "arm64",
     asset: "quick-studio-linux-arm64",
@@ -83,7 +97,7 @@ if (import.meta.main) {
     }
   } else if (args.length === 1 && args[0] === "--packages") {
     for (const row of PLATFORMS) {
-      console.log(PKG_PREFIX + row.key);
+      console.log(PKG_PREFIX + row.pkgKey);
     }
   } else if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
     // Asking for help is not an error: usage goes to stdout, exit 0.

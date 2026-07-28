@@ -144,7 +144,7 @@ export function buildNpmPackages(options: BuildNpmPackagesOptions): void {
   const optionalDependencies: Record<string, string> = {};
 
   for (const row of PLATFORMS) {
-    const pkg = PKG_PREFIX + row.key;
+    const pkg = PKG_PREFIX + row.pkgKey;
     const binaryName = binaryNameFor(row.os);
     const pkgDir = path.join(outDir, pkg);
     // Clear a stale package dir from a prior run so leftover files can't be

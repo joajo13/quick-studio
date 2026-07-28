@@ -300,7 +300,11 @@ describe("platform-list drift", () => {
       }
     }
 
-    const expected = Object.fromEntries(PLATFORMS.map((row) => [row.key, PKG_PREFIX + row.key]));
+    // Keyed by `key` (what the shim detects) but VALUED by `pkgKey` (what npm
+    // actually hosts) — they differ for Windows, see scripts/platforms.ts.
+    const expected = Object.fromEntries(
+      PLATFORMS.map((row) => [row.key, PKG_PREFIX + row.pkgKey]),
+    );
     expect(pairs).toEqual(expected);
   });
 

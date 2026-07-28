@@ -25,8 +25,11 @@ const fs = require("node:fs");
 // The later macOS phase edits BOTH files, plus the deliberate tripwires in
 // `scripts/platforms.test.ts` (a no-darwin guard and an exact-asset list) — it
 // is not a one-line change, and that is on purpose.
+// NOTE: the Windows KEY is `win32-x64` (it is `process.platform`-`process.arch`)
+// but its PACKAGE is `quick-studio-windows-x64` — npm permanently blocked the
+// `win32` name as a security-holding package. See `pkgKey` in scripts/platforms.ts.
 const SUPPORTED = {
-  "win32-x64": "quick-studio-win32-x64",
+  "win32-x64": "quick-studio-windows-x64",
   "linux-x64": "quick-studio-linux-x64",
   "linux-arm64": "quick-studio-linux-arm64",
 };

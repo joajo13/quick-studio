@@ -16,6 +16,20 @@ The tradeoff accepted: an unscoped prefix reserves nothing, so somebody could pu
 `quick-studio-darwin-arm64` before the macOS phase gets there. Mitigated by publishing
 placeholders for the darwin names up front (step 3).
 
+**Windows publishes as `quick-studio-windows-x64`, NOT `quick-studio-win32-x64`** (decided
+2026-07-27). The `win32` name is permanently unusable: npm's automated filter turned it into
+a security-holding package (`0.0.1-security`, owner `npm-support`) **one second after it was
+created** — registry timestamps show `created` at 2026-07-22T20:33:21.531Z and the security
+version at 20:33:22.435Z — so the bootstrap publish attempt itself is what burned it. npm
+support was contacted and did not release it.
+
+This is the ONE place where a platform's published package name diverges from its `key`.
+The key stays `win32-x64` because it is `process.platform`-`process.arch` and the shim's
+lookup depends on it; only the published name moves. `scripts/platforms.ts` carries both as
+separate fields (`key`, `pkgKey`) with a tripwire test so nobody "simplifies" the package
+name back to being derived from the key — that regression would surface only at publish
+time, mid-release.
+
 **Platform scope.** Windows and Linux are first-class this epic (`win32-x64`, `linux-x64`,
 `linux-arm64`). **macOS is a later phase** — the keyring spike never validated darwin, and a
 published darwin binary would promise a keychain path nobody has proven. Stories 11.2, 11.3
@@ -40,7 +54,10 @@ package is prepared (scratchpad `npm-placeholder/`); it is a minimal `0.0.1` tha
 project is in development. Publishing it is a public, effectively irreversible act — npm only
 allows unpublishing within 72 hours, and the name stays blocked afterwards either way.
 
-**These bootstrap publishes require 2FA on the npm account.** A first attempt on 2026-07-21
+**These bootstrap publishes require 2FA on the npm account. — 2FA IS NOW ENABLED**
+(security key / passkey on `joajo13`, confirmed 2026-07-27). Historical context below.
+
+A first attempt on 2026-07-21
 as `joajo13` returned `E403: Two-factor authentication or granular access token with bypass
 2fa enabled is required to publish packages`. The bypass-token escape hatch is being retired
 (see step 5), so enabling 2FA is the path — and it is a one-time cost, not an ongoing one:
@@ -62,19 +79,29 @@ anywhere.
 
 ## Before the first real release
 
-**4. Wire the git remote.** `git remote -v` is currently empty, so `.github/workflows/release.yml`
-has never run and the README's `../../releases` links resolve to nothing.
+**4. Wire the git remote. — DONE.** `origin` points at
+`https://github.com/joajo13/quick-studio.git`.
 
 **5. Configure a trusted publisher for each package** at npmjs.com → package → Settings →
 Trusted Publisher. There is **no `NPM_TOKEN` and no token of any kind** — Story 11.4's
 `publish.yml` authenticates via OIDC, which GitHub Actions mints per run.
 
-Register the four packages this epic actually publishes (`quick-studio`,
-`quick-studio-win32-x64`, `quick-studio-linux-x64`, `quick-studio-linux-arm64`), each pointing
-at this repo and the workflow filename `publish.yml`. The darwin placeholders need this only
-when the macOS phase starts. Only one trusted publisher is allowed per package and the
-filename must match exactly, so `publish.yml` must not be renamed afterwards without
-reconfiguring every one of them.
+**Three of the four are DONE (2026-07-27)**: `quick-studio`, `quick-studio-linux-x64` and
+`quick-studio-linux-arm64`, each configured as GitHub Actions / `joajo13` / `quick-studio` /
+`publish.yml`, environment name **empty** (`publish.yml` declares no `environment:`; setting
+one here makes the claim fail to match), allowed action **`npm publish` only** (not `stage
+publish`).
+
+**Still to do: `quick-studio-windows-x64`** — it does not exist on npm yet, and npm cannot
+register a trusted publisher for a package that has never been published. It needs the same
+manual bootstrap publish as the others (`npm publish` from a local placeholder, with 2FA),
+and only then can its trusted publisher be configured.
+
+The darwin placeholders need this only when the macOS phase starts. Only one trusted
+publisher is allowed per package and the filename must match exactly, so `publish.yml` must
+not be renamed afterwards without reconfiguring every one of them.
+
+npm re-prompts for 2FA (security key) on **every single save** — one prompt per package.
 
 Why not a token: npm is retiring the 2FA-bypass granular access tokens that unattended
 publishing depended on — they lose sensitive account operations in **August 2026** and lose

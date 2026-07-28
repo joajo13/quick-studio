@@ -67,6 +67,27 @@ describe("PLATFORMS — table shape", () => {
     expect(winRow!.asset).not.toContain("win32");
   });
 
+  // TRIPWIRE. `quick-studio-win32-x64` is UNPUBLISHABLE: npm's automated filter
+  // turned it into a security-holding package one second after creation and the
+  // name is blocked for good. Deriving the package name from `key` (the obvious
+  // simplification, since the two match everywhere else) silently reintroduces
+  // it and the failure would surface only at publish time, mid-release.
+  test("windows PACKAGE name avoids the npm-blocked `win32` name, while its KEY keeps it", () => {
+    const winRow = PLATFORMS.find((r) => r.os === "win32");
+    expect(winRow).toBeDefined();
+    // The key is `process.platform`-`process.arch` — the shim's lookup depends
+    // on it and it must NOT be renamed along with the package.
+    expect(winRow!.key).toBe("win32-x64");
+    expect(PKG_PREFIX + winRow!.pkgKey).toBe("quick-studio-windows-x64");
+    expect(PKG_PREFIX + winRow!.pkgKey).not.toContain("win32");
+  });
+
+  test("every non-windows row keeps pkgKey identical to key (the rename is windows-only)", () => {
+    for (const row of PLATFORMS.filter((r) => r.os !== "win32")) {
+      expect(row.pkgKey).toBe(row.key);
+    }
+  });
+
   test("cross-compile guard, as data: runner label is well-formed, matches os, and ends in `-arm` iff arm64", () => {
     for (const row of PLATFORMS) {
       // A bare `startsWith`/`includes` pair is satisfied by a typo'd label like
@@ -115,7 +136,7 @@ describe("platforms.ts CLI — --packages", () => {
     expect(code).toBe(0);
     expect(stderr).toBe("");
     const lines = stdout.split("\n").filter((l) => l.length > 0);
-    expect(lines).toEqual(PLATFORMS.map((r) => PKG_PREFIX + r.key));
+    expect(lines).toEqual(PLATFORMS.map((r) => PKG_PREFIX + r.pkgKey));
   });
 });
 
