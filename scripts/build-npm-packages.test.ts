@@ -54,6 +54,10 @@ beforeEach(() => {
   mkdirSync(path.join(repoRoot, "bin"), { recursive: true });
   writeFileSync(path.join(repoRoot, "bin", "quick-studio.cjs"), "#!/usr/bin/env node\n// fake shim\n");
   writeFileSync(path.join(repoRoot, "README.md"), "# quick-studio\nfake readme\n");
+  // Distinct sentinel text, not a copy of the real MIT terms: the assertions below
+  // check that THIS file is what lands in every package, so a generator that
+  // hardcoded license text instead of copying the repo's would still fail.
+  writeFileSync(path.join(repoRoot, "LICENSE"), "FAKE LICENSE TEXT for the packaging test\n");
 });
 
 afterEach(() => {
@@ -83,7 +87,7 @@ describe("buildNpmPackages — happy path", () => {
       expect(m.version).toBe(VERSION);
       expect(m.os).toEqual([pos]);
       expect(m.cpu).toEqual([cpu]);
-      expect(m.files).toEqual([binaryName]);
+      expect(m.files).toEqual([binaryName, "LICENSE"]);
       expect(m).not.toHaveProperty("exports");
       expect(m).not.toHaveProperty("bin");
       expect(m).not.toHaveProperty("dependencies");
@@ -110,7 +114,7 @@ describe("buildNpmPackages — happy path", () => {
     expect(m.name).toBe("quick-studio");
     expect(m.version).toBe(VERSION);
     expect(m.bin["quick-studio"]).toBe("quick-studio.cjs");
-    expect([...m.files].sort()).toEqual(["README.md", "quick-studio.cjs"]);
+    expect([...m.files].sort()).toEqual(["LICENSE", "README.md", "quick-studio.cjs"]);
     expect(m.engines?.node).toBeTruthy();
 
     const optDeps = m.optionalDependencies as Record<string, string>;
@@ -129,6 +133,27 @@ describe("buildNpmPackages — happy path", () => {
     if (m.scripts) {
       expect(m.scripts).not.toHaveProperty("prepare");
       expect(m.scripts).not.toHaveProperty("prepublishOnly");
+    }
+  });
+
+  // A package that declares no license is what npm warns about and what auditing
+  // tools read as all-rights-reserved — the state every package was in before
+  // 0.1.0. Three things have to agree, so all three are pinned here: the SPDX id
+  // in each generated manifest, the LICENSE file actually inside each tarball,
+  // and the root package.json the repo publishes from.
+  test("every generated package declares MIT and ships the repo's LICENSE text verbatim", () => {
+    const sourceLicense = readFileSync(path.join(repoRoot, "LICENSE"), "utf8");
+
+    for (const { pkg } of [...EXPECTED, { pkg: "quick-studio" }]) {
+      const m = readManifest(pkg) as Record<string, unknown>;
+      expect(m.license).toBe("MIT");
+
+      // The SPDX id alone is not enough: the text must be inside the tarball and
+      // byte-identical to the repo's, so anyone vendoring the package gets the
+      // actual terms rather than a claim about them.
+      const shipped = path.join(outDir, pkg, "LICENSE");
+      expect(existsSync(shipped)).toBe(true);
+      expect(readFileSync(shipped, "utf8")).toBe(sourceLicense);
     }
   });
 
@@ -201,6 +226,43 @@ describe("buildNpmPackages — loud failures leave no partial tree", () => {
       buildNpmPackages({ binariesDir, version: VERSION, outDir, repoRoot }),
     ).toThrow(/README\.md/);
     expect(existsSync(outDir)).toBe(false);
+  });
+});
+
+// The tests above run against a temp repoRoot, so they prove the generator COPIES
+// whatever license the repo has — not that the repo has the right one. These
+// assert the real tree, where the three sources must agree: a mismatch (an SPDX
+// id with no file, or a file the manifest never declares) is what makes a
+// published package read as unlicensed.
+describe("the repository's own license declaration", () => {
+  const REPO = path.join(import.meta.dir, "..");
+
+  test("package.json declares MIT and ships LICENSE in `files`", () => {
+    const pkg = JSON.parse(readFileSync(path.join(REPO, "package.json"), "utf8")) as {
+      license?: string;
+      files?: string[];
+    };
+    expect(pkg.license).toBe("MIT");
+    expect(pkg.files).toContain("LICENSE");
+  });
+
+  test("a LICENSE file exists at the repo root and carries the MIT terms", () => {
+    const text = readFileSync(path.join(REPO, "LICENSE"), "utf8");
+    expect(text).toContain("MIT License");
+    // The permission grant itself, not just the title — a stub file titled
+    // "MIT License" with no terms would satisfy a title-only check.
+    expect(text).toContain("Permission is hereby granted, free of charge");
+    expect(text).toMatch(/Copyright \(c\) \d{4}/);
+  });
+
+  test("the id the generator stamps matches the one package.json declares", () => {
+    const pkg = JSON.parse(readFileSync(path.join(REPO, "package.json"), "utf8")) as {
+      license?: string;
+    };
+    const source = readFileSync(path.join(REPO, "scripts", "build-npm-packages.ts"), "utf8");
+    const match = source.match(/const LICENSE_ID = "([^"]+)"/);
+    expect(match).not.toBeNull();
+    expect(match![1]).toBe(pkg.license);
   });
 });
 

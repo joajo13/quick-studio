@@ -45,6 +45,15 @@ import { PKG_PREFIX, PLATFORMS } from "./platforms.ts";
 /** Short description reused across every generated manifest. */
 const DESCRIPTION = "Lightweight, local-first database manager (Postgres + MySQL).";
 
+/**
+ * SPDX id stamped into every generated manifest. Must stay in lockstep with the
+ * root `package.json` `license` field and the `LICENSE` file copied alongside —
+ * `build-npm-packages.test.ts` asserts all three agree, because a package that
+ * declares no license (the state before 0.1.0) makes npm warn and makes auditing
+ * tools read it as all-rights-reserved.
+ */
+const LICENSE_ID = "MIT";
+
 // The shared platform table now lives in `scripts/platforms.ts` — THE
 // authoritative mapping, consumed by Story 11.2's release matrix and Story
 // 11.3's shim `SUPPORTED` keys. Note the deliberate token mismatch: the npm
@@ -122,12 +131,16 @@ export function buildNpmPackages(options: BuildNpmPackagesOptions): void {
 
   const shimSrc = path.join(repoRoot, "bin", "quick-studio.cjs");
   const readmeSrc = path.join(repoRoot, "README.md");
+  // Every published package carries the license TEXT, not just the SPDX id in
+  // the manifest: npm shows the id, but a tarball with no LICENSE file reads as
+  // unlicensed to auditing tools and to anyone who vendors the package.
+  const licenseSrc = path.join(repoRoot, "LICENSE");
   // Validate the copied sources with the same strictness as the binaries above:
   // require a regular file, not merely an existing path. A directory at either
   // path would otherwise slip past `existsSync` and only blow up mid-copy at
   // `copyFileSync` — after platform dirs are written — breaking this function's
   // "validate everything before writing anything / no partial tree" guarantee.
-  for (const src of [shimSrc, readmeSrc]) {
+  for (const src of [shimSrc, readmeSrc, licenseSrc]) {
     let srcStat;
     try {
       srcStat = statSync(src);
@@ -161,14 +174,17 @@ export function buildNpmPackages(options: BuildNpmPackagesOptions): void {
       chmodSync(binaryDest, 0o755);
     }
 
+    copyFileSync(licenseSrc, path.join(pkgDir, "LICENSE"));
+
     // Generated platform manifest: NO exports, NO bin, NO dependencies, NO scripts.
     const platformManifest = {
       name: pkg,
       version,
       description: `${DESCRIPTION} Prebuilt binary for ${row.os}-${row.cpu}.`,
+      license: LICENSE_ID,
       os: [row.os],
       cpu: [row.cpu],
-      files: [binaryName],
+      files: [binaryName, "LICENSE"],
     };
     writeFileSync(
       path.join(pkgDir, "package.json"),
@@ -191,14 +207,16 @@ export function buildNpmPackages(options: BuildNpmPackagesOptions): void {
   const shimName = "quick-studio.cjs";
   copyFileSync(shimSrc, path.join(mainDir, shimName));
   copyFileSync(readmeSrc, path.join(mainDir, "README.md"));
+  copyFileSync(licenseSrc, path.join(mainDir, "LICENSE"));
 
   // Generated main manifest: NO dependencies/devDependencies, NO scripts.
   const mainManifest = {
     name: "quick-studio",
     version,
     description: DESCRIPTION,
+    license: LICENSE_ID,
     bin: { "quick-studio": shimName },
-    files: [shimName, "README.md"],
+    files: [shimName, "README.md", "LICENSE"],
     engines: { node: ">=18" },
     optionalDependencies,
   };

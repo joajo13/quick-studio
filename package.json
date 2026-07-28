@@ -1,15 +1,17 @@
 {
   "name": "quick-studio",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "type": "module",
   "description": "Lightweight local-first DB manager (Postgres + MySQL) — walking skeleton",
+  "license": "MIT",
   "bin": {
     "quick-studio": "bin/quick-studio.cjs"
   },
   "files": [
     "bin",
     "src",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18",

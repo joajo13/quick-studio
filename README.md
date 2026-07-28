@@ -321,3 +321,10 @@ docker compose up -d        # then open http://127.0.0.1:6060
 
 See [docs/docker-development.md](docs/docker-development.md) for how it works, the
 everyday commands, and troubleshooting.
+
+## License
+
+[MIT](LICENSE) © Juan Giupponi
+
+Every published npm package — `quick-studio` and each `quick-studio-<platform>-<arch>`
+binary package — declares `MIT` and ships this license text in its tarball.
