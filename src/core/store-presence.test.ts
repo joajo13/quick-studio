@@ -1,10 +1,15 @@
 /**
- * Covers `classifyStorePresence`'s 3×3 presence matrix — (descriptor, `.enc`)
+ * Covers `classifyStorePresence`'s 4×4 presence matrix — (descriptor, `.enc`)
  * presence for the credential store crossed with the provider-key store — over an
  * INJECTED `existsSync`, so no real disk is touched. Also covers `anyDescriptorPresent`
  * across every combination of the two stores' classifications, since it is the
  * create-vs-unlock discriminator `first-run-setup.ts` depends on and it must not
  * drift from `openPersistent`'s descriptor-then-`.enc` precedence.
+ *
+ * DW-84/DW-86: descriptor-WITHOUT-`.enc` is its own state (`orphaned-descriptor`),
+ * distinct from the openable `passphrase-mode`. It must still count as "a descriptor
+ * is present" for `anyDescriptorPresent`, or a create path would mint a fresh
+ * passphrase over a salt that already exists on disk.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -29,7 +34,7 @@ function existsAmong(paths: readonly string[]): (path: string) => boolean {
   return (path) => set.has(path);
 }
 
-describe("classifyStorePresence — per-store 3-way classification", () => {
+describe("classifyStorePresence — per-store 4-way classification", () => {
   const credMeta = join(DIR, STORE_META_FILE_NAME);
   const credEnc = join(DIR, STORE_FILE_NAME);
   const provMeta = join(DIR, PROVIDER_STORE_META_FILE_NAME);
@@ -39,9 +44,9 @@ describe("classifyStorePresence — per-store 3-way classification", () => {
   const cases: Array<[string, readonly string[], StorePresence, StorePresence]> = [
     ["neither store has anything → both first-run", [], "first-run", "first-run"],
     [
-      "credential descriptor present → passphrase-mode, providerKeys untouched → first-run",
+      "credential descriptor present but .enc missing → orphaned-descriptor (DW-84), providerKeys untouched → first-run",
       [credMeta],
-      "passphrase-mode",
+      "orphaned-descriptor",
       "first-run",
     ],
     [
@@ -57,8 +62,14 @@ describe("classifyStorePresence — per-store 3-way classification", () => {
       "first-run",
     ],
     [
-      "providerKeys descriptor present → passphrase-mode, credential untouched → first-run",
+      "providerKeys descriptor present but .enc missing → orphaned-descriptor (DW-84), credential untouched → first-run",
       [provMeta],
+      "first-run",
+      "orphaned-descriptor",
+    ],
+    [
+      "providerKeys descriptor AND .enc present → passphrase-mode",
+      [provMeta, provEnc],
       "first-run",
       "passphrase-mode",
     ],
@@ -69,21 +80,39 @@ describe("classifyStorePresence — per-store 3-way classification", () => {
       "keychain-mode",
     ],
     [
-      "both stores fully first-run-descriptored (both descriptors present)",
+      "both descriptors present but BOTH .enc files missing → both orphaned-descriptor (nothing is openable)",
       [credMeta, provMeta],
+      "orphaned-descriptor",
+      "orphaned-descriptor",
+    ],
+    [
+      "both stores fully established (both descriptors AND both .enc files) → both passphrase-mode",
+      [credMeta, credEnc, provMeta, provEnc],
       "passphrase-mode",
       "passphrase-mode",
     ],
     [
-      "credential passphrase-mode, providerKeys keychain-mode (mixed modes)",
+      "credential orphaned-descriptor, providerKeys keychain-mode (mixed modes)",
       [credMeta, provEnc],
-      "passphrase-mode",
+      "orphaned-descriptor",
       "keychain-mode",
     ],
     [
-      "credential keychain-mode, providerKeys passphrase-mode (mixed modes, reversed)",
+      "credential keychain-mode, providerKeys orphaned-descriptor (mixed modes, reversed)",
       [credEnc, provMeta],
       "keychain-mode",
+      "orphaned-descriptor",
+    ],
+    [
+      "credential passphrase-mode, providerKeys orphaned-descriptor (half-broken app dir, still recoverable)",
+      [credMeta, credEnc, provMeta],
+      "passphrase-mode",
+      "orphaned-descriptor",
+    ],
+    [
+      "credential orphaned-descriptor, providerKeys passphrase-mode (half-broken, reversed)",
+      [credMeta, provMeta, provEnc],
+      "orphaned-descriptor",
       "passphrase-mode",
     ],
     [
@@ -91,6 +120,23 @@ describe("classifyStorePresence — per-store 3-way classification", () => {
       [credEnc, provEnc],
       "keychain-mode",
       "keychain-mode",
+    ],
+    // DW-84 retargeted `[credMeta, provEnc]` and `[credEnc, provMeta]` to
+    // `orphaned-descriptor`, which removed the ONLY coverage of the
+    // `passphrase-mode` × `keychain-mode` mix. These two restore it — the layouts
+    // where one store is a fully established passphrase store and the other is a
+    // Story 2.2 back-compat keychain store, which is unaffected by DW-84.
+    [
+      "credential passphrase-mode, providerKeys keychain-mode (established + back-compat mix)",
+      [credMeta, credEnc, provEnc],
+      "passphrase-mode",
+      "keychain-mode",
+    ],
+    [
+      "credential keychain-mode, providerKeys passphrase-mode (mix reversed — also the unlockTarget provider-keys arm at presence level)",
+      [credEnc, provMeta, provEnc],
+      "keychain-mode",
+      "passphrase-mode",
     ],
   ];
 
@@ -120,11 +166,20 @@ describe("classifyStorePresence — per-store 3-way classification", () => {
 });
 
 describe("anyDescriptorPresent — the create-vs-unlock discriminator", () => {
-  const modes: readonly StorePresence[] = ["passphrase-mode", "keychain-mode", "first-run"];
+  // All four states, so the 4×4 grid actually exercises `orphaned-descriptor` —
+  // which must count as "a descriptor is present" exactly like `passphrase-mode`.
+  const modes: readonly StorePresence[] = [
+    "passphrase-mode",
+    "orphaned-descriptor",
+    "keychain-mode",
+    "first-run",
+  ];
+  const hasDescriptor = (m: StorePresence): boolean =>
+    m === "passphrase-mode" || m === "orphaned-descriptor";
   const cases: Array<[StorePresenceResult, boolean]> = [];
   for (const credential of modes) {
     for (const providerKeys of modes) {
-      const expected = credential === "passphrase-mode" || providerKeys === "passphrase-mode";
+      const expected = hasDescriptor(credential) || hasDescriptor(providerKeys);
       cases.push([{ credential, providerKeys }, expected]);
     }
   }

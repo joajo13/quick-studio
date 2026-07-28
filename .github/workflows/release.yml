@@ -1,8 +1,10 @@
 name: Release
 
-# Story 11.2 — one job per native runner, gated on the compiled-binary keyring
-# check that already exists from the Story 2.1 spike, then a single collect
-# job emits SHA256SUMS and uploads everything to the release in one place.
+# Story 11.2 — one job per native runner, each gated on a keyring check run
+# against THE BINARY THAT LEG IS ABOUT TO UPLOAD (DW-89: it used to compile and
+# run a separate spike artifact, which attested to the leg's toolchain rather
+# than to the shipped file), then a single collect job emits SHA256SUMS and
+# uploads everything to the release in one place.
 # Never cross-compile: @napi-rs/keyring is a native NAPI addon whose
 # platform-specific binding is resolved at build time, so every binary is
 # compiled on a runner whose OS/arch matches its target.
@@ -39,10 +41,65 @@ jobs:
       matrix: ${{ steps.gen.outputs.matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # Bun is pinned to one value across every leg and every workflow, never
+      # "latest". This job only runs platforms.ts; see the `build` job below for
+      # why the value is load-bearing. Bump them together, never implicitly.
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      # DW-90. Two independent sources of version truth exist. The binaries this
+      # workflow compiles carry `package.json`'s `version` (scripts/build-version.ts
+      # bakes it into src/core/version.generated.ts), while publish.yml derives the
+      # npm version from the git tag (`VERSION="${TAG#v}"`). Nothing asserted they
+      # agree: pushing v1.2.0 with package.json still at 0.0.1 publishes
+      # quick-studio@1.2.0 wrapping a binary whose `--version` prints 0.0.1, and
+      # src/core/update-check.ts then tells every user already on the newest
+      # release, on every boot, that an update is available — permanently.
+      #
+      # It lives HERE, in `platforms`, and not in `build`: `build` fans out to
+      # three native runners and `needs: platforms`, so failing here costs one
+      # short ubuntu job instead of three ~30min compile legs, and no leg can
+      # start from a bad tag. It also sits BEFORE the matrix is emitted, so a
+      # mismatch cannot reach a `build` leg at all. This job already has checkout
+      # + Bun and needs no `bun install` to read package.json.
+      #
+      # Assertion ONLY: package.json remains the sole owner of the version
+      # number. Moving where the version of record lives is a release-process
+      # decision, deliberately not taken here.
+      - name: "Guard: tag version matches package.json"
+        run: |
+          set -euo pipefail
+          # GITHUB_REF_NAME (not `github.ref_name` interpolated into the script)
+          # keeps a tag name out of the shell source itself. `on: push: tags: v*`
+          # means it is always the tag, so `#v` strips exactly the one prefix.
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # `bun -e` rather than `jq`/`node`: this job has no `bun install`, and
+          # bun is the one toolchain already pinned above.
+          PKG_VERSION="$(bun -e 'console.log(require("./package.json").version)')"
+          # A package.json with no `version` prints "undefined"; an unreadable one
+          # can leave this empty. Neither may reach the comparison below, where an
+          # empty TAG_VERSION would make `"" != ""` pass on a malformed tag.
+          if [ -z "$PKG_VERSION" ] || [ "$PKG_VERSION" = "undefined" ]; then
+            echo "release: could not read a version from package.json" >&2
+            exit 1
+          fi
+          if [ -z "$TAG_VERSION" ]; then
+            echo "release: tag $GITHUB_REF_NAME yields an empty version" >&2
+            exit 1
+          fi
+          # Exact string equality, never semver-aware comparison: that keeps
+          # prerelease tags (v1.2.0-beta.1) working unchanged and refuses to
+          # decide that two differently-spelled versions are "close enough".
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "release: tag $GITHUB_REF_NAME implies version $TAG_VERSION but package.json says $PKG_VERSION" >&2
+            echo "release: bump package.json (the sole owner of the version) and re-tag; this workflow never writes it for you" >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME and package.json agree on $PKG_VERSION"
 
       - name: Generate platform matrix
         id: gen
@@ -61,9 +118,11 @@ jobs:
   build:
     needs: platforms
     runs-on: ${{ matrix.runner }}
-    # This job compiles and RUNS a self-compiled keyring binary on three
-    # runners; a Windows Credential Manager call that raises a dialog is the
-    # documented hang mode. Cap it instead of inheriting the 6h default.
+    # This job compiles the shipped binary on three runners and then RUNS it
+    # through a real keychain call (DW-89 — no second artifact is compiled
+    # anywhere in this file); a Windows Credential Manager call that raises a
+    # dialog is the documented hang mode. Cap it instead of inheriting the 6h
+    # default. The gate step below carries its own, much tighter cap.
     timeout-minutes: 30
     strategy:
       # The `release` job's `needs: build` already makes a partial release
@@ -82,10 +141,18 @@ jobs:
         shell: bash
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      # THIS is the pin that ships. `bun build --compile` below embeds the
+      # compiling Bun's runtime into the published binary, so this value — not
+      # the runner image — decides what users actually execute. It matches the
+      # `>=1.3.14` engines floor, the one version the suite is green on. Scope
+      # it honestly: this pins the runtime, not the whole build environment —
+      # `runs-on` is still floating (`ubuntu-latest` / `windows-latest`).
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -99,34 +166,96 @@ jobs:
         run: bun build --compile bin/quick-studio.ts --outfile ${{ matrix.asset }}
 
       - name: Smoke the shipped binary (${{ matrix.key }}) — it must boot on its own runner
-        # The keyring gate below compiles and runs a SECOND artifact
-        # (scripts/keyring-native-check.ts); it never executes the binary we
-        # publish. This step is the only place the published artifact itself
-        # runs. `--version` writes the baked version to stdout and exits 0
-        # before the Core boots — but AFTER the entry's static import chain
-        # (bin/quick-studio.ts -> first-run-setup.ts -> ... ->
-        # src/core/keychain.ts, which imports @napi-rs/keyring at module top)
-        # has been evaluated. So a shipped binary that did not embed its native
-        # binding, or that cannot start on this OS/arch at all, fails HERE, on
-        # the artifact users actually download.
+        # The cheapest possible proof that the published artifact starts at all
+        # on this OS/arch: `--version` writes the baked version to stdout and
+        # exits 0 before the Core boots.
+        #
+        # Do NOT read this as a "no-keychain-involved" smoke — it is not one
+        # today. `bin/quick-studio.ts` statically imports first-run-setup.ts,
+        # whose chain reaches src/core/keychain.ts and its top-level
+        # `import { Entry } from "@napi-rs/keyring"`, so ESM evaluates the native
+        # LOAD before `--version` ever prints. That is exactly why this step is
+        # worth keeping first: on a binary that did not embed its binding it
+        # fails here, in the shortest, most legible step in the job, instead of
+        # inside the gate below.
+        #
+        # What the gate below adds is the part this step structurally cannot
+        # give: an actual native CALL on the shipped artifact. A load forced by
+        # an incidental static import chain evaporates the moment someone makes
+        # that chain lazy (a plausible startup-latency change); the self-check
+        # keeps forcing it regardless — which is the whole point of DW-89.
         run: |
           set -euo pipefail
           ./${{ matrix.asset }} --version
 
-      - name: Keyring gate (${{ matrix.key }}) — native addon must load from the compiled binary
-        # KEYRING_REQUIRE_ROUNDTRIP is deliberately UNSET here: this gate proves
-        # the addon embedded and loaded (the cross-compile failure mode this
-        # story exists to prevent), not that a keychain backend is present. A
-        # typed `unavailable` on a headless runner is a pass; only a failure to
-        # load the addon at all is a failure. Round-trip attestation stays with
-        # keyring-spike.yml, which provisions a backend per OS.
+      - name: Keyring gate (${{ matrix.key }}) — the SHIPPED binary must load the native addon
+        # DW-89. This runs the artifact that is uploaded, not a stand-in. It used
+        # to compile and run a SECOND binary from the spike entrypoint that
+        # keyring-spike.yml still owns, which proved that this LEG'S TOOLCHAIN
+        # could embed @napi-rs/keyring for an entrypoint importing keychain.ts —
+        # equivalent to proving it about the shipped binary only by accident of a
+        # then-static import chain
+        # (bin/quick-studio.ts -> first-run-setup.ts -> ... -> keychain.ts). The
+        # first lazy import anywhere on that chain would have kept this gate green
+        # while every published binary silently degraded its users to the
+        # passphrase fallback. `QS_SELFCHECK=keychain` is a hidden diagnostic
+        # branch in the product entry itself (bin/quick-studio.ts, above
+        # `parseCliArgs`; src/core/self-check.ts only RESOLVES the variable) that
+        # runs the keychain round-trip and exits before the Core boots, so the
+        # gate now forces the addon to load out of the exact file users download.
+        #
+        # KEYRING_REQUIRE_ROUNDTRIP is deliberately pinned EMPTY here rather than
+        # merely left unset: this gate proves the addon embedded and loaded (the
+        # cross-compile failure mode Story 11.2 exists to prevent), not that a
+        # keychain backend is present. A typed `unavailable` on a headless runner
+        # is a pass; only a failure to load the addon at all is a failure.
+        # Round-trip attestation stays with keyring-spike.yml, which provisions a
+        # backend per OS. Story 11.2's Block-If is explicit that gating EVERY
+        # release on a round-trip nobody has observed blocks releases on the
+        # benign case — pinning the variable empty makes that structural instead
+        # of dependent on nobody ever defining it at workflow or job level.
+        env:
+          QS_SELFCHECK: keychain
+          KEYRING_REQUIRE_ROUNDTRIP: ""
+        # Step-level complement to the job's `timeout-minutes: 30` above. If the
+        # QS_SELFCHECK branch is ever renamed or removed, `./asset` with no argv
+        # is a NORMAL BOOT: the Core binds a port and listens forever, burning
+        # the whole job budget on each of three legs before reporting a hang. Two
+        # minutes turns that into a fast, legible failure.
+        timeout-minutes: 2
         run: |
           set -euo pipefail
-          bun build --compile scripts/keyring-native-check.ts --outfile keyring-native-check
-          ./keyring-native-check
+          # Capture instead of running bare so the success LINE can be asserted
+          # too, not just the exit code: an exit-code-only gate would green on a
+          # binary that crashed its way to 0, or on a future branch that exits 0
+          # without ever calling the addon — the exact "accidental green" class
+          # DW-89 exists to kill. With KEYRING_REQUIRE_ROUNDTRIP empty the only
+          # failure return `runKeychainSelfCheck` can reach is the
+          # `invalid-argument` tripwire (unreachable with the module's constant
+          # service and UUID account, so in practice a lenient run either prints
+          # OK or dies), which is precisely why the OK line — and not the exit
+          # code — is the real assertion here.
+          #
+          # Capturing has one trap and this handles it: under `set -e` a failing
+          # `OUT="$(...)"` aborts the step AT THE ASSIGNMENT, so a bare capture
+          # would swallow every `selfcheck:` progress line on exactly the runs
+          # that need them (a native crash writes nothing to stderr either, and
+          # windows/linux-arm64 gate behaviour has never been observed). Run it
+          # as an `if` condition, merge stderr in, and echo the transcript back
+          # before failing.
+          if ! OUT="$(./${{ matrix.asset }} 2>&1)"; then
+            printf '%s\n' "$OUT"
+            echo "release: the keyring gate FAILED on ${{ matrix.key }} — the shipped binary exited non-zero; its output is above" >&2
+            exit 1
+          fi
+          printf '%s\n' "$OUT"
+          if ! printf '%s\n' "$OUT" | grep -q 'selfcheck: OK'; then
+            echo "release: the keyring gate exited 0 but never printed 'selfcheck: OK' — the round-trip did not run on ${{ matrix.key }}" >&2
+            exit 1
+          fi
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: binary-${{ matrix.key }}
           path: ${{ matrix.asset }}
@@ -147,13 +276,15 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
 
       - name: Download all binary artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           pattern: binary-*
@@ -199,7 +330,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Upload release assets
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           files: ${{ steps.sums.outputs.files }}
           fail_on_unmatched_files: true

@@ -24,6 +24,12 @@
  *   --github-matrix   one line of compact JSON (the rows), for `fromJSON(...)`
  *   --assets          one asset filename per line, in table order
  *   --packages        one npm package name per line, in table order
+ *   --asset <key>     the ONE asset filename for that row (exit 1 if unknown)
+ *
+ * `--asset <key>` exists for the DW-80 guard in `publish.yml`, which must name a
+ * single binary (the only one its ubuntu runner can execute) instead of the
+ * whole list. It is a lookup, not a fourth copy of the names: rename a row's
+ * asset here and the guard follows.
  */
 
 /** The ONE package-name prefix constant. Naming can be revisited here alone. */
@@ -84,7 +90,8 @@ export const PLATFORMS: readonly PlatformRow[] = [
 
 // --- CLI wrapper ---
 
-const USAGE = "usage: bun scripts/platforms.ts --github-matrix | --assets | --packages\n";
+const USAGE =
+  "usage: bun scripts/platforms.ts --github-matrix | --assets | --packages | --asset <key>\n";
 
 if (import.meta.main) {
   const args = process.argv.slice(2);
@@ -99,6 +106,21 @@ if (import.meta.main) {
     for (const row of PLATFORMS) {
       console.log(PKG_PREFIX + row.pkgKey);
     }
+  } else if (args.length === 2 && args[0] === "--asset") {
+    // The only two-argument mode, and it is a SEPARATE arm rather than a
+    // relaxation of the `args.length === 1` chain above — those stay exact, so
+    // `--assets extra` and `--assets --github-matrix` remain errors instead of
+    // silently honoring the first flag.
+    const row = PLATFORMS.find((r) => r.key === args[1]);
+    if (!row) {
+      // Nothing on stdout for an unknown key. The caller (publish.yml's DW-80
+      // guard) substitutes this straight into a path, and an empty string there
+      // would degrade to `bin-dl/` — a directory, chmod'd and "run" — so an
+      // unknown key must be a loud exit 1, never an empty success.
+      process.stderr.write(USAGE);
+      process.exit(1);
+    }
+    console.log(row.asset);
   } else if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) {
     // Asking for help is not an error: usage goes to stdout, exit 0.
     process.stdout.write(USAGE);

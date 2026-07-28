@@ -576,6 +576,55 @@ function openPersistent(
       // right now (e.g. tampered params). Do not risk a `corrupt` overwrite.
       return { outcome: "unavailable", detail: derived.detail };
     }
+    // DW-84: a present descriptor means the store was created and its `.enc` was
+    // EAGERLY seeded (see the creation path below). If the `.enc` is gone — removed
+    // out from under the descriptor by a crash between the two writes, a failed
+    // rollback, or a user deleting the file — `loadStoreFromFile` would treat the
+    // missing file as a ready EMPTY store: ANY passphrase would "unlock" it (there
+    // is no ciphertext to authenticate against) and the first `saveConnection` would
+    // silently re-key the store under a possibly typo'd passphrase, permanently
+    // locking out the correct one. Report the unopenable layout instead of re-keying
+    // under an unverified passphrase.
+    //
+    // What this pre-check buys is a VERDICT, not an atomicity guarantee: it narrows
+    // the window rather than closing it. An `rm` landing between this `existsSync`
+    // and the one inside `loadStoreFromFile` still reaches that helper's
+    // missing-file arm and still yields an empty store — a check-then-check race no
+    // synchronous stat can eliminate (only opening the file and holding the handle
+    // could). That residual window is accepted here for the same reason the twin
+    // accepts it: it is orders of magnitude narrower than the persistent
+    // descriptor-without-`.enc` state this guard exists to reject, and both stores
+    // behave identically under it.
+    //
+    // TWO separate ordering constraints hold this guard in place; they are NOT the
+    // same constraint and a maintainer moving it needs both.
+    //
+    // (1) It must stay AFTER the passphrase-provider call above, because the Story
+    // 11.6 decline-probe drives this arm with an always-declining provider and needs
+    // `passphrase-declined` back. Hoisting the guard above that call turns the probe's
+    // answer into `corrupt`, the pre-flight classifies it as "a different problem" and
+    // skips — and the DW-86 short-circuit becomes unreachable (see the spec's "Why the
+    // guard goes after the provider call").
+    //
+    // (2) It must stay AFTER `derivePassphraseKey` for a DIFFERENT and narrower reason:
+    // outcome precedence. An empty/whitespace passphrase is `passphrase-invalid` and a
+    // tampered-params descriptor is `unavailable`; both are decided by the derivation
+    // above and both must keep winning over `corrupt`, because they describe what the
+    // CALLER did wrong, not what is missing on disk. Note this is the ONLY thing the
+    // post-derivation position buys — constraint (1) is already satisfied by the
+    // declined check at the top of this arm, so a hoist to just below it would keep
+    // every decline-probe behaviour byte-identical while silently reclassifying an
+    // empty passphrase as `corrupt`. Both stores pin that precedence by test
+    // (`credential-store.test.ts` / `provider-key-store.test.ts`, "empty passphrase
+    // against an orphaned descriptor").
+    //
+    // The cost of (2) is a full KDF pass before a verdict that a single stat could
+    // have given: real, bounded to this already-failing path, and paid deliberately.
+    // Exact twin of the guard in `provider-key-store.ts:410-416`, same `detail`
+    // string, same placement, same two constraints.
+    if (!existsSync(filePath)) {
+      return { outcome: "corrupt", detail: "descriptor present but store file is missing" };
+    }
     return loadStoreFromFile(mode, derived.key, filePath, release);
   }
 
@@ -681,6 +730,18 @@ function loadStoreFromFile(
   release: () => void,
 ): OpenResult {
   // No file yet → empty store, ready to save.
+  //
+  // DW-84: for the PASSPHRASE branch this arm is no longer a legitimate steady state
+  // — it is reachable only by TOCTOU, because both callers now pre-check
+  // (`openPersistent`'s passphrase arm guards it explicitly, and the keychain arm
+  // only reaches here inside an `existsSync(filePath)` branch). Handing back an
+  // empty store here is safe ONLY under that pre-check: without ciphertext there is
+  // nothing to authenticate a key against, so any key "opens" it and the first save
+  // re-keys the store — exactly the DW-84 hazard. ANY future caller MUST pre-check
+  // that the file exists (or genuinely be on a create path where an empty store is
+  // the intended result) before routing here. Do not "simplify" the callers' guards
+  // away on the grounds that this arm handles the missing file: it handles it by
+  // producing the wrong answer for an established store.
   if (!existsSync(filePath)) {
     return { outcome: "opened", store: buildStore(mode, [], key, filePath, release) };
   }

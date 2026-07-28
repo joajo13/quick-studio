@@ -35,15 +35,17 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
 
       # Trusted Publishing requires Node >= 22.14.0 and npm >= 11.5.1 on a
       # GitHub-hosted runner. Pin them explicitly rather than inheriting.
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22.14.0"
           registry-url: "https://registry.npmjs.org"
@@ -103,6 +105,81 @@ jobs:
           echo "release binaries never fully materialized for $TAG" >&2
           ls -la bin-dl || true
           exit 1
+
+      # DW-80. Every version below is derived from the TAG (`VERSION="${TAG#v}"`),
+      # but the binaries about to be wrapped carry whatever package.json said when
+      # release.yml compiled them. release.yml's DW-90 guard asserts tag ==
+      # package.json at COMPILE time; this is the end-to-end witness that the
+      # artifact actually attached to this release says the same thing — which
+      # also catches a stale asset left on a re-pushed tag, something no guard in
+      # release.yml can see. A mismatch ships quick-studio@1.2.0 around a binary
+      # printing 0.0.1, and src/core/update-check.ts turns that into a permanent
+      # phantom "update available" for every user on the newest release.
+      #
+      # It sits strictly between the download and `Build npm packages` so the
+      # failure lands before dist-npm exists and long before any `npm publish` —
+      # npm versions are immutable and we never unpublish, so "too late" is
+      # literally unrecoverable.
+      #
+      # Only linux-x64 is checked: ubuntu-latest can natively execute nothing
+      # else here, and emulating the .exe / arm64 binary (qemu, wine) is
+      # deliberately out of scope. Be honest about what that samples. Within ONE
+      # release.yml run all three legs bake the same package.json, so one binary
+      # witnesses the whole set. It does NOT cover a per-asset divergence — an
+      # asset re-uploaded by hand onto an existing release — even though that is
+      # exactly the case DW-90 cannot see either. Closing that needs the
+      # SHA256SUMS file already sitting unverified in bin-dl/; tracked separately.
+      #
+      # This is also the ONLY version guard on a release created from the GitHub
+      # UI: publish.yml triggers on `release: published`, while release.yml's
+      # DW-90 guard only ever runs on `push: tags: v*`.
+      - name: "Guard: binary version matches the tag"
+        # The tag arrives as an `env:` value and is never interpolated into the
+        # script source — the same reason release.yml's twin reads
+        # GITHUB_REF_NAME. A git refname may legally contain shell
+        # metacharacters, and this job holds the OIDC Trusted-Publishing
+        # credentials for all four published packages.
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          # An empty VERSION would make the comparison below vacuously "agree"
+          # on a malformed tag; release.yml's twin refuses the same shape.
+          if [ -z "$VERSION" ]; then
+            echo "publish: tag $TAG yields an empty version" >&2
+            exit 1
+          fi
+          # `--asset` exits 1 on an unknown key, and under `set -e` a failing
+          # substitution aborts the step BEFORE any later check can run — so the
+          # explanatory message must live on the failure branch of the assignment
+          # itself, not in a trailing `-z` test that would be unreachable. The
+          # `-z` arm still covers a hypothetical empty-but-successful read, which
+          # would otherwise degrade the path below to `bin-dl/` — a directory.
+          if ! ASSET="$(bun scripts/platforms.ts --asset linux-x64)" || [ -z "$ASSET" ]; then
+            echo "publish: could not resolve the linux-x64 asset from the platform table" >&2
+            echo "publish: scripts/platforms.ts no longer has a linux-x64 row, so this guard has no natively runnable binary" >&2
+            exit 1
+          fi
+          # `gh release download` writes assets 0644, so the binary cannot report
+          # its own version until it is executable. If it still cannot run, the
+          # `$(...)` below fails and `set -e` aborts the step.
+          #
+          # This mutates bin-dl/, which `Build npm packages` consumes next. That
+          # is harmless rather than accidental: build-npm-packages.ts chmods its
+          # own copy to 0755 regardless, so the mode here changes nothing downstream.
+          chmod +x "bin-dl/$ASSET"
+          BIN_VERSION="$("./bin-dl/$ASSET" --version)"
+          # `--version` writes a bare `${VERSION}\n` and exits 0 before the Core
+          # boots (bin/quick-studio.ts), so this is the whole stdout, minus the
+          # newline `$(...)` strips. Exact string equality, never semver-aware:
+          # prerelease tags (v1.2.0-beta.1) compare unchanged.
+          if [ "$BIN_VERSION" != "$VERSION" ]; then
+            echo "publish: release binary $ASSET reports version $BIN_VERSION but tag $TAG implies $VERSION" >&2
+            echo "publish: the release assets were built from a different package.json — re-run release.yml for $TAG rather than publishing this" >&2
+            exit 1
+          fi
+          echo "release binary $ASSET and tag $TAG agree on $VERSION"
 
       - name: Build npm packages
         run: |

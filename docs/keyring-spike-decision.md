@@ -2,10 +2,10 @@
 
 **Status:** open (Linux confirmed locally; Windows and macOS delegated to CI)
 **Library under test:** `@napi-rs/keyring` pinned to exactly `1.3.0`
-**Runtime:** Bun `>=1.2.0`
-**Risk status — AR-20 (NAPI parity under Bun, "almost, not 100%", unproven per-platform):** **partially retired.** Parity is **proven on Linux** (real round-trip + native load from the `bun build --compile` binary, observed locally). **Windows is pending its CI leg** and **macOS is now pending its own CI leg** (the matrix is ubuntu + windows + macos — see the summary table; the `macos-latest` leg provisions an unlocked default keychain so a real round-trip is attempted). AR-20 is **not fully retired** until the Windows and macOS CI legs are green and the throw-path classification is confirmed against the real error shape. As of Story 11.2, `.github/workflows/release.yml` runs a **compiled-binary addon-load gate on every build leg** for the three **shipped** platforms (windows-x64, linux-x64, linux-arm64). Read that gate precisely: it compiles and runs `scripts/keyring-native-check.ts` into a *second, separate* artifact — it never executes the shipped `quick-studio-<os>-<arch>` binary — so it is evidence that the leg's **toolchain** embeds and loads the addon for an entrypoint importing `keychain.ts`, not a direct probe of the published artifact. The two are equivalent only because `bin/quick-studio.ts → first-run-setup.ts → store-presence.ts → credential-store.ts → store-key.ts → keychain.ts` is today a **static** import chain; a future lazy import would keep the gate green while every shipped binary lost its keychain. The gate is also **enforced but not yet observed** — no `v*` tag has been pushed, so `release.yml` has never run — and, unlike the spike's deliberately pinned leg, it runs on an **unpinned** Bun (`oven-sh/setup-bun@v2` with no `bun-version`; deferred as DW-76), so it is not tied to a known Bun version the way the spike's AR-20 attestation is. It proves addon-load, not round-trip; round-trip attestation remains `keyring-spike.yml`'s job. macOS remains unshipped (see below).
+**Runtime:** Bun `1.3.14` (pinned exactly in every CI leg; the repo's `engines.bun` floor is `>=1.3.14`)
+**Risk status — AR-20 (NAPI parity under Bun, "almost, not 100%", unproven per-platform):** **partially retired.** Parity is **proven on Linux** (real round-trip + native load from the `bun build --compile` binary, observed locally). **Windows is pending its CI leg** and **macOS is now pending its own CI leg** (the matrix is ubuntu + windows + macos — see the summary table; the `macos-latest` leg provisions an unlocked default keychain so a real round-trip is attempted). AR-20 is **not fully retired** until the Windows and macOS CI legs are green and the throw-path classification is confirmed against the real error shape. As of Story 11.2, `.github/workflows/release.yml` runs a **compiled-binary addon-load gate on every build leg** for the three **shipped** platforms (windows-x64, linux-x64, linux-arm64). Read that gate precisely: since DW-89 it executes **the published artifact itself** — `./quick-studio-<os>-<arch>` with `QS_SELFCHECK=keychain` — so it is a **direct probe of the binary users download**, not of a second artifact compiled from a different entry point. (It previously compiled and ran `scripts/keyring-native-check.ts` as a stand-in, which was evidence about the leg's *toolchain* and equivalent to the shipped binary only by accident of the then-static `bin/quick-studio.ts → first-run-setup.ts → store-presence.ts → credential-store.ts → store-key.ts → keychain.ts` chain; a lazy import anywhere on it would have kept the gate green while every shipped binary lost its keychain. That accident is no longer load-bearing: the self-check forces the addon to load from the shipped binary regardless of how the rest of the entry imports it.) The gate is still **enforced but not yet observed** — no `v*` tag has been pushed, so `release.yml` has never run — and, like the spike's deliberately pinned leg, it runs on a **pinned** Bun (`bun-version: 1.3.14` — the same version as every other leg; this is what DW-76 asked for), so it is tied to a known Bun version exactly the way the spike's AR-20 attestation is. It proves addon-load, not round-trip; round-trip attestation remains `keyring-spike.yml`'s job (the release legs deliberately pin `KEYRING_REQUIRE_ROUNDTRIP` empty — see the rationale under [QS_SELFCHECK](#qs_selfcheck--the-hidden-release-gate-probe), which is *not* that no shipped platform has a backend). macOS remains unshipped (see below).
 **Smoke test:** `src/core/keychain.test.ts` (run via `bun test`)
-**Compiled-binary check:** `scripts/keyring-native-check.ts` (run via `bun build --compile` — the real distribution path)
+**Compiled-binary check:** one implementation (`src/core/keychain-self-check.ts`), two entrypoints — `scripts/keyring-native-check.ts`, compiled via `bun build --compile` for `keyring-spike.yml`'s round-trip attestation, and the shipped `quick-studio-<os>-<arch>` binary run with `QS_SELFCHECK=keychain` for `release.yml`'s per-release addon-load gate (see [QS_SELFCHECK](#qs_selfcheck--the-hidden-release-gate-probe))
 
 This record fixes the key-management path (keychain vs passphrase-first) that
 Stories 2.2 / 2.3 build on. The wrapper (`src/core/keychain.ts`) treats a missing
@@ -22,7 +22,7 @@ the signal Story 2.3's passphrase fallback keys off; the smoke stays green on it
 |----------|-----------|-----------------------------------------------|-----------|---------------------|
 | Linux (with Secret Service) | PASS — observed locally | YES — observed locally | **GO** | Keychain (Secret Service) |
 | Linux (no Secret Service / headless) | n/a — reports `unavailable` cleanly | YES (addon loads; no backend) | GO for the wrapper; **passphrase-first** for the store | Passphrase fallback (Story 2.3) |
-| Windows | Not run here — round-trip delegated to `keyring-spike.yml`'s CI leg | **Gated per release** — every `windows-x64` binary must pass the compiled-binary addon-load check in `release.yml` before it can be published | **Pending** — the gate is *enforced*, not yet *observed*: no `v*` tag has been pushed, so neither workflow has run. A published windows-x64 binary is proof of addon-load; the absence of one is not evidence either way | Keychain (Credential Manager); shipped as the windows-x64 binary once a release exists |
+| Windows | Not run here — round-trip delegated to `keyring-spike.yml`'s CI leg | **Gated per release** — every `windows-x64` binary must pass the addon-load self-check run against *that very binary* (`QS_SELFCHECK=keychain`) in `release.yml` before it can be published | **Pending** — the gate is *enforced*, not yet *observed*: no `v*` tag has been pushed, so neither workflow has run. A published windows-x64 binary is proof of addon-load; the absence of one is not evidence either way | Keychain (Credential Manager); shipped as the windows-x64 binary once a release exists |
 | macOS | Not run here — delegated to CI | Not run here — delegated to the `macos-latest` leg of `keyring-spike.yml` (see the note below), which runs the compiled-binary check under `KEYRING_REQUIRE_ROUNDTRIP=1`. No `release.yml` gate exists for macOS: no darwin binary is built or published | **Pending CI** (expected GO) | Keychain (macOS Keychain), pending CI confirmation — **no darwin binary is published** |
 
 > **macOS now has its own spike CI leg (DW-11)** — the spike matrix is ubuntu + windows + macos, and it validates the macOS Keychain path in isolation. `bun.lock` *does* carry every `@napi-rs/keyring-darwin-*` artifact (Bun resolves all platform optional dependencies at install time regardless of what ships), but **the product does not ship darwin binaries** — macOS is out of scope for Story 11.2's release matrix (`windows-latest` → windows-x64, `ubuntu-latest` → linux-x64, `ubuntu-24.04-arm` → linux-arm64 only; see `scripts/platforms.ts`). The `macos-latest` leg in `keyring-spike.yml` proves the addon on darwin as a spike, not as a shipped product path. Because macOS CI is not runnable from this Linux/WSL dev host, its go/no-go is recorded as **pending CI** (expected GO) — never a fabricated pass. Do not read the Linux/Windows rows above as covering macOS, and do not read this row as a shipping commitment — macOS remains a later phase.
@@ -44,11 +44,16 @@ keychain" assumption — this box round-trips.
 - Manual probe (`Entry` set/get/delete) → `set` OK, `get` returned the stored
   value, `delete` returned `true`, `get` after delete returned `null`
   (`not-found`).
-- Compiled-binary check: `bun build --compile scripts/keyring-native-check.ts`
-  then running the binary → `setSecret -> stored`, `getSecret -> found
-  (matches=true)`, `deleteSecret -> deleted`. **The native `.node` addon embeds
-  and loads cleanly from the compiled binary** — the real distribution path
-  works on Linux, not only under `bun test`.
+- Compiled-binary check, spike entrypoint: `bun build --compile
+  scripts/keyring-native-check.ts` then running the binary → `setSecret ->
+  stored`, `getSecret -> found (matches=true)`, `deleteSecret -> deleted`. **The
+  native `.node` addon embeds and loads cleanly from the compiled binary** — the
+  real distribution path works on Linux, not only under `bun test`.
+- Compiled-binary check, product entrypoint (DW-89): `bun build --compile
+  bin/quick-studio.ts` then running that binary with `QS_SELFCHECK=keychain` →
+  the same `selfcheck:` sequence and exit 0. Same shared round-trip
+  (`src/core/keychain-self-check.ts`), run out of the artifact that actually
+  ships — this is the exact command shape `release.yml`'s gate uses.
 
 **Decision:** **GO — keychain path.** On a Linux machine with a reachable,
 unlocked Secret Service, the store (Story 2.2) holds its AES-256-GCM key in the
@@ -142,6 +147,51 @@ leg is green, the macOS outcome is recorded here as **pending CI**, not as a pas
 bun install                              # resolves @napi-rs/keyring@1.3.0
 bun x tsc --noEmit                       # type-check
 bun test src/core/keychain.test.ts       # the smoke (green either way)
-bun scripts/keyring-native-check.ts      # native load from source
+bun scripts/keyring-native-check.ts      # native load from source (spike entrypoint)
 bun build --compile scripts/keyring-native-check.ts --outfile ./knc && ./knc
+
+# The release gate's own command shape (DW-89): the SHIPPED binary, probed directly.
+bun run build                            # the UI bundle the entry embeds
+bun build --compile bin/quick-studio.ts --outfile ./qs && QS_SELFCHECK=keychain ./qs
+
+# Same, but demanding a real round-trip — expect exit 1 on a host with no backend.
+KEYRING_REQUIRE_ROUNDTRIP=1 QS_SELFCHECK=keychain ./qs
 ```
+
+## `QS_SELFCHECK` — the hidden release-gate probe
+
+`QS_SELFCHECK=keychain` makes the product binary run the keychain round-trip
+(`src/core/keychain-self-check.ts`) and exit with its result, **before** argument
+parsing, mode resolution, first-run setup, or the Core boot. It exists so
+`.github/workflows/release.yml` can gate each leg on the artifact it is about to
+publish rather than on a second binary compiled from `scripts/keyring-native-check.ts`
+— the DW-89 defect. Unset or empty, it changes nothing; any other value is a fast,
+loud `exit(1)` naming the expected spelling, because a silent fall-through in CI
+would boot the Core on a runner and report a `timeout-minutes` hang instead of a
+typo.
+
+It is **deliberately absent from `--help` and from the README's environment
+table**, and it must stay that way: it mutates the OS keychain (it stores and
+deletes one probe entry under the dedicated `quick-studio-native-check` service)
+and it is a CI-facing diagnostic, not a user knob. `QS_NO_UPDATE_CHECK` is only a
+**partial** precedent — it is hidden from `HELP_TEXT` but **is** documented in
+`README.md`'s environment list, because it is a genuine user knob that merely does
+not earn help-text space. `QS_SELFCHECK` goes one step further, out of **both**,
+and this record is where it is documented instead.
+
+Semantics are exactly those of the spike script, because it is the same function:
+a typed `unavailable` is a **pass** (the addon loaded; the platform has no
+backend), a failure to load the addon at all is a **fail**, and
+`KEYRING_REQUIRE_ROUNDTRIP=1` additionally demands a real
+`store -> found(matches) -> deleted` plus the DW-10 structural `not-found` probe.
+The release legs pin `KEYRING_REQUIRE_ROUNDTRIP` to the **empty string** (pinned
+rather than merely left unset, so no workflow- or job-level definition can turn a
+release leg strict by accident). The reason is a division of labour, **not** an
+absence of backends — that would be false for the shipped Windows binary:
+`windows-latest` carries Credential Manager natively, and `keyring-spike.yml`'s
+Windows leg depends on exactly that to run under `KEYRING_REQUIRE_ROUNDTRIP=1`.
+Round-trip attestation is the spike workflow's job, per-platform and provisioned
+deliberately; the release gate's job is the addon-load proof on the artifact about
+to be published. Gating **every** release on a round-trip that has never been
+observed on a given platform is exactly the "gate that blocks releases on the
+benign case" Story 11.2's Block-If warns about.

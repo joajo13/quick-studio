@@ -282,7 +282,7 @@ with no keychain, it is instead derived from a passphrase you supply.
 
 ## Development
 
-Requires [Bun](https://bun.sh) `>= 1.2.0`.
+Requires [Bun](https://bun.sh) `>= 1.3.14`.
 
 ```sh
 bun install

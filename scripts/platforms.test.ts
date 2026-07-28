@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { PKG_PREFIX, PLATFORMS } from "./platforms.ts";
 
@@ -140,6 +141,100 @@ describe("platforms.ts CLI — --packages", () => {
   });
 });
 
+describe("platforms.ts CLI — --asset <key>", () => {
+  test("every row's key resolves to exactly that row's asset", () => {
+    // Table-driven over PLATFORMS rather than a literal list: this mode exists
+    // so `publish.yml` can name one binary WITHOUT hardcoding its filename, and
+    // a test that hardcoded it would defeat the point. The exact-asset TRIPWIRE
+    // in the table-shape block above is where the literal names are pinned.
+    for (const row of PLATFORMS) {
+      const { code, stdout, stderr } = run("--asset", row.key);
+      expect(code).toBe(0);
+      expect(stderr).toBe("");
+      expect(stdout).toBe(`${row.asset}\n`);
+    }
+  });
+
+  test("the linux-x64 key — the one publish.yml's guard names — resolves", () => {
+    // publish.yml runs on ubuntu-latest and can only EXECUTE the linux-x64
+    // binary, so that key disappearing from the table would turn the DW-80
+    // version assertion into a step that always fails (or, worse, is deleted).
+    // Named explicitly so the workflow's single hardcoded key has a test.
+    const { code, stdout } = run("--asset", "linux-x64");
+    expect(code).toBe(0);
+    expect(stdout).toBe("quick-studio-linux-x64\n");
+  });
+
+  test("an unknown key writes usage to stderr and exits 1 with EMPTY stdout", () => {
+    // `darwin-x64` is the realistic unknown key (no darwin row exists yet — see
+    // the boundary test above). Empty stdout is the load-bearing half: the
+    // guard interpolates this into `bin-dl/$ASSET`, and a stray newline or a
+    // partial write would produce a path that is not obviously wrong.
+    for (const key of ["darwin-x64", "linux-riscv64", ""]) {
+      const { code, stdout, stderr } = run("--asset", key);
+      expect(code).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("usage:");
+    }
+  });
+
+  test("`--asset` with no key writes usage to stderr and exits 1", () => {
+    // One argument, so it falls through the `args.length === 1` chain to the
+    // error arm — a bare `--asset` must never print the first row's asset.
+    const { code, stdout, stderr } = run("--asset");
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toContain("usage:");
+  });
+
+  test("`--asset` with two keys exits 1 (the two-argument arm is exact too)", () => {
+    const { code, stdout, stderr } = run("--asset", "linux-x64", "win32-x64");
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr.length).toBeGreaterThan(0);
+  });
+
+  test("usage text documents the mode", () => {
+    // `--asset` alone is a SUBSTRING of the pre-existing `--assets`, so
+    // `toContain("--asset")` passes even against a USAGE that never mentions
+    // this mode. Assert the operand form, which only the new mode produces.
+    const { stdout } = run("--help");
+    expect(stdout).toContain("--asset <key>");
+  });
+
+  test("publish.yml's DW-80 guard names the asset its own runner can execute", () => {
+    // The tests above prove `--asset <key>` works for every key in the table.
+    // None of them proves the WORKFLOW asks for the right one, and "right" here
+    // is not "a key that exists" — `--asset linux-arm64` resolves perfectly and
+    // then dies with `Exec format error` on an x64 runner, mid-release, after a
+    // tag has already been pushed. The real invariant is that the guard names
+    // the row whose `runner` IS the job's `runs-on`, so assert exactly that and
+    // derive both sides from the table rather than hardcoding the pairing.
+    const workflow = readFileSync(
+      new URL("../.github/workflows/publish.yml", import.meta.url),
+      "utf8",
+    );
+
+    // `[\w-]+` and not `\S+`: the call sits inside a `$(...)` substitution, so
+    // a greedy match would swallow the closing `)"` into the key.
+    const assetMatch = workflow.match(/platforms\.ts --asset ([\w-]+)/);
+    expect(assetMatch).not.toBeNull();
+    const key = assetMatch![1];
+
+    const runsOnMatch = workflow.match(/^\s*runs-on:\s*(\S+)\s*$/m);
+    expect(runsOnMatch).not.toBeNull();
+    const runsOn = runsOnMatch![1];
+
+    const row = PLATFORMS.find((r) => r.key === key);
+    expect(row).toBeDefined();
+    expect(row!.runner).toBe(runsOn);
+
+    const { code, stdout } = run("--asset", key);
+    expect(code).toBe(0);
+    expect(stdout).toBe(`${row!.asset}\n`);
+  });
+});
+
 describe("platforms.ts CLI — --help", () => {
   test("writes usage to STDOUT and exits 0 (asking for help is not an error)", () => {
     for (const flag of ["--help", "-h"]) {
@@ -166,9 +261,11 @@ describe("platforms.ts CLI — bogus/absent args", () => {
   });
 
   test("more than one argument writes usage to stderr and exits 1", () => {
-    // The `args.length === 1` guard also rejects a valid flag with extra
-    // arguments — `--assets --github-matrix` and `--assets extra` are errors,
-    // not a silently-honored first flag.
+    // Every single-argument flag is matched as `args.length === 1 && args[0] ===
+    // …`, so a valid flag with extra arguments is still rejected — `--assets
+    // --github-matrix` and `--assets extra` are errors, not a silently-honored
+    // first flag. `--asset <key>` is the sole two-argument mode and is matched
+    // by its own exact `args.length === 2` arm; it does not loosen these.
     for (const argv of [["--assets", "--github-matrix"], ["--assets", "extra"]]) {
       const { code, stderr, stdout } = run(...argv);
       expect(code).toBe(1);

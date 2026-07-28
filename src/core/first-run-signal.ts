@@ -22,8 +22,7 @@
  * not total), not the mechanism behind that row.
  */
 
-import { isAbsolute } from "node:path";
-import { resolveAppDir, type AppDirEnv } from "./app-dir.ts";
+import { pathForPlatform, resolveAppDir, type AppDirEnv } from "./app-dir.ts";
 import type { RunMode } from "./run-mode.ts";
 import { classifyStorePresence, type StorePresenceResult } from "./store-presence.ts";
 
@@ -50,9 +49,14 @@ const DEFAULT_FIRST_RUN_SIGNAL_DEPS: FirstRunSignalDeps = {
  * invoked — the probe must never consult the app-data directory for a session
  * that promises to never touch disk at all (Epic 2's Ephemeral invariant, which
  * this story does not get to relax). A store that exists but holds zero saved
- * connections is `"passphrase-mode"`/`"keychain-mode"` on disk, so it correctly
- * classifies as configured here — that emptiness is the UI's business, not the
- * CLI's (I/O matrix: "Store present, zero connections").
+ * connections is `"passphrase-mode"`, `"keychain-mode"`, or — since DW-84 —
+ * `"orphaned-descriptor"` on disk, and every one of those correctly classifies as
+ * configured here: only `"first-run"` means untouched. That is deliberate for the
+ * orphan too, a machine with a descriptor but no `.enc` is configured-and-broken,
+ * not virgin, and the first-run hint would be actively wrong there (the repair
+ * advice comes from `first-run-setup.ts`, which owns that state). Emptiness itself
+ * is the UI's business, not the CLI's (I/O matrix: "Store present, zero
+ * connections").
  *
  * Never throws: any error from either dep (an unreadable app-data directory, a
  * platform quirk) is caught and treated as first-run — the safer default is a
@@ -78,7 +82,18 @@ export function isFirstRunBoot(
     // `quick-studio/` folder would report "configured" on a virgin machine (and the
     // converse elsewhere). A non-absolute dir means we cannot locate the store at
     // all, which is exactly the "cannot tell" case this function answers `true` to.
-    if (!isAbsolute(dir)) return true;
+    //
+    // The check MUST use the flavour of THIS call's `platform`, not the host's
+    // (DW-93). `dir` was built by `resolveAppDir` under `platform`'s convention,
+    // and a win32-convention dir (`C:\Users\dev\AppData\Roaming\quick-studio`) is
+    // NOT `posix.isAbsolute` — a host-flavoured check on a POSIX box would call a
+    // perfectly well-formed Windows path "relative" and force a spurious
+    // first-run. No production caller can hit that (they all pass
+    // `process.platform`, so the two flavours coincide); the point is that the
+    // rule a path is BUILT with and the rule it is JUDGED by cannot drift apart,
+    // which is why {@link pathForPlatform} is shared with the resolver rather
+    // than `platform === "win32"` being re-derived here.
+    if (!pathForPlatform(platform).isAbsolute(dir)) return true;
     const { credential, providerKeys } = classify(dir);
     return credential === "first-run" && providerKeys === "first-run";
   } catch {
