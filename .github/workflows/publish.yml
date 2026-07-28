@@ -212,6 +212,17 @@ jobs:
           publish_one() {
             dir="$1"
             pkg="$(basename "$dir")"  # dir basename == package name for all four
+            # `npm publish a/b` does NOT mean the directory `a/b`: npm reads a bare
+            # `owner/name` argument as the GitHub shorthand and tries to
+            # `git ls-remote ssh://git@github.com/a/b.git`, which fails with
+            # `Permission denied (publickey)` / exit 128 on a runner with no SSH key.
+            # Only a path starting with `./`, `../` or `/` is treated as local.
+            # Normalized HERE rather than at the call sites so no future caller can
+            # reintroduce it — the v0.1.0 attempt died on exactly this.
+            case "$dir" in
+              /*|./*|../*) ;;
+              *) dir="./$dir" ;;
+            esac
             if npm view "$pkg@$VERSION" version >/dev/null 2>&1; then
               echo "· $pkg@$VERSION already published — skipping"
             else
