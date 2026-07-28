@@ -842,7 +842,8 @@ severity: low
 found_by: Blind Hunter review pass on 11-1
 summary: The main package's file allowlist is coarse (`src` pulls in every co-located test and the ~3.5MB generated bundles) and the generated modules are only in `.gitignore` with no `.npmignore`, creating a packer-dependent hazard — `bun pm pack` includes the generated files, but `npm publish` treats `.gitignore` as `.npmignore` and would exclude them, publishing a package that crashes at launch.
 evidence: `bun pm pack` produced 185 files / 6.76MB including all `*.test.ts` and the generated bundles. Pre-existing before this story (the four other generated bundles already share this exact `.gitignore`-only situation); this story only added `version.generated.ts` following the established pattern. Publish/packaging is owned by Story 11.4, which generates a purpose-built manifest — this is the natural place to add an `npm pack --dry-run` assertion in CI and a tightened allowlist. Not this story's problem to fix.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-npm-package-manifest-hardening
 
 ### DW-76: The release workflow pins no Bun toolchain version (`oven-sh/setup-bun@v2` with no `bun-version`), so every release binary is built with whatever Bun is "latest" that day — release builds are non-reproducible and a single bad Bun release can break `bun build --compile` on all legs at once with no toolchain rollback independent of the tag
 origin: follow-up review of 11-2, 2026-07-23
@@ -852,6 +853,7 @@ severity: medium
 found_by: Blind Hunter review pass on 11-2
 summary: `oven-sh/setup-bun@v2` is used with no `bun-version` input, so the release matrix compiles every published binary with the day's latest Bun; the toolchain that produces the shipped artifacts is unpinned, making releases non-reproducible and exposing all legs simultaneously to a single regressive Bun release with no way to roll the toolchain back independently of the git tag.
 evidence: Pre-existing — the `setup-bun@v2` step predates this story and was unchanged by it (this story rebuilt the matrix around it, not the toolchain setup). Distinct from the already-deferred SHA-pinning of third-party actions: that hardens action *identity*, this pins the *build toolchain version*. Natural fix is to add `with: bun-version: <pinned>` (matching the `>=1.2.0` floor recorded in the keyring spike doc / README) across the workflow, ideally as part of the same supply-chain-hardening pass that SHA-pins the actions. Not this story's problem to fix.
+decision: [2026-07-27, user] Pin **`1.3.14`** — the developed-against version, not the `>=1.2.0` floor (option 1 of the escalation raised by the first drive). The floor is a MINIMUM, not a pin value, and the review proved the runtime does not survive it: 5 tests fail on 1.2.0 (`src/core/server.test.ts` 66/2 vs 68/0), and since `bun build --compile` embeds the compiling Bun's runtime, that pin would have baked the regression into every shipped binary. IN SCOPE alongside the pin: raise `engines.bun` in `package.json` and the README floor to `>=1.3.14`, because the code demonstrably cannot honor the advertised `>=1.2.0`; and raise `keyring-spike.yml`'s own `1.2.0` pin, which is the stale outlier the first drive mistook for a precedent. (User chose this over keeping the floor and fixing the 5 tests, or shipping SHA pins only.)
 status: open
 
 ### DW-77: The npm launcher shim resolves the per-platform binary via `require.resolve(`<pkg>/package.json`)` + a fixed `<pkgroot>/quick-studio[.exe]` path, so Story 11.4's generated platform-package manifests must carry no restrictive `exports` field (or must export `./package.json`) and must set the binary's executable bit — otherwise resolution throws `ERR_PACKAGE_PATH_NOT_EXPORTED`/`EACCES` on installs where the package is actually present, and the shim misreports "not installed"
@@ -862,7 +864,8 @@ severity: low
 found_by: Blind Hunter review pass on 11-3
 summary: The shim's binary resolution is a load-bearing cross-story contract on 11.4's packaging: platform manifests must omit a restrictive `exports` (or explicitly export `./package.json`), place the binary at `<pkgroot>/quick-studio[.exe]`, and set its exec bit; violating any of these makes an installed package fail resolution and surface the misleading "platform package was not installed" message.
 evidence: `require.resolve("<pkg>/package.json")` throws `ERR_PACKAGE_PATH_NOT_EXPORTED` for a package whose `exports` map omits `./package.json` (Node strict exports enforcement), and a binary not at the joined path or lacking the exec bit yields `ENOENT`/`EACCES` at spawn. 11.4 generates minimal manifests (no `dependencies`, no scripts), so a restrictive `exports` is unlikely — but nothing enforces it and the failure mode is a package that "works on the author's machine only." Natural fix in 11.4: assert the generated manifest has no `exports` (or exports `./package.json`), place the binary at the pinned path, `chmod +x`, and add an install-and-launch smoke check. Not this story's problem to fix (the shim code is correct given a sane manifest); the Design Notes over-claim of "immune to exports" was corrected in this pass.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-npm-package-manifest-hardening
 
 ### DW-78: `publish.yml` uses `oven-sh/setup-bun@v2` (a mutable tag) in a job that holds `id-token: write` — the OIDC publish credential is exposable to an unpinned third-party action, undercutting the workflow's whole "no long-lived token" security story
 origin: adversarial review of 11-4, 2026-07-23
@@ -1279,4 +1282,26 @@ severity: low
 found_by: Edge Case Hunter
 summary: The row tooltip interpolates `` `${table.schema}.${table.name}` `` unconditionally, so a table whose `schema` is the empty string (the default-namespace case the tree elsewhere renders as `(default)`) gets a tooltip beginning with a bare separator dot.
 evidence: Pre-existing and unchanged in shape by DW-68 — the tooltip already had this exact template before this story, which only appended a ` · vista` suffix for views. The blank-schema case is real and already special-cased elsewhere in the same file (the schema node renders `(default)` rather than a nameless node) and in `App.tsx`/`TabContent.tsx` (an optimistically-created table carries `schema: ""`, which the Core resolves to the real default), so the tooltip is the one surface that did not get the treatment. Not patched: it is outside DW-68's stated scope (the icon branch) and the fix wants to reuse whatever label helper the schema node already uses rather than adding a second ad-hoc ternary. Cosmetic; the table name itself is still legible.
+status: open
+
+### DW-118: The repo manifest still declares `dependencies` + `prepare`/`prepublishOnly` + a `bin` it cannot satisfy, so `npm i <git-url>` runs a full UI build and then installs a `quick-studio` command that cannot launch
+
+origin: review of spec-dw-75-77-npm-package-manifest-hardening.md, 2026-07-28
+source_spec: `spec-dw-75-77-npm-package-manifest-hardening.md`
+location: `package.json` (`bin`, `dependencies`, `scripts.prepare`, `scripts.prepublishOnly`)
+severity: low
+found_by: Blind Hunter, Edge Case Hunter
+summary: The repo manifest describes a package it can no longer be: `bin` points at the 11.3 shim, whose platform package is not a dependency of THIS manifest, while `prepare`/`prepublishOnly` still run `bun run build` and `dependencies` lists 33 runtime packages whose output the narrowed `files` allowlist can no longer pack — so a git-URL install pays for a full UI build and ends up with a command that reports "platform package was not installed".
+evidence: Pre-existing, not introduced here: Story 11.3 repointed `bin` at the shim and Story 11.4 moved publishing to generated manifests, after which the repo manifest stopped being the published one. DW-75 only made it visible by shrinking the tarball to 3 entries (22 KB) — a package that declares hundreds of MB of dependencies it cannot use. The natural fix is `private: true` on the repo manifest (which also makes `prepublishOnly` dead code), and that is explicitly out of scope for DW-75/DW-77: its intent contract says "Do not add `private: true` or otherwise change the repo manifest beyond `files`". Nothing in the packaging check covers a git-URL install, and nothing would: `npm pack` at the root is asserted, but installing from git is a different code path. Needs an owner decision — `private: true` forecloses `npm i <git-url>` as a supported install method, which is a product call rather than a packaging one.
+status: open
+
+### DW-119: No workflow runs `bun test` or `tsc` on a pull request, so the repo's 2035-test suite gates nothing before merge
+
+origin: review of spec-dw-75-77-npm-package-manifest-hardening.md, 2026-07-28
+source_spec: `spec-dw-75-77-npm-package-manifest-hardening.md`
+location: `.github/workflows/` (`keyring-spike.yml`, `package-check.yml`, `publish.yml`, `release.yml`)
+severity: medium
+found_by: Blind Hunter
+summary: `package-check.yml` (added by DW-75) is the repo's only `pull_request`-triggered workflow, and it deliberately runs no `bun install`, so neither the test suite nor `tsc --noEmit` executes anywhere in CI — every green PR is green on packaging alone.
+evidence: Verified by enumerating the four workflow files: `release.yml` and `publish.yml` trigger on tags/releases, `keyring-spike.yml` is `workflow_dispatch`, and `package-check.yml`'s only step is the packaging check (its "no `bun install`" is load-bearing — installing `node_modules` would change what the repo-root `npm pack --dry-run` assertion answers, so `bun test` belongs in a sibling job or workflow, not in that job). Concrete consequence inside this very story: the fast tripwires in `scripts/pack-contract.test.ts` (repo `files` == the allowlist, `.npmignore` never matching a generated bundle or an allowlisted file) were designed as the cheap first line of defence and currently never run in CI at all — the allowlist half is caught anyway by the slow packed assertion, the `.npmignore` half by nothing. Out of scope here: DW-75/DW-77 is a packaging story, and adding the repo's general CI is a separate decision about runner cost and required checks.
 status: open
