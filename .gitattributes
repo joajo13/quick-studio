@@ -1,0 +1,46 @@
+# Line-ending policy for a working tree that TWO gits touch.
+#
+# This repo is worked on from Git for Windows (`core.autocrlf=true`) and from
+# git inside WSL (`core.autocrlf` unset, i.e. false) — against the SAME files.
+# With no policy the two disagree on every line: a one-line edit made from the
+# "wrong" side rewrites the whole file, so diffs become unreadable and
+# `git blame` loses the trail. Before this file existed, 1724 of 2369 tracked
+# files were stored with CRLF.
+#
+# `eol=lf` (not a bare `text=auto`) is deliberate: `text=auto` alone still lets
+# each git decide the WORKING-TREE ending from its own autocrlf, which is
+# exactly the disagreement to remove when the working tree is shared.
+
+# Default: normalize everything to LF in the repository AND on disk.
+* text=auto eol=lf
+
+# Shell scripts break outright with CRLF — `#!/usr/bin/env bash\r` is not a
+# valid interpreter path. Never let a platform override these.
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Windows batch files are the mirror image: cmd.exe needs CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binaries — never touched, never diffed as text. A stray CRLF conversion here
+# corrupts the file rather than reformatting it.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.eot binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tgz binary
+*.exe binary
+*.dll binary
+*.node binary
+*.wasm binary
