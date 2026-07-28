@@ -49,6 +49,56 @@ jobs:
         with:
           bun-version: 1.3.14
 
+      # DW-90. Two independent sources of version truth exist. The binaries this
+      # workflow compiles carry `package.json`'s `version` (scripts/build-version.ts
+      # bakes it into src/core/version.generated.ts), while publish.yml derives the
+      # npm version from the git tag (`VERSION="${TAG#v}"`). Nothing asserted they
+      # agree: pushing v1.2.0 with package.json still at 0.0.1 publishes
+      # quick-studio@1.2.0 wrapping a binary whose `--version` prints 0.0.1, and
+      # src/core/update-check.ts then tells every user already on the newest
+      # release, on every boot, that an update is available — permanently.
+      #
+      # It lives HERE, in `platforms`, and not in `build`: `build` fans out to
+      # three native runners and `needs: platforms`, so failing here costs one
+      # short ubuntu job instead of three ~30min compile legs, and no leg can
+      # start from a bad tag. It also sits BEFORE the matrix is emitted, so a
+      # mismatch cannot reach a `build` leg at all. This job already has checkout
+      # + Bun and needs no `bun install` to read package.json.
+      #
+      # Assertion ONLY: package.json remains the sole owner of the version
+      # number. Moving where the version of record lives is a release-process
+      # decision, deliberately not taken here.
+      - name: "Guard: tag version matches package.json"
+        run: |
+          set -euo pipefail
+          # GITHUB_REF_NAME (not `github.ref_name` interpolated into the script)
+          # keeps a tag name out of the shell source itself. `on: push: tags: v*`
+          # means it is always the tag, so `#v` strips exactly the one prefix.
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          # `bun -e` rather than `jq`/`node`: this job has no `bun install`, and
+          # bun is the one toolchain already pinned above.
+          PKG_VERSION="$(bun -e 'console.log(require("./package.json").version)')"
+          # A package.json with no `version` prints "undefined"; an unreadable one
+          # can leave this empty. Neither may reach the comparison below, where an
+          # empty TAG_VERSION would make `"" != ""` pass on a malformed tag.
+          if [ -z "$PKG_VERSION" ] || [ "$PKG_VERSION" = "undefined" ]; then
+            echo "release: could not read a version from package.json" >&2
+            exit 1
+          fi
+          if [ -z "$TAG_VERSION" ]; then
+            echo "release: tag $GITHUB_REF_NAME yields an empty version" >&2
+            exit 1
+          fi
+          # Exact string equality, never semver-aware comparison: that keeps
+          # prerelease tags (v1.2.0-beta.1) working unchanged and refuses to
+          # decide that two differently-spelled versions are "close enough".
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "release: tag $GITHUB_REF_NAME implies version $TAG_VERSION but package.json says $PKG_VERSION" >&2
+            echo "release: bump package.json (the sole owner of the version) and re-tag; this workflow never writes it for you" >&2
+            exit 1
+          fi
+          echo "tag $GITHUB_REF_NAME and package.json agree on $PKG_VERSION"
+
       - name: Generate platform matrix
         id: gen
         # `set -euo pipefail` does NOT propagate a failure out of `$(...)`, so a

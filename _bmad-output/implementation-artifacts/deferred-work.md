@@ -887,7 +887,8 @@ severity: medium
 found_by: Blind Hunter review pass on 11-4
 summary: The publish workflow trusts whatever `gh release download` returns; the packaging script now rejects a missing/empty/non-file asset, but nothing verifies a checksum. A substituted or partially-corrupted binary that is non-empty would package and publish. The natural gate is comparing each asset against the `SHA256SUMS` file Story 11.2's release matrix emits.
 evidence: The epic context and 11.2's spec establish that every release attaches a `SHA256SUMS` file; this story's publish workflow does not consume it. Depends on 11.2 actually emitting `SHA256SUMS` (the current pre-11.2 `release.yml` does not), so wiring the check belongs with/after 11.2. Add a `sha256sum -c` step against the downloaded `SHA256SUMS` before running the packaging script. Not fixable in this story until 11.2 lands the checksum file.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-publish-asset-integrity-timing
 
 ### DW-80: nothing verifies the downloaded binary's build-time embedded `--version` equals the git tag / published package version — a tag/binary mismatch ships a `quick-studio@X` package wrapping a binary that reports `Y`
 origin: adversarial review of 11-4, 2026-07-23
@@ -897,7 +898,8 @@ severity: low
 found_by: Blind Hunter review pass on 11-4
 summary: The published npm version derives purely from the git tag, while the binaries were compiled by a separate `release.yml` run off `package.json`'s version. If the operator tags `v1.2.3` without bumping `package.json` to `1.2.3` first, the package claims `1.2.3` around a binary whose `--version` prints `1.2.2`, with no failure anywhere. Consequence is a cosmetic/support mismatch (`--version` disagrees with the installed package), not a launch break.
 evidence: `build-version.ts` bakes `package.json`'s version into `version.generated.ts` at compile time; the tag drives the npm version independently. A cheap guard: after download, run one binary with `--version` in CI and assert it equals `VERSION`, failing the publish on mismatch. Out of this story's contract scope (which is packaging/publish mechanics, not release-versioning discipline); recorded for a later hardening pass.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-release-version-consistency
 
 ### DW-81: the generated public packages declare no `license` field and copy no `LICENSE` file, so `npm publish` warns "No license field" and consumers/scanners see the packages as unlicensed (all-rights-reserved by default)
 origin: adversarial review of 11-4, 2026-07-23
@@ -927,7 +929,8 @@ severity: medium
 found_by: Blind Hunter + Edge Case Hunter review pass on 11-4
 summary: The download step polls for all three release assets across 6 attempts × 20s ≈ 2 min before giving up loudly. If `release.yml` runs its build legs serially (`max-parallel: 1`) and the release is published on the first leg's upload, the `release: published` event that starts `publish.yml` fires while the remaining legs (checkout + bun install + UI build + `bun build --compile` + upload) are still running — easily longer than 2 min combined. The publish then fails on a release that is only slow to finish attaching assets, not genuinely incomplete.
 evidence: The poll window (6×20s) was a deliberate value chosen in the prior 11-4 review pass to tolerate the `published`-before-upload race; the concern here is that its magnitude is calibrated to nothing concrete because the target — 11.2's rebuilt three-platform `release.yml` — does not exist yet. The correct fix depends on that final shape: either raise the attempt count/backoff to cover realistic serial matrix wall-time (~10 min), or have `release.yml` publish the release only after all legs finish (build to a draft, flip to published last) so `published` fires when assets are already complete. Blocked on 11.2; wiring/tuning belongs with or after it. Not this story's problem to finalize in isolation.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-publish-asset-integrity-timing
 
 ### DW-84: `credential-store.ts` is missing the "descriptor present but `.enc` missing" guard that `provider-key-store.ts` has — in that state ANY passphrase is accepted, opens an empty store, and the first save silently re-keys under the wrong passphrase
 origin: review pass of 11-6, 2026-07-23
@@ -997,7 +1000,8 @@ severity: medium
 found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on 11-2
 summary: `bun run build` invokes `scripts/build-version.ts`, which reads `version` from `package.json` (currently `0.0.1`) and bakes it into `src/core/version.generated.ts`, hence into every compiled binary. `publish.yml` derives the npm version from the git tag instead (`VERSION="${TAG#v}"`). Neither workflow checks that the tag and `package.json` agree, and neither writes the tag into `package.json` before building. Push `v1.0.0` with `package.json` still at `0.0.1` and npm serves `quick-studio@1.0.0` whose payload binary reports `0.0.1`. Story 11.5's TTL update check compares the baked `VERSION` against `registry.npmjs.org/quick-studio/latest` — which `publish.yml` just set to `1.0.0` — so every user on the newest release is told on every Persistent boot that an update is available, permanently, and `quick-studio update` prints instructions that change nothing.
 evidence: Confirmed by reading `scripts/build-version.ts` (reads `package.json`), `release.yml`'s build step, `publish.yml`'s `VERSION="${TAG#v}"` derivation, and `src/core/update-check.ts`'s comparison against the baked constant. Pre-existing, not caused by Story 11.2: the previous two-leg `release.yml` ran the identical `bun run build` and the tag-derived npm version came from Story 11.4 — 11.2 rebuilt the job graph around them without introducing or removing the mismatch. It surfaced now because a reviewer traced the version constant end to end for the first time. The natural fix is a guard in `release.yml`'s `platforms` job (`[ "${GITHUB_REF_NAME#v}" = "$(bun -e 'console.log(require(\"./package.json\").version)')" ] || exit 1`), so a mismatched tag fails before any runner compiles anything; the alternative — having the build write the tag into the version file — changes who owns the version number and is a release-process decision, not a workflow patch. Deliberately not patched inside 11.2: the story's intent contract scopes it to the matrix, the checksum artifact, and documentation, and picking between the two fixes decides where the version of record lives.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-release-version-consistency
 
 ### DW-91: `scripts/` is outside the tsconfig `include`, so `scripts/platforms.ts` — the authoritative platform table — is typechecked only by accident, and `scripts/build-npm-packages.ts` is never typechecked at all
 origin: follow-up review of 11-2, 2026-07-24
@@ -1306,4 +1310,15 @@ severity: medium
 found_by: Blind Hunter
 summary: `package-check.yml` (added by DW-75) is the repo's only `pull_request`-triggered workflow, and it deliberately runs no `bun install`, so neither the test suite nor `tsc --noEmit` executes anywhere in CI — every green PR is green on packaging alone.
 evidence: Verified by enumerating the four workflow files: `release.yml` and `publish.yml` trigger on tags/releases, `keyring-spike.yml` is `workflow_dispatch`, and `package-check.yml`'s only step is the packaging check (its "no `bun install`" is load-bearing — installing `node_modules` would change what the repo-root `npm pack --dry-run` assertion answers, so `bun test` belongs in a sibling job or workflow, not in that job). Concrete consequence inside this very story: the fast tripwires in `scripts/pack-contract.test.ts` (repo `files` == the allowlist, `.npmignore` never matching a generated bundle or an allowlisted file) were designed as the cheap first line of defence and currently never run in CI at all — the allowlist half is caught anyway by the slow packed assertion, the `.npmignore` half by nothing. Out of scope here: DW-75/DW-77 is a packaging story, and adding the repo's general CI is a separate decision about runner cost and required checks.
+status: open
+
+### DW-120: `publish.yml` interpolates the release tag straight into three `run:` bodies, so a tag name containing shell metacharacters executes as code in the job that holds the npm Trusted-Publishing OIDC credentials
+
+origin: follow-up review of spec-dw-publish-asset-integrity-timing.md, 2026-07-28
+source_spec: `spec-dw-publish-asset-integrity-timing.md`
+location: `.github/workflows/publish.yml:79` (`Download and verify release binaries`), `:307` (`Build npm packages`), `:319` (`Publish platform packages, then the main package`)
+severity: high
+found_by: Blind Hunter
+summary: All three steps start with `TAG="${{ github.event.release.tag_name }}"`. GitHub expands `${{ }}` textually into the script *before* bash parses it, so a release tag containing `` ` ``, `$(`, or `;` is executed as shell in a job that runs with `id-token: write` and holds the Trusted-Publishing credentials for all four published packages.
+evidence: Verified pre-existing and untouched by this change: `git blame` puts all three lines at commit c25dc91, and none of them appears as an added line in the diff since baseline `e415826` — the story rewrote the body of the verify step around line 79 but never that line. The standard fix is to pass the value through each step's `env:` block (`env: { TAG: ${{ github.event.release.tag_name }} }`, then `TAG="$TAG"` in the script), which bash then treats as data. It was not fixed here because the story's intent contract explicitly forbids touching the publish ordering and OIDC auth ("Do not touch the publish ordering, the idempotency skip, the prerelease dist-tag routing, or OIDC auth"), and a correct fix has to change all three steps at once — two of which are the packaging and publishing steps this story is contract-bound to leave alone. Exploitability requires the ability to create a release/tag in this repo (i.e. an actor who already has write access), which is why it is high rather than critical, but the payoff is the npm publish credentials for `quick-studio` and its three platform packages.
 status: open
