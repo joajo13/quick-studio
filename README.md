@@ -4,9 +4,28 @@ Lightweight, local-first database manager (Postgres + MySQL). Runs entirely on
 your machine: it boots a trusted local Core that serves a browser UI over
 loopback, gated by a per-boot session token.
 
-> Walking skeleton — epic 1. The UI shell, local Core, token-gated RPC,
-> clean shutdown, and the Port-Exposure Warning are in place. Database connect
-> and persistence land in later epics.
+- **Browse and edit data** — paginated table browsing, cell editing, row insert
+  and delete, table creation, index inspection and ad-hoc SQL. Every mutating
+  statement passes through one guarded executor that classifies its risk and
+  confirms before running it.
+- **Read the schema visually** — an interactive ERD with foreign-key edges that
+  pans and zooms across large schemas and remembers your layout.
+- **Ask in natural language** — AI chat bound to the connected schema, with
+  streaming answers and charts rendered inside a cross-origin sandbox.
+- **Export reports** — turn query results into a static HTML snapshot that
+  renders offline, or a Live Report that re-queries through a running
+  quick-studio.
+- **Keep your connections** — an AES-256-GCM credential store keyed to the OS
+  keychain, with a passphrase fallback on hosts that have none.
+
+No server, no account, no telemetry. Everything runs locally, and the only two
+things that ever leave your machine are ones you opt into: an optional version
+check against the npm registry (a bare version lookup — no identifiers, and
+disabled with `QS_NO_UPDATE_CHECK`), and, if you configure an AI provider, the
+chat requests themselves. Those carry schema metadata by default; result rows
+are sent only per-query, on an explicit and visibly indicated opt-in.
+
+Windows and Linux (x64, plus Linux arm64). macOS is not supported yet.
 
 ## Install
 

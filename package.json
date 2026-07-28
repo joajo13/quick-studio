@@ -2,7 +2,7 @@
   "name": "quick-studio",
   "version": "0.1.0",
   "type": "module",
-  "description": "Lightweight local-first DB manager (Postgres + MySQL) — walking skeleton",
+  "description": "Lightweight, local-first database manager (Postgres + MySQL).",
   "license": "MIT",
   "repository": {
     "type": "git",
