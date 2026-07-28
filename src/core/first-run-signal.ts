@@ -22,8 +22,7 @@
  * not total), not the mechanism behind that row.
  */
 
-import { isAbsolute } from "node:path";
-import { resolveAppDir, type AppDirEnv } from "./app-dir.ts";
+import { pathForPlatform, resolveAppDir, type AppDirEnv } from "./app-dir.ts";
 import type { RunMode } from "./run-mode.ts";
 import { classifyStorePresence, type StorePresenceResult } from "./store-presence.ts";
 
@@ -83,7 +82,18 @@ export function isFirstRunBoot(
     // `quick-studio/` folder would report "configured" on a virgin machine (and the
     // converse elsewhere). A non-absolute dir means we cannot locate the store at
     // all, which is exactly the "cannot tell" case this function answers `true` to.
-    if (!isAbsolute(dir)) return true;
+    //
+    // The check MUST use the flavour of THIS call's `platform`, not the host's
+    // (DW-93). `dir` was built by `resolveAppDir` under `platform`'s convention,
+    // and a win32-convention dir (`C:\Users\dev\AppData\Roaming\quick-studio`) is
+    // NOT `posix.isAbsolute` — a host-flavoured check on a POSIX box would call a
+    // perfectly well-formed Windows path "relative" and force a spurious
+    // first-run. No production caller can hit that (they all pass
+    // `process.platform`, so the two flavours coincide); the point is that the
+    // rule a path is BUILT with and the rule it is JUDGED by cannot drift apart,
+    // which is why {@link pathForPlatform} is shared with the resolver rather
+    // than `platform === "win32"` being re-derived here.
+    if (!pathForPlatform(platform).isAbsolute(dir)) return true;
     const { credential, providerKeys } = classify(dir);
     return credential === "first-run" && providerKeys === "first-run";
   } catch {
