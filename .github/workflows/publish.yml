@@ -12,12 +12,32 @@
 
 name: Publish
 
+# NOT `on: release`. That is the obvious trigger and it DOES NOT WORK here:
+# `release.yml` creates the release with the default `GITHUB_TOKEN`, and GitHub
+# deliberately does not let events raised by that token start new workflow runs
+# (its anti-recursion rule). The v0.1.0 release published on GitHub and this
+# workflow simply never fired — it had to be kicked by toggling the release
+# draft flag by hand, which re-emits `published` under a human account.
+#
+# `workflow_run` sidesteps it: it keys off `Release` FINISHING, not off an event
+# the token raised. `workflow_dispatch` stays as the explicit manual path (a
+# re-publish after a transient npm failure), replacing that draft-toggle hack.
 on:
-  release:
-    types: [published]
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v0.1.0)"
+        required: true
+        type: string
 
 permissions:
   id-token: write
+  # `contents: read` is not enough on the workflow_run path: the tag and the
+  # release's prerelease flag are read back through the API, and a private repo
+  # would 404 without it. Still read-only — nothing here writes to the repo.
   contents: read
 
 # Serialize publishes so two release events can never race the strict
@@ -29,13 +49,62 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # `workflow_run` fires on completion, SUCCESS OR FAILURE — without this guard
+    # a failed release build would still reach the publish step. `head_branch` is
+    # the tag name for a tag push, so the `v` check also keeps a Release run that
+    # was somehow started off a branch from publishing anything.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       startsWith(github.event.workflow_run.head_branch, 'v'))
     # A hung `npm publish` / OIDC token exchange must not sit on the serialized
     # `publish-npm` concurrency group until GitHub's 6h default and block every
     # subsequent release behind it. Cap the whole publish at a modest ceiling.
     timeout-minutes: 20
     steps:
+      # One place that answers "which release is this run publishing?", because
+      # the two triggers carry it differently and neither is `github.event.release`
+      # any more. Everything downstream reads these outputs.
+      - name: Resolve the target release
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="$DISPATCH_TAG"
+          else
+            TAG="$RUN_TAG"
+          fi
+          # An empty tag would make every downstream version comparison compare
+          # against "" and pass vacuously — exactly the class of bug the DW-80
+          # guard below exists to catch. Refuse to continue instead.
+          if [ -z "$TAG" ]; then
+            echo "publish: could not determine the release tag" >&2
+            exit 1
+          fi
+          # The prerelease flag came free with `github.event.release`; on both
+          # current triggers it has to be read back from the API. A release that
+          # does not exist (a dispatch typo) fails here, before anything is built.
+          if ! PRERELEASE="$(gh release view "$TAG" --json isPrerelease --jq .isPrerelease)"; then
+            echo "publish: no GitHub release found for tag $TAG" >&2
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          echo "publishing $TAG (prerelease=$PRERELEASE)"
+
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # `workflow_run` runs from the DEFAULT BRANCH, not from the tag — unlike
+          # the old `on: release` trigger. Without this the packaging scripts and
+          # the platform table would come from whatever main holds today while the
+          # binaries come from the tag. Pin the checkout to the tag being published.
+          ref: ${{ steps.rel.outputs.tag }}
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -70,7 +139,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ steps.rel.outputs.tag }}"
           # Derived from scripts/platforms.ts so a future macOS row propagates
           # here too, rather than hardcoding a fourth copy of the asset list.
           mapfile -t REQUIRED < <(bun scripts/platforms.ts --assets)
@@ -140,7 +209,7 @@ jobs:
         # metacharacters, and this job holds the OIDC Trusted-Publishing
         # credentials for all four published packages.
         env:
-          TAG: ${{ github.event.release.tag_name }}
+          TAG: ${{ steps.rel.outputs.tag }}
         run: |
           set -euo pipefail
           VERSION="${TAG#v}"
@@ -184,7 +253,7 @@ jobs:
       - name: Build npm packages
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ steps.rel.outputs.tag }}"
           VERSION="${TAG#v}"
           bun scripts/build-npm-packages.ts --binaries bin-dl --version "$VERSION" --out dist-npm
 
@@ -196,11 +265,11 @@ jobs:
       - name: Publish platform packages, then the main package
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
+          TAG="${{ steps.rel.outputs.tag }}"
           VERSION="${TAG#v}"
           # A GitHub prerelease must not land on the `latest` dist-tag, or
           # `npm i quick-studio` would serve a beta to everyone.
-          if [ "${{ github.event.release.prerelease }}" = "true" ]; then
+          if [ "${{ steps.rel.outputs.prerelease }}" = "true" ]; then
             NPM_TAG="next"
           else
             NPM_TAG="latest"

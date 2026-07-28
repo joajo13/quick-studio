@@ -114,6 +114,33 @@ Node >= 22.14.0, GitHub-hosted runners only.
 triggers the old two-platform `release.yml` and burns a version number for a release you do
 not want.
 
+## What the first real release (v0.1.0, 2026-07-28) actually taught us
+
+All three problems below were invisible until the workflows ran for the first time.
+
+**`publish.yml` could not be triggered by `on: release`.** `release.yml` creates the release
+with the default `GITHUB_TOKEN`, and GitHub does not let events raised by that token start new
+workflow runs. The release published and the publish workflow never fired; it had to be kicked
+by toggling the release's draft flag by hand. **Fixed**: `publish.yml` now triggers on
+`workflow_run` (keyed off `Release` finishing, not off a token-raised event) plus a
+`workflow_dispatch` for manual re-publishes. Note that `workflow_run` runs from the DEFAULT
+BRANCH, so its checkout is pinned to the release tag explicitly.
+
+**`npm publish dist-npm/<pkg>` exited 128.** npm reads a bare `a/b` argument as the GitHub
+`owner/repo` shorthand and tries to clone it over SSH; only `./`, `../` or `/` paths are local.
+**Fixed** by normalizing inside `publish_one`.
+
+**npm rejected the upload with a 422.** Publishing over OIDC makes npm attach a sigstore
+provenance statement naming the source repo, and the registry refuses any manifest whose
+`repository.url` does not match. Neither the root `package.json` nor the generated manifests
+had the field. **Fixed**, with tests pinning the generator constant to the root manifest.
+
+**Release checklist, in order:** bump `package.json` (the tag must agree with it — `publish.yml`
+asserts the binary's `--version` against the tag) → push `main` → tag `vX.Y.Z` → `release.yml`
+builds and publishes the GitHub Release → `publish.yml` fires on its completion and publishes to
+npm, platform packages first, main package last. Until a release succeeds end to end, nothing
+has reached npm and the tag can be deleted and redone freely.
+
 ## Accepted, deliberately not solved by this epic
 
 - **macOS.** A later phase, by design. Adding it means adding rows to the shared platform

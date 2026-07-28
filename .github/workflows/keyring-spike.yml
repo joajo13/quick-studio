@@ -29,6 +29,18 @@ jobs:
     # binaries, either of which could hang; cap it so a stuck leg fails fast
     # instead of running to the 6h default.
     timeout-minutes: 15
+    # The macOS leg has failed on EVERY run since 2026-07-23, always in the same
+    # place: `security set-key-partition-list` on the freshly created spike
+    # keychain returns `SecItemCopyMatching: The specified item could not be
+    # found` (it wants an existing item to re-partition; the keychain is empty at
+    # that point). It is a provisioning-script bug on a platform this repo does
+    # not ship — `scripts/platforms.ts` has no darwin row and a tripwire test
+    # keeps it that way — so the leg proves nothing today and its red masked the
+    # only signal this workflow exists to give: whether Linux and Windows still
+    # load the native addon. Kept RUNNING rather than deleted, so the macOS phase
+    # inherits the evidence and sees it go green the day the provisioning is
+    # fixed; it just no longer fails the workflow.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:
