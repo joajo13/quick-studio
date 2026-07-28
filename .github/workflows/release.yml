@@ -1,8 +1,10 @@
 name: Release
 
-# Story 11.2 — one job per native runner, gated on the compiled-binary keyring
-# check that already exists from the Story 2.1 spike, then a single collect
-# job emits SHA256SUMS and uploads everything to the release in one place.
+# Story 11.2 — one job per native runner, each gated on a keyring check run
+# against THE BINARY THAT LEG IS ABOUT TO UPLOAD (DW-89: it used to compile and
+# run a separate spike artifact, which attested to the leg's toolchain rather
+# than to the shipped file), then a single collect job emits SHA256SUMS and
+# uploads everything to the release in one place.
 # Never cross-compile: @napi-rs/keyring is a native NAPI addon whose
 # platform-specific binding is resolved at build time, so every binary is
 # compiled on a runner whose OS/arch matches its target.
@@ -116,9 +118,11 @@ jobs:
   build:
     needs: platforms
     runs-on: ${{ matrix.runner }}
-    # This job compiles and RUNS a self-compiled keyring binary on three
-    # runners; a Windows Credential Manager call that raises a dialog is the
-    # documented hang mode. Cap it instead of inheriting the 6h default.
+    # This job compiles the shipped binary on three runners and then RUNS it
+    # through a real keychain call (DW-89 — no second artifact is compiled
+    # anywhere in this file); a Windows Credential Manager call that raises a
+    # dialog is the documented hang mode. Cap it instead of inheriting the 6h
+    # default. The gate step below carries its own, much tighter cap.
     timeout-minutes: 30
     strategy:
       # The `release` job's `needs: build` already makes a partial release
@@ -162,31 +166,93 @@ jobs:
         run: bun build --compile bin/quick-studio.ts --outfile ${{ matrix.asset }}
 
       - name: Smoke the shipped binary (${{ matrix.key }}) — it must boot on its own runner
-        # The keyring gate below compiles and runs a SECOND artifact
-        # (scripts/keyring-native-check.ts); it never executes the binary we
-        # publish. This step is the only place the published artifact itself
-        # runs. `--version` writes the baked version to stdout and exits 0
-        # before the Core boots — but AFTER the entry's static import chain
-        # (bin/quick-studio.ts -> first-run-setup.ts -> ... ->
-        # src/core/keychain.ts, which imports @napi-rs/keyring at module top)
-        # has been evaluated. So a shipped binary that did not embed its native
-        # binding, or that cannot start on this OS/arch at all, fails HERE, on
-        # the artifact users actually download.
+        # The cheapest possible proof that the published artifact starts at all
+        # on this OS/arch: `--version` writes the baked version to stdout and
+        # exits 0 before the Core boots.
+        #
+        # Do NOT read this as a "no-keychain-involved" smoke — it is not one
+        # today. `bin/quick-studio.ts` statically imports first-run-setup.ts,
+        # whose chain reaches src/core/keychain.ts and its top-level
+        # `import { Entry } from "@napi-rs/keyring"`, so ESM evaluates the native
+        # LOAD before `--version` ever prints. That is exactly why this step is
+        # worth keeping first: on a binary that did not embed its binding it
+        # fails here, in the shortest, most legible step in the job, instead of
+        # inside the gate below.
+        #
+        # What the gate below adds is the part this step structurally cannot
+        # give: an actual native CALL on the shipped artifact. A load forced by
+        # an incidental static import chain evaporates the moment someone makes
+        # that chain lazy (a plausible startup-latency change); the self-check
+        # keeps forcing it regardless — which is the whole point of DW-89.
         run: |
           set -euo pipefail
           ./${{ matrix.asset }} --version
 
-      - name: Keyring gate (${{ matrix.key }}) — native addon must load from the compiled binary
-        # KEYRING_REQUIRE_ROUNDTRIP is deliberately UNSET here: this gate proves
-        # the addon embedded and loaded (the cross-compile failure mode this
-        # story exists to prevent), not that a keychain backend is present. A
-        # typed `unavailable` on a headless runner is a pass; only a failure to
-        # load the addon at all is a failure. Round-trip attestation stays with
-        # keyring-spike.yml, which provisions a backend per OS.
+      - name: Keyring gate (${{ matrix.key }}) — the SHIPPED binary must load the native addon
+        # DW-89. This runs the artifact that is uploaded, not a stand-in. It used
+        # to compile and run a SECOND binary from the spike entrypoint that
+        # keyring-spike.yml still owns, which proved that this LEG'S TOOLCHAIN
+        # could embed @napi-rs/keyring for an entrypoint importing keychain.ts —
+        # equivalent to proving it about the shipped binary only by accident of a
+        # then-static import chain
+        # (bin/quick-studio.ts -> first-run-setup.ts -> ... -> keychain.ts). The
+        # first lazy import anywhere on that chain would have kept this gate green
+        # while every published binary silently degraded its users to the
+        # passphrase fallback. `QS_SELFCHECK=keychain` is a hidden diagnostic
+        # branch in the product entry itself (bin/quick-studio.ts, above
+        # `parseCliArgs`; src/core/self-check.ts only RESOLVES the variable) that
+        # runs the keychain round-trip and exits before the Core boots, so the
+        # gate now forces the addon to load out of the exact file users download.
+        #
+        # KEYRING_REQUIRE_ROUNDTRIP is deliberately pinned EMPTY here rather than
+        # merely left unset: this gate proves the addon embedded and loaded (the
+        # cross-compile failure mode Story 11.2 exists to prevent), not that a
+        # keychain backend is present. A typed `unavailable` on a headless runner
+        # is a pass; only a failure to load the addon at all is a failure.
+        # Round-trip attestation stays with keyring-spike.yml, which provisions a
+        # backend per OS. Story 11.2's Block-If is explicit that gating EVERY
+        # release on a round-trip nobody has observed blocks releases on the
+        # benign case — pinning the variable empty makes that structural instead
+        # of dependent on nobody ever defining it at workflow or job level.
+        env:
+          QS_SELFCHECK: keychain
+          KEYRING_REQUIRE_ROUNDTRIP: ""
+        # Step-level complement to the job's `timeout-minutes: 30` above. If the
+        # QS_SELFCHECK branch is ever renamed or removed, `./asset` with no argv
+        # is a NORMAL BOOT: the Core binds a port and listens forever, burning
+        # the whole job budget on each of three legs before reporting a hang. Two
+        # minutes turns that into a fast, legible failure.
+        timeout-minutes: 2
         run: |
           set -euo pipefail
-          bun build --compile scripts/keyring-native-check.ts --outfile keyring-native-check
-          ./keyring-native-check
+          # Capture instead of running bare so the success LINE can be asserted
+          # too, not just the exit code: an exit-code-only gate would green on a
+          # binary that crashed its way to 0, or on a future branch that exits 0
+          # without ever calling the addon — the exact "accidental green" class
+          # DW-89 exists to kill. With KEYRING_REQUIRE_ROUNDTRIP empty the only
+          # failure return `runKeychainSelfCheck` can reach is the
+          # `invalid-argument` tripwire (unreachable with the module's constant
+          # service and UUID account, so in practice a lenient run either prints
+          # OK or dies), which is precisely why the OK line — and not the exit
+          # code — is the real assertion here.
+          #
+          # Capturing has one trap and this handles it: under `set -e` a failing
+          # `OUT="$(...)"` aborts the step AT THE ASSIGNMENT, so a bare capture
+          # would swallow every `selfcheck:` progress line on exactly the runs
+          # that need them (a native crash writes nothing to stderr either, and
+          # windows/linux-arm64 gate behaviour has never been observed). Run it
+          # as an `if` condition, merge stderr in, and echo the transcript back
+          # before failing.
+          if ! OUT="$(./${{ matrix.asset }} 2>&1)"; then
+            printf '%s\n' "$OUT"
+            echo "release: the keyring gate FAILED on ${{ matrix.key }} — the shipped binary exited non-zero; its output is above" >&2
+            exit 1
+          fi
+          printf '%s\n' "$OUT"
+          if ! printf '%s\n' "$OUT" | grep -q 'selfcheck: OK'; then
+            echo "release: the keyring gate exited 0 but never printed 'selfcheck: OK' — the round-trip did not run on ${{ matrix.key }}" >&2
+            exit 1
+          fi
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

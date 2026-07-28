@@ -23,6 +23,7 @@ import { runFirstRunSetup, type FirstRunSetupResult } from "../src/core/first-ru
 import { FIRST_RUN_HINT, isFirstRunBoot } from "../src/core/first-run-signal.ts";
 import { HELP_TEXT } from "../src/core/help-text.ts";
 import { createShutdownController, type ShutdownController } from "../src/core/lifecycle.ts";
+import { formatSelfCheckValue, resolveSelfCheckMode } from "../src/core/self-check.ts";
 import { startCore } from "../src/core/server.ts";
 import { printUpdateInstructions, runUpdateCheck } from "../src/core/update-check.ts";
 import { VERSION } from "../src/core/version.generated.ts";
@@ -40,6 +41,94 @@ function resolvePort(): number {
     process.exit(1);
   }
   return port;
+}
+
+// Hidden release-gate diagnostic (DW-89): `QS_SELFCHECK=keychain` runs the
+// keychain round-trip and exits, so `.github/workflows/release.yml` can gate on
+// THE SHIPPED `quick-studio-<os>-<arch>` binary instead of a second artifact
+// compiled from `scripts/keyring-native-check.ts`. Deliberately not a CLI flag
+// and deliberately absent from BOTH HELP_TEXT and the README: it mutates the OS
+// keychain and is a CI probe, not a user knob. `QS_NO_UPDATE_CHECK` is only a
+// PARTIAL precedent — it is hidden from HELP_TEXT but IS documented in
+// README.md's environment list, because it is a genuine user knob that merely
+// does not earn help-text space. This one goes further, out of both, and is
+// documented in docs/keyring-spike-decision.md instead.
+//
+// It resolves HERE, above `parseCliArgs`, on purpose: the gate invokes the binary
+// with whatever argv the workflow happens to pass, and no argv shape — a usage
+// error, a stray positional, `--persistent` — may mask it or make it exit for the
+// wrong reason. Sitting above the whole boot sequence also means it can never bind
+// a port, create the app-data directory, write a lock file, or prompt for a
+// passphrase; it exits before mode resolution, `runFirstRunSetup`, and `startCore`.
+//
+// The round-trip module is imported DYNAMICALLY, inside the try — but be precise
+// about what that buys TODAY, because the honest answer is "not yet the error
+// message". This file's import block above already reaches `src/core/keychain.ts`
+// through a STATIC chain (`first-run-setup.ts` → … → `keychain.ts` → its
+// top-level `@napi-rs/keyring` import), so on a binary that did not embed its
+// binding the addon load throws during MODULE EVALUATION, before a single line
+// below runs: the operator gets an uncaught Bun stack trace, loud and non-zero,
+// but not the clean `selfcheck: FAILED — native module did not load` line. The
+// dynamic import and its catch are what make that clean report — and the whole
+// self-check — correct the moment that chain goes lazy, which is exactly the
+// future DW-89 exists to guard. Importing the round-trip module statically HERE
+// would move the failure permanently outside this try and make the catch dead
+// code forever, so the split into `self-check.ts` (dependency-free, static) and
+// `keychain-self-check.ts` (keychain-touching, dynamic) is right in both worlds.
+// (`bun build --compile` still statically bundles a dynamic import with a literal
+// specifier, so the addon is embedded either way.)
+const selfCheck = resolveSelfCheckMode(process.env);
+if (selfCheck.kind === "unknown") {
+  // Fail fast and name the expected value. A silent fall-through would boot the
+  // Core on a CI runner and sit there until `timeout-minutes` expires, reporting
+  // a 30-minute hang instead of a one-character typo.
+  //
+  // The offending value is echoed through `formatSelfCheckValue`, never raw: it
+  // is arbitrary environment text landing in a public CI log, and a value
+  // carrying newlines or an ESC could forge extra log lines or repaint the
+  // terminal. `src/core/keychain.ts` bounds its `detail` for the same reason.
+  //
+  // The bounding is also why the line needs a HINT arm. `formatSelfCheckValue`
+  // strips control characters and trims, so a value that differs from `keychain`
+  // only by a trailing space or a CRLF — the shape a YAML scalar or a
+  // Windows-edited workflow file produces — would otherwise print the
+  // self-contradictory `unknown QS_SELFCHECK 'keychain' (want: keychain)`, and an
+  // all-whitespace value would print `unknown QS_SELFCHECK ''`. Naming the real
+  // difference is the whole point: this arm exists to turn a CI misconfiguration
+  // into a five-second diagnosis, and a line that appears to reject the value it
+  // asks for spends that budget instead of saving it.
+  const shown = formatSelfCheckValue(selfCheck.value);
+  const hint =
+    shown === "keychain"
+      ? " (it matches only once surrounding whitespace/control characters are stripped)"
+      : shown === ""
+        ? " (the value is entirely whitespace or control characters)"
+        : "";
+  process.stderr.write(`quick-studio: unknown QS_SELFCHECK '${shown}'${hint} (want: keychain)\n`);
+  process.exit(1);
+}
+if (selfCheck.kind === "keychain") {
+  try {
+    const { runKeychainSelfCheck } = await import("../src/core/keychain-self-check.ts");
+    process.exit(runKeychainSelfCheck(process.env));
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`selfcheck: FAILED — native module did not load: ${msg}\n`);
+    process.exit(1);
+  }
+}
+// Exhaustiveness guard. The two branches above are `if`s with an implicit
+// fall-through, and the fall-through BOOTS THE CORE — so a future fourth
+// `SelfCheckMode` arm that nobody wired up here would silently start a listening
+// server on a release runner and hang the leg to its timeout, the exact failure
+// the `unknown` arm exists to prevent. `never` turns that into a compile error;
+// the runtime arm is unreachable by construction and says so if it ever is not.
+if (selfCheck.kind !== "none") {
+  const unhandled: never = selfCheck;
+  process.stderr.write(
+    `quick-studio: internal error — unhandled QS_SELFCHECK mode ${JSON.stringify(unhandled)}\n`,
+  );
+  process.exit(1);
 }
 
 // Resolve the CLI decision (mode + browser-open) BEFORE booting. A usage error

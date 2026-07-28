@@ -13,6 +13,9 @@ on:
       - "src/core/keychain.ts"
       - "src/core/keychain.test.ts"
       - "scripts/keyring-native-check.ts"
+      # DW-89 moved the round-trip BODY here (the script above is now a thin
+      # wrapper), so the AR-20 attestation must still trigger on its semantics.
+      - "src/core/keychain-self-check.ts"
       - ".github/workflows/keyring-spike.yml"
       - "package.json"
       - "bun.lock"
