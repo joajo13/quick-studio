@@ -940,7 +940,8 @@ severity: medium
 found_by: Blind Hunter review pass on 11-6
 summary: In passphrase mode (`credential-store.ts:550`) the derived key is handed straight to `loadStoreFromFile`, which returns `{outcome:"opened"}` with an EMPTY store when the file does not exist (`credential-store.ts:684-686`). So with a descriptor present and `credential-store.enc` absent, every passphrase "unlocks" successfully and the first `saveConnection` writes ciphertext under whatever key was typed — permanently locking the user out of nothing, but cementing a passphrase they may have typo'd, with no error at any point. `provider-key-store.ts:412-416` already carries the exact guard for this (`descriptor present but store file is missing` → `corrupt`) with a comment spelling out this very failure mode; the credential store was never given the matching arm.
 evidence: Verified by reading both files side by side. The state is reachable: `openPersistent` writes the descriptor at `:642` BEFORE seeding the `.enc` at `:654` (deliberate ordering), so a crash in that window — or a partial failure of the `rmSync` rollback at `:657-661`, or a user deleting the `.enc` — leaves exactly this layout. NOT caused by Story 11.6: the same bypass exists today via `QS_PASSPHRASE`/`QS_PASSPHRASE_FD`. Surfaced by 11.6 because its unlock loop uses a verify-open as proof that the typed passphrase is correct, and in this one state that proof is vacuous. Fix is ~4 lines mirroring the provider-key store's guard plus a regression test; deferred because Story 11.6 is contractually forbidden from modifying `credential-store.ts` and the fix belongs with the Epic 2 crypto layer that owns the invariant.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-store-missing-encfile-guards
 
 ### DW-85: Nothing enforces that the credential store and the provider-key store share one passphrase — the two descriptors carry independent salts, so 11.6's unlock verifies only one of them and its create path can orphan the other
 origin: review pass of 11-6, 2026-07-23
@@ -960,7 +961,8 @@ severity: low
 found_by: Blind Hunter review pass on 11-6
 summary: With `provider-keys.meta.json` present, `provider-keys.enc` absent, and the credential store in `first-run`, `classifyStorePresence` reports `providerKeys: "passphrase-mode"`, `anyDescriptorPresent` is true, and the unlock loop targets the provider-key store. That store's missing-file guard returns `corrupt` before any key derivation, and `classifyUnlockAttempt` maps `corrupt` → `retry` (correctly, in general: a GCM auth-tag failure is cryptographically indistinguishable from tamper). The result is three prompts that cannot possibly succeed, followed by `skip`. Nothing is written and nothing is lost, but the user is asked to re-type a passphrase against a store that has already decided the answer is irrelevant.
 evidence: Confirmed by reading `provider-key-store.ts:412-416` (`descriptor present but store file is missing` → `corrupt`, unconditional and before decryption) against `first-run-setup.ts`'s retry mapping. Note this is the exact mirror of DW-84: the provider-key store has the guard the credential store lacks, so the same on-disk layout produces a vacuous *success* on one store and an unwinnable *retry* on the other. Not fixable inside 11.6 without either (a) extending `store-presence.ts` to report descriptor-without-`.enc` as its own fourth state and short-circuiting the loop, or (b) giving the stores a way to distinguish "this passphrase is wrong" from "this store cannot be opened by any passphrase" — both of which belong with the DW-84 fix in the Epic 2 crypto layer, and should be decided together with it. Deferred rather than patched: retrying `corrupt` is the correct default everywhere else, and narrowing it from inside the pre-flight would duplicate store knowledge the pre-flight is deliberately kept free of.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-store-missing-encfile-guards
 
 ### DW-87: The repo has no lint gate at all, so the whole `react-hooks` rule class (exhaustive-deps, conditional hooks) is uncaught by CI and by `bun test`
 origin: follow-up review of 11-7, 2026-07-23
@@ -980,7 +982,8 @@ severity: medium
 found_by: Blind Hunter review pass on 11-2
 summary: The repo has no CI job that runs the test suite. `keyring-spike.yml` triggers on six specific paths and runs only `src/core/keychain.test.ts`; `publish.yml` and `release.yml` run none. Story 11.2's whole single-source mechanism depends on `scripts/platforms.test.ts` and the `bin/quick-studio-shim.test.ts` drift block failing when the shim's hardcoded `SUPPORTED` map diverges from `scripts/platforms.ts` — but nothing executes them outside a developer's local machine. The spec's own AC ("`bin/quick-studio-shim.test.ts` fails until the shim's `SUPPORTED` map is updated") is therefore only true for someone who happens to run the suite before tagging.
 evidence: Verified by listing `.github/workflows/` and reading all three files: no `bun test` invocation outside `keyring-spike.yml`'s single keychain smoke. Pre-existing and repo-wide — 1767 tests across 85 files have never run in CI — but 11.2 sharpens the consequence, because it deliberately traded a shared import (impossible: the shim is dependency-free CJS) for a test-enforced contract. Natural fix is a `ci.yml` running `bun install --frozen-lockfile`, `bun x tsc --noEmit` and `bun test` on push/PR, and making `release.yml`'s build legs depend on it so a tag cannot ship a binary whose drift guards are red. Adding it is a repo-level CI decision (trigger matrix, required-check configuration, how to handle the 9 `node`-dependent shim tests on runners) rather than a change 11.2 can make unilaterally. Related to DW-87 (no lint gate) — both belong to the same "this repo has no CI quality gate" pass.
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-ci-typecheck-test-gate
 
 ### DW-89: The release keyring gate compiles and runs `keyring-native-check.ts`, not the shipped binary, so it proves the leg's toolchain can embed the addon rather than that `quick-studio-<os>-<arch>` itself can load it — equivalent today only by accident of a static import chain
 origin: adversarial review of 11-2, 2026-07-24
@@ -1012,7 +1015,8 @@ severity: low
 found_by: Blind Hunter follow-up review pass on 11-2
 summary: `tsc --noEmit --listFiles` loads exactly one file under `scripts/`: `platforms.ts`, and only because `bin/quick-studio-shim.test.ts` (which IS in `include`) imports it. Nothing else in `scripts/` is typechecked — including `build-npm-packages.ts`, the script that generates every published npm manifest, and `keyring-native-check.ts`, which the release gate compiles and runs. Story 11.2 put its single source of truth in that directory, so the `readonly` field guarantees the file's own comment relies on hold only for as long as the shim test keeps importing it; a plausible refactor that drops that import silently removes `platforms.ts` from `tsc` coverage with no signal.
 evidence: Verified with `bun x tsc --noEmit --listFiles` and by reading `tsconfig.json:31`. Pre-existing and directory-wide — `scripts/` has never been in `include` — but 11.2 raised the stakes by making a file there authoritative for three consumers. Fix is a one-line `include` addition, deliberately not made here: adding `scripts` to the project's typecheck surface may surface accumulated errors across five previously-unchecked files, and whether those get fixed or suppressed is a repo-level decision that belongs with the same CI-gate pass as DW-88 (nothing runs `tsc` in CI either) and DW-87 (no linter at all).
-status: open
+status: done 2026-07-28
+resolution: resolved by sweep bundle dw-dw-ci-typecheck-test-gate
 
 ### DW-92: The README hardcodes the platform table in five places with no drift guard, so it is the one consumer of Story 11.2's single source of truth that can silently go stale — and it ships verbatim inside the published npm package
 origin: follow-up review of 11-2, 2026-07-24
@@ -1344,4 +1348,169 @@ severity: medium
 found_by: Blind Hunter (recorded in the spec's Review Triage Log on the first pass but never reaching this ledger)
 summary: DW-89 made the gate probe the shipped binary but kept it addon-load-only on every platform. That leniency is correct for the two ubuntu legs (a GitHub runner has no Secret Service, so `unavailable` is the honest pass), but `windows-latest` carries Credential Manager natively — a real `store -> found(matches) -> deleted` would succeed there on every release, and the gate deliberately does not ask for it.
 evidence: `.github/workflows/keyring-spike.yml`'s Windows leg already runs under `KEYRING_REQUIRE_ROUNDTRIP=1` and depends on exactly that native backend, so the capability is established rather than speculative. Not fixable inside DW-89: its intent contract's `Never` list forbids setting `KEYRING_REQUIRE_ROUNDTRIP` on a release leg, and the rationale it rests on — Story 11.2's Block-If against gating every release on a round-trip nobody has observed — is genuinely correct for the two Linux legs. Making it per-leg (strict on Windows, lenient on ubuntu) is a Story 11.2 policy decision. Worth pairing with the first real `v*` tag, since no leg of `release.yml` has ever executed.
+status: open
+
+### DW-123: `release.yml` creates the GitHub Release with the default `GITHUB_TOKEN`, and GitHub does not start workflows from token-created events — so `publish.yml`'s `release: published` trigger never fires from the tag path and the npm publish is effectively manual
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `.github/workflows/release.yml` (the `release` job's `softprops/action-gh-release` step, no `token:` input); `.github/workflows/publish.yml:15-17` (`on: release: types: [published]`)
+severity: medium
+found_by: Blind Hunter follow-up review pass on dw-ci-typecheck-test-gate (surfaced while rebutting a claim about publish.yml's gating)
+summary: `release.yml`'s upload step passes no `token:`, so `action-gh-release` authenticates with the automatic `GITHUB_TOKEN`. GitHub's documented recursion guard is that events produced by that token do not start new workflow runs — so the Release this job publishes does not fire `publish.yml`, and the four npm packages are never published by the automated path at all. The whole "platform packages first, main package last" ordering `publish.yml` is built around only ever executes when a human creates or re-publishes a Release by hand, which is also precisely the path that bypasses the new CI gate (and DW-90's version guard).
+evidence: Verified by reading the `release` job: `permissions: contents: write`, `uses: softprops/action-gh-release@3bb1273... # v2.6.2` with only `files:` and `fail_on_unmatched_files:` — no `token:` override anywhere in the file (`grep -n 'token\|secrets\.' .github/workflows/release.yml` returns nothing). `action-gh-release` defaults to `draft: false`, so the Release is created already-published, in one token-authored action. Pre-existing and untriggered: no `v*` tag has ever been pushed, so neither behaviour has been observed in this repo — which is exactly why it is worth deciding before the first real release rather than discovering it as a silent no-publish. Fix is an owner call with real tradeoffs: a PAT or GitHub App token restores the automatic chain but hands a broader credential to the release job, while making `publish.yml` `workflow_dispatch`-able or a `needs:`-dependent job inside `release.yml` keeps the token narrow and changes the publish topology. Pairs with DW-124/DW-125 and with the first `v*` tag.
+status: open
+
+### DW-124: The CI gate runs on `ubuntu-latest` only while `release.yml` compiles and ships three platforms, so a regression reachable only on `win32-x64` or `linux-arm64` leaves the gate green and ships
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `.github/workflows/ci.yml` (`runs-on: ubuntu-latest`, single job); `.github/workflows/release.yml` (three-runner `build` matrix)
+severity: medium
+found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on dw-ci-typecheck-test-gate (also recorded in the spec's Review Triage Log on the first pass, where it never reached this ledger)
+summary: The gate is now the thing standing between a tag and a release, and it exercises one of the three platforms that release ships. The suite has genuinely platform-forked code paths — `bin/quick-studio-shim.test.ts`'s six `skipIf(!SUPPORTED_HERE)` tests, and `src/ui/styles/contrast.test.ts`'s documented native-Windows `.pathname` hazard (`/C:/Users/…`, which `Bun.file` cannot open) — and none of the non-Linux branches is executed by any workflow.
+evidence: Verified by reading `ci.yml` (one job, `runs-on: ubuntu-latest`, no `strategy.matrix`) against `release.yml`'s matrix, and by reading the `skipIf` predicate in the shim test plus the comment block at `src/ui/styles/contrast.test.ts:11-20` — which this bundle updated and which still concedes the Windows path reaches only a developer running `bun test` natively. Deliberately accepted by the spec's Design Notes ("Known limitations… (5) the gate is Linux-only") rather than overlooked. Deferred because the fix is a policy/cost decision, not a patch: an `os: [ubuntu-latest, macos-latest, windows-latest]` matrix triples every push and PR (see DW-129 on the doubled run count and absent cache), and `keyring-spike.yml` already establishes the per-OS pattern this would follow.
+status: open
+
+### DW-125: Nothing makes the gate a required check, so a red gate on a pull request is a cross anyone can merge past — it blocks tags, not merges
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: repository branch-protection / ruleset settings (out of tree); documented at `README.md`'s `### CI` section
+severity: medium
+found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on dw-ci-typecheck-test-gate (also recorded in the spec's Review Triage Log on the first pass, where it never reached this ledger)
+summary: DW-88 is closed for the release path — `build` needs `ci`, so a tag cannot ship red guards — and open for the merge path. `ci.yml` runs on every PR and reports status, but with no branch protection requiring it, a failing gate is advisory. The invariant "`main` is green" is still enforced by developer discipline, which is the exact thing the gate's own thesis says is not enforcement.
+evidence: Verified by reading `ci.yml`'s triggers (`push: branches: ["**"]`, `pull_request:`) and confirming the repo contains no ruleset or protection config — branch protection is GitHub-side settings, not a file, so this is deliberately not something the change could have fixed. `README.md` states it plainly. Deferred because it needs someone with repo admin to act, and because it should be decided together with DW-124 (which platforms' legs become required) and DW-129 (a required check that runs twice per PR push doubles the merge-blocking latency). Note the interaction recorded in the spec's rejected findings: adding `paths-ignore` to skip docs-only commits would make the check *skipped* rather than *passed*, which breaks required-check configuration — so that optimisation must not be taken before this is decided.
+status: open
+
+### DW-126: The gate pins Node `22.14.0` while the published shim advertises `engines.node: ">=18"`, so the only advertised runtime floor in the repo is the one nothing tests
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `.github/workflows/ci.yml` (`actions/setup-node` with `node-version: "22.14.0"`); `package.json:15` (`"node": ">=18"`); `scripts/workflows.test.ts` (the toolchain test cross-checks `engines.bun` against the Bun pin but performs no equivalent for Node)
+severity: medium
+found_by: Blind Hunter, follow-up review pass on dw-ci-typecheck-test-gate (also recorded in the spec's Review Triage Log on the first pass, where it never reached this ledger)
+summary: `bin/quick-studio-shim.test.ts` is the only test that spawns a real `node`, and the gate now runs it against 22.14.0 — a version no contract requires. Nothing anywhere executes the shim on Node 18, the floor `bin/quick-studio.cjs` advertises to every npm consumer. The asymmetry is visible inside the new drift suite itself: the Bun invariant asserts `engines.bun === ">=" + pin`, while the Node invariant asserts only that every workflow agrees on a value, with no `engines` comparison and no stated reason for the difference.
+evidence: Verified by reading `package.json:15-16` against `ci.yml`'s `setup-node` step and `scripts/workflows.test.ts`'s two toolchain assertions. The spec's Design Notes name this explicitly as a known limitation ("(1) the gate pins Node 22.14.0, so `engines.node: ">=18"` stays unverified; a `[18, 22.14.0]` matrix would test it and is out of scope"), so it is accepted rather than missed. Deferred because there are two legitimate resolutions and they point opposite ways: add a `node-version: [18, 22.14.0]` matrix (costs a second shim run per gate, proves the floor) or lower the advertised floor to what is actually tested (costs consumers on older Node, makes the claim honest for free). Both are Story 11.2 packaging decisions. Pairs with DW-124.
+status: open
+
+### DW-127: `docker/Dockerfile` floats on `FROM oven/bun:1`, the one Bun copy outside the new single-version guard, and it can resolve below the `>=1.3.14` floor the package advertises
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `docker/Dockerfile:8` (`FROM oven/bun:1`); `package.json:16` (`"bun": ">=1.3.14"`); `scripts/workflows.test.ts` (scans `.github/workflows/` only)
+severity: low
+found_by: Blind Hunter, follow-up review pass on dw-ci-typecheck-test-gate
+summary: The new drift suite's own comment complains about "five-plus hardcoded copies with nothing tying them together" and then scans only `.github/workflows/`. The Dockerfile is a sixth copy and the loosest of them all: `oven/bun:1` tracks the whole 1.x line, so it can resolve to a Bun both below the declared `>=1.3.14` engines floor and above the pinned `1.3.14` the gate tests on — in either direction, an image that runs code no workflow has ever run on that runtime.
+evidence: Verified with `grep -rn 'oven/bun' docker/` (one hit, `docker/Dockerfile:8`) and by reading the guard's file scan (`readdirSync(WORKFLOW_DIR)`). Pre-existing and untouched by this bundle — the Dockerfile predates the gate — but in scope for the ledger because the change's own thesis is that an unguarded duplicated constant drifts, and this is the copy it left out. Not patched here because widening the guard to non-workflow files is a scope decision with a real edge (a Docker tag is a floating *major* by intent, so the assertion cannot be plain equality against the pin), and because it belongs with the recorded `.bun-version` single-source follow-up from `e415826` rather than being solved twice.
+status: open
+
+### DW-128: The gate runs the suite on a bare `ubuntu-latest` with no Secret Service, so `keychain.test.ts`'s round-trip rows take their `unavailable` branch and assert shape rather than a real store/retrieve
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `.github/workflows/ci.yml` (no Secret Service provisioning step); `src/core/keychain.test.ts:69-116` (the `outcome === "unavailable"` early return); `.github/workflows/keyring-spike.yml:52-60` (the provisioning that exists)
+severity: low
+found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on dw-ci-typecheck-test-gate
+summary: `keychain.test.ts`'s "round-trip OR unavailable (both green)" block is written to pass on a keychain-less box: on `unavailable` it validates the detail string's shape, asserts no secret leaked into it, and returns before the store/retrieve/delete assertions. A GitHub ubuntu runner is headless with no unlocked keyring, so on the gate those rows never exercise the round-trip they are named for. This is correct by design — `keyring-spike.yml` is the workflow that provisions `gnome-keyring`/`dbus-x11` precisely so its legs can be strict — but it means "the gate runs the full suite" proves less about the keychain than the phrase suggests.
+evidence: Verified by reading the early-return at `src/core/keychain.test.ts:69-88` and the provisioning step at `keyring-spike.yml:52-60`, whose own comment states "a GitHub ubuntu runner is headless with no unlocked keyring, so without this the wrapper would (correctly) report keychain-unavailable". The README's `### CI` section was amended in this pass to say so; this entry is the decision that remains. Deferred because provisioning Secret Service inside the gate means wrapping `bun test` in `dbus-run-session` and adding an `apt-get` install to every push and PR — measurable cost for coverage `keyring-spike.yml` and `release.yml`'s per-leg keyring gate already provide on a per-platform basis. Worth deciding alongside DW-124.
+status: open
+
+### DW-129: Every push to a same-repo PR branch pays two full cold gate runs, and the superseded `push` run is never cancelled
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `.github/workflows/ci.yml` (`on: push: branches: ["**"]` plus unfiltered `pull_request:`; the `concurrency` block's `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; no `actions/cache`)
+severity: low
+found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on dw-ci-typecheck-test-gate (also recorded in the spec's Review Triage Log on the first pass, where it never reached this ledger)
+summary: A commit pushed to a same-repo PR branch emits both a `push` and a `pull_request` event, which land in different concurrency groups by design (`ci-${{ github.workflow }}-${{ github.ref }}`, and `github.ref` differs: the branch ref vs `refs/pull/N/merge`). `cancel-in-progress` evaluates true only for the `pull_request` half, so superseded `push` runs accumulate rather than cancel. Neither run caches anything, so each pays a full cold `bun install` plus a UI build — and `bun run build` executes twice per run anyway, since `bun install`'s `prepare` hook already ran it.
+evidence: Verified by reading the trigger and concurrency blocks, and confirmed against the spec's own Design Notes, which accept the double run explicitly ("(3) a same-repo PR gets two gate runs… at a ~16s suite that is cheaper than reasoning about the skip conditions") and the absent cache ("(4) `runs-on: ubuntu-latest` stays floating, like every other leg"). Measured locally: the suite is ~16-18s, so today the waste is dominated by install/build, not by the tests. Deferred rather than patched because each fix has a real downside: `push: branches: [main]` loses gate coverage on branches that never open a PR, a `!startsWith(github.ref, 'refs/tags/')`-conditioned `cancel-in-progress` adds an expression whose tag-path behaviour nothing can test before the first `v*` tag, and `actions/cache` on `~/.bun/install/cache` introduces a cache-poisoning surface the repo has so far avoided. Becomes materially more expensive if DW-124 (a three-OS matrix) or DW-125 (required checks) lands first, so decide the ordering deliberately.
+status: open
+
+### DW-130: TypeScript is the one toolchain the gate does not pin and the new drift suite does not guard, so a `bun update` can turn CI red on an unchanged tree
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `package.json:66` (`"typescript": "^5.7.0"`); `.github/workflows/ci.yml` (`run: bun x tsc --noEmit`); `scripts/workflows.test.ts` (guards Bun and Node versions, not the compiler)
+severity: low
+found_by: Blind Hunter, follow-up review pass on dw-ci-typecheck-test-gate
+summary: The gate's typecheck leg is only as stable as the compiler it resolves. Bun and Node are pinned to exact versions and cross-checked by a drift test; TypeScript floats on a `^5.7.0` caret. `--frozen-lockfile` does make each CI run deterministic against the committed `bun.lock`, so this is not a live break — but a routine `bun update` that bumps TS a minor can introduce new diagnostics and turn the gate red on a tree nobody changed, with no guard drawing the connection.
+evidence: Verified by reading `package.json:66` (resolving to 5.9.3 in the current lockfile), the gate's typecheck step, and the two toolchain assertions in `scripts/workflows.test.ts`. Deferred because the obvious remedies conflict with decisions this repo has already made: pinning TS exactly diverges from how every other devDependency is specified, and adding a `typecheck` package script to single-source the invocation would break the drift test that asserts the literal `bun x tsc --noEmit` — and `docs/keyring-spike-decision.md:148` documents that exact command, so changing it falsifies a doc. Low urgency: `--frozen-lockfile` means the failure can only arrive with a deliberate lockfile change, which is reviewable.
+status: open
+
+### DW-131: `scripts/platforms.test.ts` reads `runs-on` with a first-match regex over the whole of `publish.yml`, so adding any job above `publish` silently moves the DW-80 asset/runner check onto the wrong job
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `scripts/platforms.test.ts:221-223` (`workflow.match(/^\s*runs-on:\s*(\S+)\s*$/m)` against `publish.yml`)
+severity: low
+found_by: Edge Case Hunter, follow-up review pass on dw-ci-typecheck-test-gate
+summary: The test's real invariant is that `publish.yml`'s DW-80 guard names the asset whose row's `runner` equals the `publish` job's own `runs-on` — the thing that stops a `--asset linux-arm64` from dying with `Exec format error` mid-release on an x64 runner. It derives the runner with an unanchored first-match, which is correct only while `publish.yml` has exactly one job. The change most likely to break it is one this ledger now recommends: adding a gate job to `publish.yml` (DW-123's neighbourhood) puts a second `runs-on` above `publish`, after which the assertion compares the asset against a different job's runner and passes or fails for the wrong reason.
+evidence: Verified that `publish.yml` currently contains exactly one `runs-on:` (`grep -c` returns 1), so the test is correct today and the hazard is latent. Previously surfaced on this bundle's first review pass and rejected as "pre-existing and currently untriggerable"; re-recorded now because the deferred work above makes the triggering edit a likely near-term change rather than a hypothetical. Fix is known and already demonstrated in-repo: `scripts/workflows.test.ts` gained a `jobBlock(text, job)` helper in this pass for exactly this class of bug, so the remedy is to slice `publish.yml` to the `publish` job first and match inside it. Not patched here because `platforms.test.ts` belongs to Story 11.2's DW-80 guard and this pass had no mandate to change what that test asserts.
+status: open
+
+### DW-132: `bun test` exits 0 regardless of skip count, so a `skipIf` predicate quietly widening — or a whole file going skipped — reads as a green gate
+
+origin: adversarial review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `.github/workflows/ci.yml` (`run: bun test`, no expected-skip assertion); the nine `skipIf` / `test.skip` sites across `src/`, `bin/` and `scripts/`
+severity: low
+found_by: Blind Hunter, first review pass on dw-ci-typecheck-test-gate (recorded in the spec's Review Triage Log; never reached this ledger)
+summary: The suite currently reports 2045 pass / 1 skip. Nothing asserts that "1" — so a `skipIf` predicate that silently starts evaluating true on the runner (the shim's six `SUPPORTED_HERE` tests are the obvious candidates, and DW-124's platform question decides whether they run) takes coverage away with the gate still green. The gate's own thesis is that an unasserted invariant is not enforced, and the count of tests actually executed is one such invariant.
+evidence: Verified that the suite's skip count is 1 today (the darwin row) and that `bun test` exits 0 with skips present, and by counting nine `skipIf`/`test.skip` sites in the tree. Deferred rather than patched because the mechanism is not obvious: asserting an exact count in CI makes every legitimate new `skipIf` a two-place edit, and the alternative — parsing `bun test`'s summary line in a workflow step — puts a text-scrape of tooling output on the release-blocking path. Worth deciding together with DW-124, since a platform matrix changes the expected count per leg.
+status: open
+
+### DW-133: Two environment assumptions in `sandbox-server.test.ts` — the `::1` bind and the specific-port re-bind in teardown — have only ever been exercised on WSL, and now block a release
+
+origin: adversarial review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `src/core/sandbox-server.test.ts:107-110` (`startSandboxServer({ host: "::1", port: 0, … })` and the bracketed-origin assertion) and the specific-port re-bind in the same file's teardown block
+severity: low
+found_by: Blind Hunter, first review pass on dw-ci-typecheck-test-gate (recorded in the spec's Review Triage Log; never reached this ledger)
+summary: Both rows depend on properties of the host network stack rather than of the code: that `::1` is bindable (IPv6 loopback present and enabled) and that a just-released specific port can be immediately re-bound. Neither is guarded or skipped on absence. Until this bundle they failed only a developer's local run; now they sit on the path between a `v*` tag and a release, on a runner image nobody has run them against.
+evidence: Verified the `::1` bind and its `http://[::1]:${port}` assertion at `src/core/sandbox-server.test.ts:107-110`. GitHub's `ubuntu-latest` images do have IPv6 loopback, so the expected outcome is green — but "expected" is the whole point: this has never executed anywhere except WSL, and the first evidence either way arrives on the first real gate run. Deferred deliberately: guarding a hazard that has not been observed would add `skipIf` conditions that hide the very signal the first run is supposed to produce (and would feed DW-132's invisible-skip problem). The right sequencing is to push, watch the first `ci.yml` run, and only then decide whether either row needs a capability guard.
+status: open
+
+### DW-134: `publish.yml` is the one workflow that still builds and ships artifacts with no typecheck and no suite, even though this bundle created the reusable gate it would need to call
+
+origin: follow-up review of spec-dw-ci-typecheck-test-gate.md, 2026-07-28
+source_spec: `spec-dw-ci-typecheck-test-gate.md`
+location: `.github/workflows/publish.yml` (single `publish` job, no `needs:`, runs `scripts/build-npm-packages.ts` then four `npm publish` calls); `.github/workflows/ci.yml` (`workflow_call:`)
+severity: medium
+found_by: Blind Hunter and Edge Case Hunter, follow-up review pass on dw-ci-typecheck-test-gate
+summary: `release.yml` now calls the gate as a reusable workflow and `build` waits on it, so a `v*` tag cannot ship a binary with red guards. `publish.yml` got none of that: it re-checks-out, re-runs the npm-manifest generator and publishes four packages to the registry with neither `bun x tsc --noEmit` nor `bun test` having run on that tree. The two-line remedy — a `ci: uses: ./.github/workflows/ci.yml` job plus `needs: ci` on `publish` — is available only because this bundle exposed `workflow_call`, and it was not taken.
+evidence: Verified that `publish.yml` declares exactly one job with no `needs:` and no `bun test`/`tsc` step (`grep -n 'needs:\|bun test\|tsc' .github/workflows/publish.yml` is empty), and that `ci.yml` carries `workflow_call:`, so the call would resolve today. Distinct from DW-123, and should be read next to it rather than instead of it: DW-123 is about WHICH path reaches `publish.yml` (the token-created Release never fires it, so in practice only a hand-created or re-published Release does) and its fix is an owner call about credentials and topology. This entry is about the gate being absent on that job whatever DW-123 decides — a PAT that restores the automatic chain would publish through an ungated job just the same. Deliberately deferred rather than patched: the spec's Code Map marks `publish.yml` READ-ONLY and its Boundaries scope the change to `ci.yml` plus `release.yml`'s `build.needs`, so adding a job there is outside this pass's mandate. Adding the gate also lengthens every publish by a cold install + build + suite, which is a tradeoff worth deciding alongside DW-123 and the first real `v*` tag rather than inside a review pass.
+status: open
+
+### DW-135: The `orphaned-descriptor` remediation reaches the user on exactly ONE code path — a non-interactive boot is still told to go set `QS_PASSPHRASE_FD` for a store no passphrase can open
+
+origin: adversarial review of spec-dw-store-missing-encfile-guards.md, 2026-07-28
+source_spec: `spec-dw-store-missing-encfile-guards.md`
+location: `src/core/first-run-setup.ts` — the `!d.isInteractive()` arm (step 4) and the `hasPassphraseTransport(env)` arm (step 2), both of which return before `d.presence(dir)` is ever called; and the step-3 decline-probe, which consults only the credential store
+severity: medium
+found_by: Blind Hunter and Edge Case Hunter, first review pass on dw-store-missing-encfile-guards
+summary: DW-86's fix lives inside `runUnlockLoop`, which is reachable only after the pre-flight has cleared Ephemeral mode, the env/fd transport check, the decline-probe, AND the interactivity check. Three sibling paths therefore still exhibit the defect DW-86 names. (1) Non-interactive stdin: an orphaned descriptor emits `FD_TRANSPORT_HINT` — "set QS_PASSPHRASE_FD to supply a passphrase non-interactively" — which is precisely "blame the passphrase for a missing file", relocated to the headless/CI/systemd audience least able to diagnose it. (2) `QS_PASSPHRASE` already set: zero output at all. (3) The decline-probe only ever opens the CREDENTIAL store, so when that store is `keychain-mode` and the keychain works, the probe returns `opened` and the pre-flight skips at step 3 — a permanently-unopenable provider-key store never gets a word.
+evidence: Traced against `first-run-setup.ts`'s documented decision order: steps 2 and 4 both `return {outcome:"skip"}` before step 5 computes `presence`, so no orphan can be detected there. Confirmed the non-interactive path is genuinely reachable for an orphan — the guard added by this bundle sits AFTER the passphrase-provider call, so the always-declining probe still yields `passphrase-declined` and control does reach step 4. NOT caused by this bundle: every one of these three paths behaved identically before the change (an orphaned credential store already produced the same FD hint), so this is a pre-existing gap the new diagnosis merely made visible by contrast. Deferred rather than patched because the obvious fixes each violate a standing 11.6 boundary: hoisting the presence probe above step 2 breaks the "env/fd keep ABSOLUTE precedence, byte-for-byte unchanged" invariant, and probing the provider-key store in the pre-flight duplicates the store knowledge that module is deliberately kept free of. Worth deciding together with DW-136, since both are about where store-health remediation is allowed to surface.
+status: open
+
+### DW-136: `connection-registry.ts` collapses every non-`opened` credential-store outcome into a generic `internal_error`, so no store-health remediation ever reaches the UI
+
+origin: adversarial review of spec-dw-store-missing-encfile-guards.md, 2026-07-28
+source_spec: `spec-dw-store-missing-encfile-guards.md`
+location: `src/core/connection-registry.ts:253-262` (the non-`opened` arm: `internal_error` with `message: "credential store is unavailable"` and `detail: opened.outcome`)
+severity: medium
+found_by: Blind Hunter, first review pass on dw-store-missing-encfile-guards
+summary: The credential store distinguishes eight failure arms — `corrupt`, `locked`, `key-unavailable`, `key-invalid`, `schema-unknown`, `passphrase-declined`, `passphrase-invalid`, `unavailable` — each with a distinct cause and a distinct remedy. The registry flattens all of them into one `internal_error` whose user-facing message is "credential store is unavailable", with the actual outcome tag demoted to `detail`. A user who never reads stderr therefore has no path from a broken store to the action that would fix it, whatever that action is. This bundle added one more way to reach `corrupt` and wrote a genuinely actionable remediation for it, and that sentence exists in exactly one place: stderr, on the interactive pre-flight path only (see DW-135).
+evidence: Confirmed by reading the non-`opened` arm at `connection-registry.ts:253-262`, which branches on nothing and hard-codes a single message. Explicitly NOT caused by this bundle — `corrupt` was already a reachable arm from a wrong passphrase and from a damaged `.enc`, and the flattening predates this change entirely; the spec's Never list also forbids widening scope into recovery/UX surfacing. Deferred because the fix is a product decision, not a mechanical one: deciding which store failures deserve a distinct user-facing message, and how much on-disk detail an RPC error is allowed to leak, is exactly the kind of call the "never leak a path" boundary constrains. Should be read next to DW-135 — together they are the two halves of "the remediation exists but the user cannot get to it".
+status: open
+
+### DW-137: An orphaned provider-key descriptor permanently blocks creating a never-created credential store on a keychain-less host — every boot is zero prompts and a dead app, and the only documented escape is the action the advisory itself labels IRREVERSIBLE
+
+origin: adversarial review of spec-dw-store-missing-encfile-guards.md, 2026-07-28 (second review pass)
+source_spec: `spec-dw-store-missing-encfile-guards.md`
+location: `src/core/first-run-setup.ts` — `anyDescriptorPresent` gate at step (6) and `unlockTarget`'s `none` arm; origin of the state at `src/core/credential-store.ts` (the eager-`.enc` seed's rollback, whose `rmSync` failure is caught and ignored); consumer at `bin/quick-studio.ts` (treats `skip` as "change nothing" and boots anyway)
+severity: medium
+found_by: Blind Hunter, second review pass on dw-store-missing-encfile-guards
+summary: On the layout `credential: first-run` + `providerKeys: orphaned-descriptor` with the keychain unavailable, `anyDescriptorPresent` is true because of the FOREIGN orphan, so `runCreatePath` is unreachable and `unlockTarget` is `none`. The pre-flight therefore prompts zero times, prints the orphan advisory, and returns `skip` — on this boot and on every boot after it. `bin/` boots the app anyway, and with no credential store every connection RPC fails. The app dir is permanently un-configurable and the product offers no supported way out: the advisory's only actionable instruction other than "restore from a backup" is deleting the descriptor, which the same advisory correctly flags as IRREVERSIBLE. The likely production origin makes it sharper — a failed eager-`.enc` seed rolls back by `rmSync`-ing the descriptor inside a `try`/`catch` that ignores failure, so a store that never held a single byte of user data can leave exactly this orphan, and the user is then warned about destroying backups that do not exist.
+evidence: Traced through `runFirstRunSetup` steps (5)-(6) and confirmed by the two `trappedCases` tests in `first-run-setup.test.ts`, which pin the zero-prompt/skip routing as deliberate and data-safe. NOT caused by this bundle: before the change the same layout classified `providerKeys` as `passphrase-mode`, so `anyDescriptorPresent` was already true and `runCreatePath` was already unreachable — the user simply burned three futile prompts first and was then told the passphrase was wrong. This bundle replaced futile prompts with an honest explanation; it did not create, and does not widen, the dead end itself. Deferred rather than patched because every fix crosses the spec's Never list ("do not add recovery, repair, or deletion of orphaned descriptors"): a supported repair/reset command, a scoped create that ignores a foreign orphan, or a rollback that refuses to leave a half-committed descriptor are each a product decision about destructive operations, not a mechanical correction. Belongs with DW-135 and DW-136 — those two are "the remediation cannot reach the user"; this one is "even when it reaches them, there is nothing safe to do".
 status: open

@@ -1,8 +1,9 @@
 /**
  * Covers `isFirstRunBoot`'s whole decision surface — the Ephemeral short-circuit
- * (zero seam calls, the hardest invariant), the 3×3 `(credential, providerKeys)`
+ * (zero seam calls, the hardest invariant), the 4×4 `(credential, providerKeys)`
  * classification matrix crossed onto ONE boolean (`true` only when BOTH are
- * `"first-run"`), and the total-never-throws fallback — over INJECTED
+ * `"first-run"`, so the DW-86 `"orphaned-descriptor"` state reports a CONFIGURED
+ * machine, not a virgin one), and the total-never-throws fallback — over INJECTED
  * `resolveDir`/`classify` spies, so no real disk is touched. Also covers
  * `FIRST_RUN_HINT`'s "never leak a path" boundary, mirroring
  * `update-check.test.ts`'s `spyDeps` pattern and `store-presence.test.ts`'s
@@ -78,8 +79,16 @@ describe("isFirstRunBoot — Ephemeral short-circuit (hardest invariant)", () =>
   });
 });
 
-describe("isFirstRunBoot — Persistent, the 3×3 presence matrix", () => {
-  const modes: readonly StorePresence[] = ["passphrase-mode", "keychain-mode", "first-run"];
+describe("isFirstRunBoot — Persistent, the 4×4 presence matrix", () => {
+  // `orphaned-descriptor` (DW-84) is included deliberately: a descriptor on disk
+  // means the machine IS configured — broken, but configured — so the first-run
+  // hint must stay OFF for it. Only `first-run`/`first-run` is a virgin machine.
+  const modes: readonly StorePresence[] = [
+    "passphrase-mode",
+    "orphaned-descriptor",
+    "keychain-mode",
+    "first-run",
+  ];
 
   // [credential, providerKeys, expected]
   const cases: Array<[StorePresence, StorePresence, boolean]> = [];
@@ -144,10 +153,14 @@ describe("isFirstRunBoot — defaults", () => {
   // the real wiring. The discriminating assertion is the `false` one below: `false`
   // is reachable ONLY by `resolveAppDir` landing on the real directory AND
   // `classifyStorePresence` finding a real file in it.
-  test("real resolveAppDir + real classifyStorePresence: a descriptor on disk → configured, false", () => {
+  test("real resolveAppDir + real classifyStorePresence: a lone descriptor (an `orphaned-descriptor` store, DW-84) → configured, false", () => {
     const root = mkdtempSync(join(tmpdir(), "qs-11-7-"));
     try {
       // XDG layout: `$XDG_DATA_HOME/quick-studio` (linux arm of `resolveAppDir`).
+      // Only the meta file is written and no `.enc`, so since DW-84 this exercises
+      // `orphaned-descriptor` specifically, not `passphrase-mode` — which is the
+      // point: a descriptor with no ciphertext is configured-and-broken, and the
+      // first-run hint must stay OFF for it just the same.
       const appDir = join(root, APP_DIR_NAME);
       mkdirSync(appDir, { recursive: true });
       writeFileSync(join(appDir, STORE_META_FILE_NAME), "{}");

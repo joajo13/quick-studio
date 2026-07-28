@@ -241,5 +241,69 @@ describe("provider-key-store — passphrase fallback (keychain unavailable)", ()
       passphraseProvider: providePass("pw"),
     });
     expect(open2.outcome).toBe("corrupt");
+    // Pin the exact detail string on THIS side too. The credential store now carries
+    // a byte-identical literal for its twin guard (`credential-store.ts`), and the
+    // spec makes that sameness a contract — so it has to be asserted on both sides
+    // or one of them can drift silently.
+    if (open2.outcome !== "corrupt") throw new Error("unreachable");
+    expect(open2.detail).toBe("descriptor present but store file is missing");
+  });
+
+  test("descriptor present, .enc removed, provider DECLINES → passphrase-declined, NOT corrupt (guard sits AFTER the provider call, DW-86)", () => {
+    // The twin of the credential store's ordering test. DW-86's short-circuit depends
+    // on this: the Story 11.6 pre-flight's decline-probe asks the REAL open path
+    // whether a passphrase is needed using an always-declining provider, and if the
+    // missing-`.enc` guard ran BEFORE that call the probe would answer `corrupt`,
+    // the pre-flight would classify it as "a different problem" and skip, and the
+    // whole orphaned-descriptor path would be unreachable. Nothing asserted this
+    // ordering on the provider-key side.
+    const dir = makeTempDir();
+    const open1 = openProviderKeyStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: noKeychain,
+      passphraseProvider: providePass("pw"),
+    });
+    if (open1.outcome !== "opened") throw new Error("expected opened");
+    rmSync(join(dir, PROVIDER_STORE_FILE_NAME), { force: true });
+    expect(existsSync(join(dir, PROVIDER_STORE_META_FILE_NAME))).toBe(true);
+
+    const probe = openProviderKeyStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: noKeychain,
+      passphraseProvider: declinePass,
+    });
+    expect(probe.outcome).toBe("passphrase-declined");
+    // Nothing was written by the declined open — the `.enc` stays gone.
+    expect(existsSync(join(dir, PROVIDER_STORE_FILE_NAME))).toBe(false);
+  });
+
+  test("descriptor present, .enc removed, EMPTY passphrase → passphrase-invalid, not corrupt (guard sits AFTER the derivation)", () => {
+    // Twin of the credential store's test of the same name. The guard's position is
+    // held by two SEPARATE constraints: after the provider call (the test above) and
+    // after `derivePassphraseKey`. Only this test pins the second one — an empty or
+    // whitespace passphrase is the caller's error and must keep winning over
+    // `corrupt`, which is a statement about the disk. Both stores must agree, since
+    // `first-run-setup.ts` maps the two outcomes differently.
+    const dir = makeTempDir();
+    const open1 = openProviderKeyStore({
+      mode: "persistent",
+      dir,
+      loadStoreKey: noKeychain,
+      passphraseProvider: providePass("pw"),
+    });
+    if (open1.outcome !== "opened") throw new Error("expected opened");
+    rmSync(join(dir, PROVIDER_STORE_FILE_NAME), { force: true });
+
+    for (const empty of ["", "   "]) {
+      const open = openProviderKeyStore({
+        mode: "persistent",
+        dir,
+        loadStoreKey: noKeychain,
+        passphraseProvider: providePass(empty),
+      });
+      expect(open.outcome).toBe("passphrase-invalid");
+    }
   });
 });

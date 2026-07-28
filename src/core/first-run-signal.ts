@@ -50,9 +50,14 @@ const DEFAULT_FIRST_RUN_SIGNAL_DEPS: FirstRunSignalDeps = {
  * invoked — the probe must never consult the app-data directory for a session
  * that promises to never touch disk at all (Epic 2's Ephemeral invariant, which
  * this story does not get to relax). A store that exists but holds zero saved
- * connections is `"passphrase-mode"`/`"keychain-mode"` on disk, so it correctly
- * classifies as configured here — that emptiness is the UI's business, not the
- * CLI's (I/O matrix: "Store present, zero connections").
+ * connections is `"passphrase-mode"`, `"keychain-mode"`, or — since DW-84 —
+ * `"orphaned-descriptor"` on disk, and every one of those correctly classifies as
+ * configured here: only `"first-run"` means untouched. That is deliberate for the
+ * orphan too, a machine with a descriptor but no `.enc` is configured-and-broken,
+ * not virgin, and the first-run hint would be actively wrong there (the repair
+ * advice comes from `first-run-setup.ts`, which owns that state). Emptiness itself
+ * is the UI's business, not the CLI's (I/O matrix: "Store present, zero
+ * connections").
  *
  * Never throws: any error from either dep (an unreadable app-data directory, a
  * platform quirk) is caught and treated as first-run — the safer default is a

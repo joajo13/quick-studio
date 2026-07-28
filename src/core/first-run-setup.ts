@@ -29,7 +29,15 @@
  *     never blocks boot — one stderr pointer at `QS_PASSPHRASE_FD`, then `skip`.
  *  5. {@link classifyStorePresence} + {@link anyDescriptorPresent} decide create vs
  *     unlock — a plain `existsSync` fact, not a re-implementation of branch logic.
- *  6. Run the corresponding loop: bounded-retry unlock, or confirmed create.
+ *  6. Run the corresponding loop: bounded-retry unlock, or confirmed create. On the
+ *     unlock side the SAME presence facts also pick WHICH store to verify against
+ *     ({@link unlockTarget}): a descriptor whose `.enc` is missing
+ *     (`orphaned-descriptor`) can never be opened by any passphrase, so the loop
+ *     targets the other store if that one is openable, and when NEITHER is it
+ *     declines to prompt at all — zero prompts, one notice line naming each orphaned
+ *     store plus the shared remedy block, `skip` (DW-86). Prompting three times
+ *     against a store no answer can open, then reporting "wrong passphrase", is the
+ *     bug this avoids.
  *
  * `bin/` is the ONLY caller entitled to act on `{outcome:"aborted"}` (Ctrl-C) —
  * this module never calls `process.exit`.
@@ -38,6 +46,8 @@
 import { resolveAppDir } from "./app-dir.ts";
 import {
   openCredentialStore,
+  STORE_FILE_NAME,
+  STORE_META_FILE_NAME,
   type CredentialStoreDeps,
   type OpenResult as CredentialOpenResult,
 } from "./credential-store.ts";
@@ -57,6 +67,8 @@ import {
 } from "./passphrase-provider.ts";
 import {
   openProviderKeyStore,
+  PROVIDER_STORE_FILE_NAME,
+  PROVIDER_STORE_META_FILE_NAME,
   type OpenResult as ProviderOpenResult,
   type ProviderKeyStoreDeps,
 } from "./provider-key-store.ts";
@@ -194,21 +206,195 @@ function classifyUnlockAttempt(outcome: UnlockAttemptOutcome): "opened" | "retry
   return "skip";
 }
 
+/** Which store the unlock loop verifies against, or `none` when none can be opened. */
+type UnlockTarget = "credential" | "provider-keys" | "none";
+
+/**
+ * Pick the store to verify the typed passphrase against. Only a `passphrase-mode`
+ * store is a legitimate target: it is the one layout (descriptor AND `.enc`) where
+ * the right passphrase opens and a wrong one fails GCM, which is exactly what makes
+ * a retry meaningful. This generalizes the previous credential-first boolean rather
+ * than replacing it — with no orphaned stores, the first two arms reproduce the old
+ * `targetCredential` behavior exactly.
+ *
+ * `none` is reachable ONLY when every descriptor on disk is orphaned from its `.enc`
+ * (DW-86): `anyDescriptorPresent` gated this call, so at least one descriptor exists,
+ * and if none of them is openable there is nothing a prompt could ever unlock. Note
+ * this is decided BEFORE any key derivation, from `existsSync` alone — which is why
+ * `classifyUnlockAttempt`'s `corrupt` → retry mapping stays untouched: a wrong
+ * passphrase and a tampered `.enc` really are indistinguishable AFTER derivation, so
+ * the fix is to not enter the loop, not to narrow that mapping.
+ *
+ * Both arms are exhaustive `switch`es (same discipline as {@link UnlockAttemptOutcome}
+ * above) so a FIFTH {@link StorePresence} member is a compile error here rather than
+ * a silent fall-through. The `default` fallback deliberately TARGETS the store rather
+ * than returning `none`: an unknown presence state must not silently become a
+ * no-prompt skip, because that is the one outcome where the user is never asked AND
+ * never told why. Prompting against a store that turns out not to open is fully
+ * recoverable — it costs at most {@link MAX_UNLOCK_ATTEMPTS} prompts, writes nothing,
+ * and ends in the same `skip` — whereas an unexplained silent skip is not. As with
+ * `store-presence.ts`'s `isDescriptorPresent`, when that compile error fires the fix
+ * is to classify the new state explicitly, not to lean on this fallback.
+ */
+function unlockTarget(p: StorePresenceResult): UnlockTarget {
+  switch (p.credential) {
+    case "passphrase-mode":
+      return "credential";
+    case "orphaned-descriptor":
+    case "keychain-mode":
+    case "first-run":
+      // Not openable (or nothing to unlock) — fall through to the provider-key store.
+      break;
+    default: {
+      const _never: never = p.credential;
+      void _never;
+      return "credential";
+    }
+  }
+  switch (p.providerKeys) {
+    case "passphrase-mode":
+      return "provider-keys";
+    case "orphaned-descriptor":
+    case "keychain-mode":
+    case "first-run":
+      return "none";
+    default: {
+      const _never: never = p.providerKeys;
+      void _never;
+      return "provider-keys";
+    }
+  }
+}
+
+/**
+ * One line per store whose descriptor lost its `.enc` — the WHAT, named per store.
+ * Naming the specific store matters because a half-broken app dir stays recoverable:
+ * the other store may still unlock normally, and the user needs to know which half
+ * is broken. Deliberately NON-destructive: this module reports the state, it never
+ * repairs, deletes, or re-creates anything (see the spec's Never list).
+ *
+ * Split from {@link ORPHANED_DESCRIPTOR_REMEDY} so the remedy — which is identical
+ * for both stores — is stated ONCE no matter how many stores are orphaned, instead
+ * of the same ~200-character sentence being pasted into every line.
+ *
+ * Each notice names the two FILES by name (from the stores' own exported constants,
+ * so a rename cannot desynchronise the advice from the disk). Without them the
+ * remedy below is unactionable: "restore the missing file" does not tell anyone
+ * WHICH file to restore, and the two stores' files sit side by side in one
+ * directory. Bare basenames only — no directory, no absolute path — which keeps the
+ * codebase's "never leak a path" boundary (`first-run-signal.ts`'s `FIRST_RUN_HINT`)
+ * intact: a basename identifies the file without disclosing the user's home
+ * directory or username into stderr that may be pasted into a bug report.
+ */
+const ORPHANED_DESCRIPTOR_NOTICE: Readonly<Record<"credential" | "providerKeys", string>> = {
+  credential:
+    `quick-studio: the credential store has a passphrase descriptor (${STORE_META_FILE_NAME}) but its encrypted file (${STORE_FILE_NAME}) is missing — no passphrase can unlock it.\n`,
+  providerKeys:
+    `quick-studio: the provider-key store has a passphrase descriptor (${PROVIDER_STORE_META_FILE_NAME}) but its encrypted file (${PROVIDER_STORE_FILE_NAME}) is missing — no passphrase can unlock it.\n`,
+};
+
+/**
+ * The WHAT-TO-DO block, emitted exactly once after the per-store notices and only
+ * when at least one store is actually orphaned.
+ *
+ * Ordering is load-bearing, not stylistic. RESTORE is stated first because it is the
+ * only remedy that preserves data, and the reason it works is worth spelling out: the
+ * descriptor still sitting on disk holds the salt the missing `.enc` was encrypted
+ * under, so a restored file is decryptable by the passphrase the user already knows.
+ * DELETION is stated second, explicitly flagged IRREVERSIBLE, because it is a
+ * one-way door: removing the descriptor sends that store down {@link runCreatePath},
+ * which mints a FRESH salt — after which an `.enc` restored from a backup can never
+ * be decrypted by anything, including the correct original passphrase. The previous
+ * wording offered the two as co-equal alternatives on one line, which is how a user
+ * with a perfectly restorable backup ends up destroying it.
+ */
+const ORPHANED_DESCRIPTOR_REMEDY =
+  "quick-studio: restore each missing file named above from a backup if you have one, next to its descriptor — that descriptor is what decrypts it.\n" +
+  "quick-studio: deleting a descriptor starts that store over, but is IRREVERSIBLE: a new store mints a new salt, so an .enc restored afterwards can never be decrypted.\n";
+
+/**
+ * Emitted only when BOTH stores are orphaned, immediately after the remedy.
+ *
+ * Without it the remedy is a trap on exactly this layout. Deleting ONE descriptor
+ * leaves the OTHER orphan on disk, {@link anyDescriptorPresent} stays true, and the
+ * very next boot prints the identical notice/remedy/blocked block — from which the
+ * only available reading is "the deletion did not work", and the natural next move
+ * is to delete more, faster, without a backup. With only one store orphaned that
+ * same deletion DOES unblock the next boot (the other store is `first-run` or
+ * `keychain-mode`, so nothing else holds the create path shut), which is why this
+ * line is conditional rather than folded into the remedy.
+ */
+const ORPHANED_DESCRIPTOR_BOTH =
+  "quick-studio: both stores are affected — removing only one descriptor changes nothing here, the next boot is blocked by the other.\n";
+
+/**
+ * Why nothing is being created either, emitted last and ONLY when
+ * {@link unlockTarget} is `none` — i.e. when there is no openable store left at all.
+ *
+ * Conditional because it is simply false in the half-broken-but-winnable case: with
+ * one store `passphrase-mode` and the other orphaned, the loop DOES prompt and that
+ * store DOES unlock, so telling the user "nothing is created here either" would
+ * contradict the prompt appearing on the very next line. It is only when every
+ * present descriptor is orphaned that the pre-flight declines to prompt at all, and
+ * that silence is what needs explaining: a fresh passphrase would derive a different
+ * key from a different salt and orphan whatever the existing descriptor still
+ * protects, so refusing to create is the data-safe choice, not a failure.
+ */
+const ORPHANED_DESCRIPTOR_BLOCKED =
+  "quick-studio: until then nothing is created here either — a fresh passphrase would orphan whatever the existing descriptor still protects.\n";
+
 /**
  * Unlock an EXISTING store: up to {@link MAX_UNLOCK_ATTEMPTS} prompts, verified by
- * re-opening the store that actually HOLDS the descriptor (credential store when
- * its descriptor exists, else the provider-key store — see `store-presence.ts`'s
- * "Two descriptors, one passphrase" rationale) with a {@link staticPassphraseProvider}
- * wrapping the captured answer. The two stores are handled in separate branches
- * (not a shared `.store.close()` call) because only the credential store holds the
- * DW-14 writer lock — `ProviderKeyStore` has no `close()` at all. Nothing is ever
- * written by a failed attempt.
+ * re-opening the store that actually HOLDS an OPENABLE descriptor (credential store
+ * when it is `passphrase-mode`, else the provider-key store — see
+ * `store-presence.ts`'s "Two descriptors, one passphrase" rationale) with a
+ * {@link staticPassphraseProvider} wrapping the captured answer. The two stores are
+ * handled in separate branches (not a shared `.store.close()` call) because only the
+ * credential store holds the DW-14 writer lock — `ProviderKeyStore` has no `close()`
+ * at all. Nothing is ever written by a failed attempt.
+ *
+ * Before the first prompt, every orphaned descriptor gets one notice line naming it,
+ * followed by the shared remedy block (DW-86) — explain, THEN ask. If
+ * {@link unlockTarget} finds nothing openable the loop is skipped entirely: zero
+ * prompts, nothing written, `{outcome:"skip"}` — never `aborted`, never a throw.
+ *
+ * What that `skip` guarantees is narrow and worth stating exactly: this pre-flight
+ * writes nothing and declines to blame the passphrase for a file that is simply
+ * missing. It does NOT promise any particular later verdict from `startCore` — with
+ * an orphaned provider-key store and a first-run credential store, for instance, the
+ * credential store reports `passphrase-declined` and the orphaned store's own
+ * `corrupt` may never be triggered at all.
  */
 async function runUnlockLoop(
   d: FirstRunSetupDeps,
   presence: StorePresenceResult,
 ): Promise<FirstRunSetupResult> {
-  const targetCredential = presence.credential === "passphrase-mode";
+  // Explain BEFORE asking: notices (credential first, then providerKeys), then the
+  // shared remedy once, then — only when BOTH are orphaned — that one deletion will
+  // not be enough, then — only when nothing can be unlocked — why we also refuse to
+  // create. See the constants above for why each line is conditional the way it is.
+  const credentialOrphaned = presence.credential === "orphaned-descriptor";
+  const providerKeysOrphaned = presence.providerKeys === "orphaned-descriptor";
+  if (credentialOrphaned) {
+    d.stderr(ORPHANED_DESCRIPTOR_NOTICE.credential);
+  }
+  if (providerKeysOrphaned) {
+    d.stderr(ORPHANED_DESCRIPTOR_NOTICE.providerKeys);
+  }
+  if (credentialOrphaned || providerKeysOrphaned) {
+    d.stderr(ORPHANED_DESCRIPTOR_REMEDY);
+  }
+  if (credentialOrphaned && providerKeysOrphaned) {
+    d.stderr(ORPHANED_DESCRIPTOR_BOTH);
+  }
+
+  const target = unlockTarget(presence);
+  if (target === "none") {
+    // Every present descriptor is orphaned — the notices above replace the prompt,
+    // and this last line explains why no create path runs either.
+    d.stderr(ORPHANED_DESCRIPTOR_BLOCKED);
+    return { outcome: "skip" };
+  }
   const label = "quick-studio passphrase to unlock the store: ";
 
   for (let attempt = 0; attempt < MAX_UNLOCK_ATTEMPTS; attempt++) {
@@ -223,7 +409,7 @@ async function runUnlockLoop(
     // previous `decision === "opened" && verify.outcome === "opened"` double-check
     // in the credential branch was redundant (the provider-key branch never had
     // it). `classifyUnlockAttempt` is still consulted for the `retry`/`skip` split.
-    if (targetCredential) {
+    if (target === "credential") {
       const verify = d.openCredential({ mode: "persistent", ...dirOverride(d), passphraseProvider: provider });
       if (verify.outcome === "opened") {
         // Release the DW-14 writer lock this verify-open just acquired — the
